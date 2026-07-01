@@ -1,6 +1,8 @@
 
 
 def create_bear_researcher(llm):
+    from tradingagents.agents.utils.agent_utils import get_bear_framework, instrument_type_from_state
+
     def bear_node(state) -> dict:
         investment_debate_state = state["investment_debate_state"]
         history = investment_debate_state.get("history", "")
@@ -15,16 +17,11 @@ def create_bear_researcher(llm):
         hot_money_report = state.get("hot_money_report", "")
         lockup_report = state.get("lockup_report", "")
         data_quality_summary = state.get("data_quality_summary", "")
+        instrument_type = instrument_type_from_state(state)
 
-        prompt = f"""You are a Bear Analyst making the case against investing in this A-share (China mainland) stock. Your goal is to present a well-reasoned argument emphasizing risks, challenges, and negative indicators unique to the Chinese market. Leverage the provided research and data to highlight potential downsides and counter bullish arguments effectively.
+        prompt = f"""You are a Bear Analyst making the case against investing in this A-share (China mainland) instrument. Your goal is to present a well-reasoned argument emphasizing risks, challenges, and negative indicators. Leverage the provided research and data to highlight potential downsides and counter bullish arguments effectively.
 
-A-Share Bear Framework — prioritize these China-specific risk factors:
-- Policy Headwinds: Sudden regulatory crackdowns (e.g. industry rectification, antitrust), CSRC window guidance (窗口指导), sector-wide trading restrictions, or political risk signals
-- Lockup & Insider Selling: Upcoming lockup expiry dates with large overhang, controlling shareholders in pre-disclosure reduction windows, equity pledge liquidation risk
-- Hot Money Withdrawal (游资撤退): Volume divergence after limit-ups (放量滞涨), declining limit-up board count (连板断裂), sector rotation moving away from this theme
-- Valuation Bubble: PE far above 30x A-stock growth anchor with EPS unable to digest within 3 years, PEG > 2 indicating overpriced growth, retail-driven speculative premium
-- T+1 Trap: After a sharp rally, buyers today cannot exit until tomorrow — if sentiment reverses overnight or a gap-down opens, losses are locked in
-- Northbound Retreat: Net outflow from Stock Connect signals foreign institutions reducing exposure
+{get_bear_framework(instrument_type)}
 
 General bear points:
 - Risks and Challenges: Market saturation, financial instability, or macroeconomic threats

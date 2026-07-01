@@ -13,7 +13,10 @@ from __future__ import annotations
 from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
+    get_balanced_decision_guidance,
+    get_debate_notes,
     get_language_instruction,
+    instrument_type_from_state,
 )
 from tradingagents.agents.utils.structured import (
     bind_structured,
@@ -25,7 +28,10 @@ def create_portfolio_manager(llm):
     structured_llm = bind_structured(llm, PortfolioDecision, "Portfolio Manager")
 
     def portfolio_manager_node(state) -> dict:
-        instrument_context = build_instrument_context(state["company_of_interest"])
+        instrument_type = instrument_type_from_state(state)
+        instrument_context = build_instrument_context(
+            state["company_of_interest"], instrument_type
+        )
 
         history = state["risk_debate_state"]["history"]
         risk_debate_state = state["risk_debate_state"]
@@ -42,6 +48,10 @@ def create_portfolio_manager(llm):
         prompt = f"""As the Portfolio Manager, synthesize the risk analysts' debate and deliver the final trading decision.
 
 {instrument_context}
+
+Note: {get_debate_notes(instrument_type)}
+
+{get_balanced_decision_guidance()}
 
 ---
 

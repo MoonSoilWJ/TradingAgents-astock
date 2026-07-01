@@ -1,6 +1,9 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
+    get_etf_hot_money_addon,
+    get_language_instruction,
+    instrument_type_from_state,
     get_concept_blocks,
     get_dragon_tiger_board,
     get_fund_flow,
@@ -20,7 +23,10 @@ def create_hot_money_tracker(llm):
 
     def hot_money_tracker_node(state):
         current_date = state["trade_date"]
-        instrument_context = build_instrument_context(state["company_of_interest"])
+        instrument_type = instrument_type_from_state(state)
+        instrument_context = build_instrument_context(
+            state["company_of_interest"], instrument_type
+        )
 
         tools = [
             get_stock_data,
@@ -67,6 +73,7 @@ def create_hot_money_tracker(llm):
             "\n4. 所属概念板块及当日板块涨幅"
             "\n5. 当日是否上榜热门股及题材归因"
             "\n6. 资金面总体判断"
+            + (get_etf_hot_money_addon() if instrument_type == "etf" else "")
             + get_language_instruction()
         )
 

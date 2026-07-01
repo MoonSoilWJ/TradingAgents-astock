@@ -74,6 +74,24 @@ class TestParseRating:
     def test_chinese_hold(self):
         assert parse_rating("综合判断，评级：持有") == "Hold"
 
+    def test_final_underweight_beats_body_sell_mentions(self):
+        text = (
+            "综合来看，不应在此刻进攻。\n\n"
+            "对浮动盈利部分可执行卖出锁定利润。\n\n"
+            "最终评级：Underweight（减配）"
+        )
+        assert parse_rating(text) == "Underweight"
+
+    def test_underweight_label_with_chinese_annotation(self):
+        assert parse_rating("最终评级：Underweight（减配）") == "Underweight"
+
+    def test_insider_reduction_in_prose_not_a_rating(self):
+        text = "内部人减持计划公布，技术面承压，暂无明确评级。"
+        assert parse_rating(text, default="Hold") == "Hold"
+
+    def test_research_rating_line(self):
+        assert parse_rating("**研究评级：Underweight (减配)**") == "Underweight"
+
 
 # ---------------------------------------------------------------------------
 # SignalProcessor: thin adapter over the heuristic

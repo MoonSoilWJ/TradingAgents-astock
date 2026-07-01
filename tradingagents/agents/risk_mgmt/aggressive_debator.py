@@ -1,6 +1,12 @@
 
 
 def create_aggressive_debator(llm):
+    from tradingagents.agents.utils.agent_utils import (
+        get_balanced_decision_guidance,
+        get_debate_notes,
+        instrument_type_from_state,
+    )
+
     def aggressive_node(state) -> dict:
         risk_debate_state = state["risk_debate_state"]
         history = risk_debate_state.get("history", "")
@@ -18,16 +24,13 @@ def create_aggressive_debator(llm):
         lockup_report = state.get("lockup_report", "")
 
         trader_decision = state["trader_investment_plan"]
+        instrument_type = instrument_type_from_state(state)
 
-        prompt = f"""As the Aggressive Risk Analyst evaluating an A-share (China mainland) stock, your role is to champion high-reward opportunities and bold strategies. Focus on the potential upside, growth potential, and momentum—even when these come with elevated risk. Counter the conservative and neutral analysts with data-driven rebuttals.
+        prompt = f"""As the Aggressive Risk Analyst evaluating an A-share (China mainland) instrument, your role is to champion high-reward opportunities and bold strategies. Focus on the potential upside, growth potential, and momentum—even when these come with elevated risk. Counter the conservative and neutral analysts with data-driven rebuttals.
 
-A-Share Aggressive Framework — leverage these China-specific upside arguments:
-- Limit-Up Momentum (涨停板效应): In A-shares, consecutive limit-ups create powerful momentum; T+1 actually helps by preventing same-day profit-taking, allowing multi-day runs
-- Policy-Driven Sectors: When Beijing backs a sector (e.g. AI, chips, new energy), the policy put is real — government support creates a floor that doesn't exist in Western markets
-- Hot Money Conviction: When top hot money seats (游资席位) pile in with strong reason tags, the short-term upside can be explosive; missing these moves is also a risk
-- Northbound Validation: If foreign institutions via Stock Connect are net buying alongside domestic momentum, this dual confirmation is a strong signal
-- PE Expansion Phase: In A-share bull cycles, PEs routinely expand to 50-100x for thematic leaders; applying US-market valuation discipline too early means missing the main move
-- Retail Sentiment Tailwind: A-shares are 80% retail; when sentiment turns positive, the herd effect amplifies gains far beyond what fundamentals alone would suggest
+Note: {get_debate_notes(instrument_type)}
+
+{get_balanced_decision_guidance()}
 
 Here is the trader's decision:
 

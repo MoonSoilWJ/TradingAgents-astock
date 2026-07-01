@@ -20,7 +20,10 @@ ANALYST_NAMES = {
     "lockup": "解禁监控师",
 }
 
+from tradingagents.dataflows.instrument import ETF_SKIPPED_ANALYSTS
+
 MIN_REPORT_LENGTH = 200
+ETF_SKIP_MARKER = "ETF 分析模式"
 
 FAILURE_MARKERS = [
     "无法获取",
@@ -126,6 +129,7 @@ def create_quality_gate(llm):
     def quality_gate_node(state) -> dict:
         trade_date = state["trade_date"]
         ticker = state["company_of_interest"]
+        instrument_type = state.get("instrument_type", "stock")
 
         reports = {}
         for analyst_type, field in REPORT_FIELDS.items():
@@ -133,7 +137,14 @@ def create_quality_gate(llm):
 
         hard_results = {}
         for analyst_type, field in REPORT_FIELDS.items():
-            grade, detail = _hard_check_report(analyst_type, reports[field])
+            if instrument_type == "etf" and analyst_type in ETF_SKIPPED_ANALYSTS:
+                hard_results[analyst_type] = ("A", "ETF 模式跳过（不适用）")
+                continue
+            content = reports[field]
+            if ETF_SKIP_MARKER in content:
+                hard_results[analyst_type] = ("A", "ETF 模式跳过（不适用）")
+                continue
+            grade, detail = _hard_check_report(analyst_type, content)
             hard_results[analyst_type] = (grade, detail)
 
         hard_summary_lines = []

@@ -1,12 +1,21 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from tradingagents.agents.utils.agent_utils import build_instrument_context, get_language_instruction, get_news
+from tradingagents.agents.utils.agent_utils import (
+    build_instrument_context,
+    get_etf_sentiment_addon,
+    get_language_instruction,
+    instrument_type_from_state,
+    get_news,
+)
 from tradingagents.dataflows.config import get_config
 
 
 def create_social_media_analyst(llm):
     def social_media_analyst_node(state):
         current_date = state["trade_date"]
-        instrument_context = build_instrument_context(state["company_of_interest"])
+        instrument_type = instrument_type_from_state(state)
+        instrument_context = build_instrument_context(
+            state["company_of_interest"], instrument_type
+        )
 
         tools = [
             get_news,
@@ -18,9 +27,11 @@ def create_social_media_analyst(llm):
             "\n- **散户情绪权重高**：A 股散户占比超过 60%，市场情绪对股价的短期影响远大于成熟市场。恐慌和贪婪的情绪波动更剧烈。"
             "\n- **舆论阵地**：东方财富股吧、雪球、同花顺社区是 A 股投资者最活跃的讨论平台。分析新闻时注意推断这些平台可能的情绪反应。"
             "\n- **情绪指标**：关注以下情绪信号 - 连续涨停后的追涨情绪、业绩暴雷后的恐慌抛售、机构调研后的预期变化、热门概念炒作的跟风程度。"
-            "\n- **反向指标**：当市场情绪一致性过高（极度乐观或极度悲观）时，往往是反转信号。散户一致看多可能是阶段顶部。"
+            "\n- **反向指标（谨慎使用）**：仅当舆情呈现**纯概念炒作、无基本面支撑、极端散户追高**时，才将「一致看多」视为潜在反转信号。"
+            " 若利好来自**行业景气、政策扶持、龙头业绩**等基本面驱动，一致乐观可以是趋势延续信号，**不要**自动当作卖出理由。"
             "\n- **时间维度**：区分短期情绪波动（1-3 天，由单一事件驱动）和中期情绪趋势（1-4 周，由基本面变化驱动）。"
-            "\n\n请使用 `get_news(query, start_date, end_date)` 工具获取公司相关新闻和市场讨论。从新闻内容中推断市场情绪方向、强度和可能的转折点。"
+            + (get_etf_sentiment_addon() if instrument_type == "etf" else "")
+            + "\n\n请使用 `get_news(query, start_date, end_date)` 工具获取公司相关新闻和市场讨论。从新闻内容中推断市场情绪方向、强度和可能的转折点。"
             "\n\n撰写详细的市场情绪分析报告，包含情绪评分（极度悲观/悲观/中性/乐观/极度乐观）和趋势判断。报告末尾附 Markdown 表格汇总情绪信号和结论。"
             "\n\n📋 必采清单 — 以下数据点必须出现在报告中，无法获取时标注 [数据缺失: xxx]："
             "\n1. 新闻检索条数和时间范围"

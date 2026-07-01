@@ -8,6 +8,12 @@ from tradingagents.agents.utils.agent_states import (
 )
 
 
+from tradingagents.dataflows.instrument import (
+    classify_astock_instrument,
+    etf_skip_report,
+)
+
+
 class Propagator:
     """Handles state initialization and propagation through the graph."""
 
@@ -19,10 +25,18 @@ class Propagator:
         self, company_name: str, trade_date: str, past_context: str = ""
     ) -> Dict[str, Any]:
         """Create the initial state for the agent graph."""
+        instrument_type = classify_astock_instrument(company_name)
+        fundamentals_report = ""
+        lockup_report = ""
+        if instrument_type == "etf":
+            fundamentals_report = etf_skip_report("fundamentals")
+            lockup_report = etf_skip_report("lockup")
+
         return {
             "messages": [("human", company_name)],
             "company_of_interest": company_name,
             "trade_date": str(trade_date),
+            "instrument_type": instrument_type,
             "past_context": past_context,
             "investment_debate_state": InvestDebateState(
                 {
@@ -49,12 +63,12 @@ class Propagator:
                 }
             ),
             "market_report": "",
-            "fundamentals_report": "",
+            "fundamentals_report": fundamentals_report,
             "sentiment_report": "",
             "news_report": "",
             "policy_report": "",
             "hot_money_report": "",
-            "lockup_report": "",
+            "lockup_report": lockup_report,
         }
 
     def get_graph_args(self, callbacks: Optional[List] = None) -> Dict[str, Any]:

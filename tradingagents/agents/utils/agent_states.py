@@ -60,6 +60,8 @@ class AgentState(MessagesState):
     hot_money_report: Annotated[str, "Report from the Hot Money Tracker (A-stock specific)"]
     lockup_report: Annotated[str, "Report from the Lockup/Reduction Watcher (A-stock specific)"]
 
+    instrument_type: Annotated[str, "stock or etf — drives analyst pipeline and decision framework"]
+
     # data quality gate
     data_quality_summary: Annotated[str, "Quality gate assessment of all analyst reports (hard checks + LLM review)"]
 

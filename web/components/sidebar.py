@@ -230,7 +230,7 @@ def render_sidebar() -> None:
         "股票代码",
         placeholder="例: 300750 或 宁德时代",
         key="input_ticker",
-        help="输入6位A股代码、中文名称，或指数/ETF简称（如 科创50→588000）",
+        help="输入6位A股代码、中文名称，或指数/ETF简称（如 科创50→588000、科创半导体→589020）",
     )
 
     trade_date = st.date_input(

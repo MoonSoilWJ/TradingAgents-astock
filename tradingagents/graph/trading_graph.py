@@ -19,6 +19,7 @@ from tradingagents.agents import *
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.dataflows.utils import safe_ticker_component
+from tradingagents.dataflows.instrument import analysts_for_ticker
 from tradingagents.agents.utils.agent_states import (
     AgentState,
     InvestDebateState,
@@ -134,9 +135,24 @@ class TradingAgentsGraph:
         self.log_states_dict = {}  # date to full state dict
 
         # Set up the graph: keep the workflow for recompilation with a checkpointer.
+        self._active_analysts: list[str] = list(selected_analysts)
         self.workflow = self.graph_setup.setup_graph(selected_analysts)
         self.graph = self.workflow.compile()
         self._checkpointer_ctx = None
+
+    def _rebuild_graph_for_ticker(self, ticker: str) -> None:
+        """Recompile the analyst pipeline when instrument type requires a different set."""
+        analysts = analysts_for_ticker(ticker)
+        if analysts == self._active_analysts:
+            return
+        self._active_analysts = analysts
+        self.workflow = self.graph_setup.setup_graph(analysts)
+        self.graph = self.workflow.compile()
+        logger.info(
+            "Instrument %s → analyst pipeline: %s",
+            ticker,
+            ", ".join(analysts),
+        )
 
     def _get_provider_kwargs(self) -> Dict[str, Any]:
         """Get provider-specific kwargs for LLM client creation."""
@@ -320,6 +336,7 @@ class TradingAgentsGraph:
         existing thread instead of replaying completed nodes.
         """
         self.ticker = company_name
+        self._rebuild_graph_for_ticker(company_name)
 
         # Resolve any pending memory-log entries for this ticker before the pipeline runs.
         self._resolve_pending_entries(company_name)
@@ -422,6 +439,7 @@ class TradingAgentsGraph:
         self.log_states_dict[str(trade_date)] = {
             "company_of_interest": final_state["company_of_interest"],
             "trade_date": final_state["trade_date"],
+            "instrument_type": final_state.get("instrument_type", "stock"),
             "market_report": final_state["market_report"],
             "sentiment_report": final_state["sentiment_report"],
             "news_report": final_state["news_report"],

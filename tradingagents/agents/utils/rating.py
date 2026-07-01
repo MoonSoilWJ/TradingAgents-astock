@@ -22,18 +22,31 @@ RATINGS_5_TIER: Tuple[str, ...] = (
 
 _RATING_SET = {r.lower() for r in RATINGS_5_TIER}
 
-# Matches "Rating: X" / "rating - X" / "Rating: **X**" — tolerates markdown
-# bold wrappers and either a colon or hyphen separator.
-_RATING_LABEL_RE = re.compile(r"rating.*?[:\-][\s*]*(\w+)", re.IGNORECASE)
-
-# Chinese labels, e.g. 评级：卖出 / 推荐：买入 / Rating: 卖出
-_RATING_CN_LABEL_RE = re.compile(
-    r"(?:rating|评级|推荐|recommendation)\s*[：:\-]\s*[「""\*]*([^*」""\|\n]+)",
-    re.IGNORECASE,
-)
-
 # e.g. 采用"卖出"评级 / 「卖出」评级
 _CN_QUOTED_RATING_RE = re.compile(r'[「""\']([^"」\'""]+)[""」\']\s*评级')
+
+# Explicit rating lines, highest priority first. Later lines win on equal priority.
+_EXPLICIT_LINE_PATTERNS: list[tuple[int, re.Pattern[str]]] = [
+    (100, re.compile(r"\*\*Rating\*\*\s*[：:\-]\s*\**(\w+)", re.IGNORECASE)),
+    (95, re.compile(r"\bRating\s*[：:\-]\s*\**(\w+)", re.IGNORECASE)),
+    (90, re.compile(r"最终(?:交易)?(?:决策)?评级\s*[：:\-]\s*\**([^*\n|]+)", re.IGNORECASE)),
+    (88, re.compile(r"(?:研究|本交易提案)评级\s*[：:\-]\s*\**([^*\n|]+)", re.IGNORECASE)),
+    (
+        80,
+        re.compile(
+            r"(?:rating|评级|推荐|recommendation)\s*[：:\-]\s*[「""\*]*([^*」""\|\n]+)",
+            re.IGNORECASE,
+        ),
+    ),
+]
+
+# Only scan these lines for keyword fallback — avoids matching prose like
+# "内部人减持" or operational "执行卖出".
+_RATING_CONTEXT_RE = re.compile(
+    r"评级|Rating|Recommendation|交易提案|Decision|"
+    r"操作指令|最终结论|裁决|建议.*(?:买入|卖出|减持|减配|持有|观望|清仓)",
+    re.IGNORECASE,
+)
 
 # Map Chinese rating words to the canonical 5-tier English labels.
 _CN_TO_EN: dict[str, str] = {
@@ -45,15 +58,16 @@ _CN_TO_EN: dict[str, str] = {
     "超配": "Overweight",
     "加码": "Overweight",
     "减持": "Underweight",
+    "减配": "Underweight",
     "低配": "Underweight",
     "减码": "Underweight",
     "清仓": "Sell",
 }
 
-# Fallback scan order: bearish phrases before bullish to reduce false positives.
+# Fallback scan order on rating-context lines only (bearish before bullish).
 _CN_FALLBACK_RES: list[tuple[str, re.Pattern[str]]] = [
     ("Sell", re.compile(r"卖出|清仓")),
-    ("Underweight", re.compile(r"减持|低配")),
+    ("Underweight", re.compile(r"减持|减配|低配")),
     ("Overweight", re.compile(r"增持|超配")),
     ("Buy", re.compile(r"买入")),
     ("Hold", re.compile(r"持有|观望")),
@@ -67,6 +81,10 @@ RATING_CN_LABELS: dict[str, str] = {
     "Sell": "卖出",
 }
 
+_EN_WORD_IN_TOKEN_RE = re.compile(
+    r"\b(buy|overweight|hold|underweight|sell)\b", re.IGNORECASE
+)
+
 
 def _normalize_cn_token(token: str) -> str | None:
     cleaned = token.strip("*:.，,| ")
@@ -74,51 +92,82 @@ def _normalize_cn_token(token: str) -> str | None:
         return None
     if cleaned.lower() in _RATING_SET:
         return cleaned.capitalize()
-    return _CN_TO_EN.get(cleaned)
+    m = _EN_WORD_IN_TOKEN_RE.search(cleaned)
+    if m:
+        return m.group(1).capitalize()
+    # Strip trailing parenthetical annotations, e.g. Underweight（减配）
+    head = re.split(r"[（(]", cleaned, maxsplit=1)[0].strip()
+    if head.lower() in _RATING_SET:
+        return head.capitalize()
+    return _CN_TO_EN.get(cleaned) or _CN_TO_EN.get(head)
+
+
+def _pick_explicit_rating(text: str) -> str | None:
+    """Return the best explicit rating label found in the report."""
+    best_rating: str | None = None
+    best_priority = -1
+    best_line = -1
+
+    for line_no, line in enumerate(text.splitlines()):
+        for priority, pattern in _EXPLICIT_LINE_PATTERNS:
+            match = pattern.search(line)
+            if not match:
+                continue
+            mapped = _normalize_cn_token(match.group(1))
+            if not mapped:
+                continue
+            if priority > best_priority or (
+                priority == best_priority and line_no >= best_line
+            ):
+                best_rating = mapped
+                best_priority = priority
+                best_line = line_no
+
+    return best_rating
+
+
+def _pick_contextual_fallback(text: str) -> str | None:
+    """Keyword fallback limited to lines that look like rating declarations."""
+    for line in reversed(text.splitlines()):
+        if not _RATING_CONTEXT_RE.search(line):
+            continue
+        for rating, pattern in _CN_FALLBACK_RES:
+            if pattern.search(line):
+                return rating
+        for word in line.lower().split():
+            clean = word.strip("*:,.（）()")
+            if clean in _RATING_SET:
+                return clean.capitalize()
+    return None
 
 
 def parse_rating(text: str, default: str = "Hold") -> str:
     """Heuristically extract a 5-tier rating from prose text.
 
-    Strategy (first match wins):
-    1. Explicit English ``Rating: X`` label.
-    2. Explicit Chinese ``评级/推荐: X`` label.
-    3. Quoted Chinese rating, e.g. ``采用"卖出"评级``.
-    4. First English 5-tier word in the text.
-    5. Chinese keyword fallback (卖出/买入/持有…).
+    Strategy:
+    1. Explicit ``Rating: X`` / ``最终评级：X`` / ``研究评级：X`` lines
+       (later lines win when priority is equal).
+    2. Quoted Chinese rating, e.g. ``采用"卖出"评级``.
+    3. Keyword fallback only on lines that mention 评级/Rating/decision context.
 
     Returns a Title-cased rating string, or ``default`` if no rating word appears.
     """
     if not text or not text.strip():
         return default
 
-    for line in text.splitlines():
-        m = _RATING_LABEL_RE.search(line)
-        if m and m.group(1).lower() in _RATING_SET:
-            return m.group(1).capitalize()
+    explicit = _pick_explicit_rating(text)
+    if explicit:
+        return explicit
 
-    for line in text.splitlines():
-        m = _RATING_CN_LABEL_RE.search(line)
-        if m:
-            mapped = _normalize_cn_token(m.group(1))
-            if mapped:
-                return mapped
-
-    m = _CN_QUOTED_RATING_RE.search(text)
-    if m:
-        mapped = _normalize_cn_token(m.group(1))
+    quoted = _CN_QUOTED_RATING_RE.search(text)
+    if quoted:
+        mapped = _normalize_cn_token(quoted.group(1))
         if mapped:
             return mapped
 
-    for line in text.splitlines():
-        for word in line.lower().split():
-            clean = word.strip("*:.,")
-            if clean in _RATING_SET:
-                return clean.capitalize()
-
-    for rating, pattern in _CN_FALLBACK_RES:
-        if pattern.search(text):
-            return rating
+    contextual = _pick_contextual_fallback(text)
+    if contextual:
+        return contextual
 
     return default
 

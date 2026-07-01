@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 from tradingagents.agents.schemas import ResearchPlan, render_research_plan
-from tradingagents.agents.utils.agent_utils import build_instrument_context, get_language_instruction
+from tradingagents.agents.utils.agent_utils import (
+    build_instrument_context,
+    get_balanced_decision_guidance,
+    get_debate_notes,
+    get_language_instruction,
+    instrument_type_from_state,
+)
 from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
@@ -14,7 +20,10 @@ def create_research_manager(llm):
     structured_llm = bind_structured(llm, ResearchPlan, "Research Manager")
 
     def research_manager_node(state) -> dict:
-        instrument_context = build_instrument_context(state["company_of_interest"])
+        instrument_type = instrument_type_from_state(state)
+        instrument_context = build_instrument_context(
+            state["company_of_interest"], instrument_type
+        )
         history = state["investment_debate_state"].get("history", "")
 
         investment_debate_state = state["investment_debate_state"]
@@ -23,7 +32,9 @@ def create_research_manager(llm):
 
 {instrument_context}
 
-Note: This is an A-share (China mainland) stock. Factor in regulatory policy impact, hot money / capital flow dynamics, and lockup expiry / insider reduction risks when synthesising the debate.
+Note: {get_debate_notes(instrument_type)}
+
+{get_balanced_decision_guidance()}
 
 ---
 

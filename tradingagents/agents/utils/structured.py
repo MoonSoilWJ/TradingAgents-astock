@@ -62,7 +62,10 @@ def invoke_structured_or_freetext(
     if structured_llm is not None:
         try:
             result = structured_llm.invoke(prompt)
-            return render(result)
+            rendered = render(result)
+            if not rendered or not str(rendered).strip():
+                raise ValueError("structured output rendered empty")
+            return rendered
         except Exception as exc:
             logger.warning(
                 "%s: structured-output invocation failed (%s); retrying once as free text",
@@ -70,4 +73,7 @@ def invoke_structured_or_freetext(
             )
 
     response = plain_llm.invoke(prompt)
-    return response.content
+    content = response.content if hasattr(response, "content") else str(response)
+    if not content or not str(content).strip():
+        raise ValueError(f"{agent_name} produced empty free-text output")
+    return content

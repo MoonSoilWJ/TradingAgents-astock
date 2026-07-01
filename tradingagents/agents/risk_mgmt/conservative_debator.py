@@ -1,6 +1,12 @@
 
 
 def create_conservative_debator(llm):
+    from tradingagents.agents.utils.agent_utils import (
+        get_balanced_decision_guidance,
+        get_debate_notes,
+        instrument_type_from_state,
+    )
+
     def conservative_node(state) -> dict:
         risk_debate_state = state["risk_debate_state"]
         history = risk_debate_state.get("history", "")
@@ -18,17 +24,18 @@ def create_conservative_debator(llm):
         lockup_report = state.get("lockup_report", "")
 
         trader_decision = state["trader_investment_plan"]
+        instrument_type = instrument_type_from_state(state)
 
-        prompt = f"""As the Conservative Risk Analyst evaluating an A-share (China mainland) stock, your primary objective is to protect assets, minimize volatility, and ensure steady, reliable growth. Critically examine high-risk elements in the trader's plan, pointing out where it may expose the firm to undue risk.
+        prompt = f"""As the Conservative Risk Analyst evaluating an A-share (China mainland) instrument, your primary objective is to protect assets, minimize volatility, and ensure steady, reliable growth. Critically examine high-risk elements in the trader's plan, pointing out where it may expose the firm to undue risk.
 
-A-Share Conservative Framework — emphasize these China-specific downside risks:
-- T+1 Settlement Lock: Any position taken today CANNOT be exited until tomorrow. If the stock gaps down at open (e.g. after overnight policy news or global sell-off), losses are locked in with no recourse. This is the single most important structural risk in A-shares.
-- Daily Price Limit Trap (涨跌停板): If a stock hits limit-down (main board -10%, STAR/ChiNext -20%), sell orders cannot execute — you are trapped. Multiple consecutive limit-downs can cause catastrophic losses with no ability to exit.
-- Lockup Expiry Overhang: Large lockup expiries (限售解禁) create massive potential sell pressure. Even if insiders haven't started selling, the OPTION to sell depresses sentiment and caps upside.
-- Policy Reversal Risk: A-shares are a policy market (政策市). What the government gives, it can take away overnight — sector support can turn to sector crackdown with a single State Council directive.
-- Hot Money Exit Risk (游资撤退): Hot money moves fast in both directions. Today's limit-up star is tomorrow's limit-down casualty. Retail investors are the last to know when hot money exits.
-- Valuation Discipline: PE > 50x with PEG > 2 is speculative territory regardless of growth narrative. The 30x PE digestion framework should be the anchor — if it takes 5+ years to digest, the position is overvalued.
-- ST/Delisting Risk: For companies with consecutive losses, ST designation triggers ±5% price limits and institutional forced selling.
+Note: {get_debate_notes(instrument_type)}
+
+{get_balanced_decision_guidance()}
+
+A-Share Conservative Framework — emphasize structural downside risks where applicable:
+- T+1 settlement lock and daily price limit traps
+- For **stocks**: lockup expiry, insider reduction, ST/delisting, PE discipline
+- For **ETFs**: discount spiral, net outflows, broken trend — not company lockup/PE
 
 Here is the trader's decision:
 

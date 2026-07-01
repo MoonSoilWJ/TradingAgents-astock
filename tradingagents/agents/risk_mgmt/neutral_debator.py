@@ -1,6 +1,12 @@
 
 
 def create_neutral_debator(llm):
+    from tradingagents.agents.utils.agent_utils import (
+        get_balanced_decision_guidance,
+        get_debate_notes,
+        instrument_type_from_state,
+    )
+
     def neutral_node(state) -> dict:
         risk_debate_state = state["risk_debate_state"]
         history = risk_debate_state.get("history", "")
@@ -18,17 +24,19 @@ def create_neutral_debator(llm):
         lockup_report = state.get("lockup_report", "")
 
         trader_decision = state["trader_investment_plan"]
+        instrument_type = instrument_type_from_state(state)
 
-        prompt = f"""As the Neutral Risk Analyst evaluating an A-share (China mainland) stock, your role is to provide a balanced perspective, weighing both the potential benefits and risks. Factor in A-share market structure, broader trends, and diversification strategies.
+        prompt = f"""As the Neutral Risk Analyst evaluating an A-share (China mainland) instrument, your role is to provide a balanced perspective, weighing both the potential benefits and risks. Factor in market structure, broader trends, and diversification strategies.
 
-A-Share Neutral Framework — use these China-specific balancing considerations:
-- T+1 as Double-Edged Sword: T+1 locks in losses (conservative point) BUT also prevents panic selling and allows multi-day momentum to develop (aggressive point). The neutral view: size positions so that a single overnight gap-down is survivable.
-- Policy Sensitivity Calibration: Not all policy signals are equal. Distinguish between top-level State Council directives (high conviction) vs local government incentives (lower reliability) vs market rumors (noise). Weight your risk assessment accordingly.
-- Northbound Flow as Smart Money Gauge: Foreign institutional flow via Stock Connect is more informed than retail flow, but also more fickle — they exit faster than domestic funds. Use it as a confirming signal, not a primary thesis.
-- Valuation Band Approach: Rather than rigid "PE > 30x is expensive" or "PE doesn't matter in growth", propose a valuation band — what PE range is defensible given the earnings trajectory? Use the PE digestion timeframe as a practical anchor.
-- Lockup Expiry Timing: The neutral view is not to panic at lockup dates but to monitor actual reduction filings (减持公告). The risk is real but the timing is uncertain — reducing exposure gradually near lockup windows is more sensible than binary all-in/all-out.
-- Sector Rotation Awareness: A-share themes rotate fast (typically 2-4 weeks). The neutral question is: where are we in the rotation cycle? Early rotation = room to run; late rotation = reduced upside with elevated downside.
-- Position Sizing over Direction: In a market with ±10-20% daily limits and T+1 settlement, position sizing is more important than directional conviction. A moderate position captures upside while limiting locked-in loss scenarios.
+Note: {get_debate_notes(instrument_type)}
+
+{get_balanced_decision_guidance()}
+
+A-Share Neutral Framework — balancing considerations:
+- T+1 as double-edged sword; size positions for survivable overnight gaps
+- Distinguish policy signal quality; use fund flow as confirmation not sole thesis
+- For stocks: valuation bands and lockup timing; for ETFs: trend + flows + premium-discount
+- Position sizing over extreme directional calls when evidence is mixed
 
 Here is the trader's decision:
 

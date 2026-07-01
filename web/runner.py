@@ -106,6 +106,26 @@ def _run(ticker: str, trade_date: str, config: dict, tracker: ProgressTracker) -
         callbacks=[stats],
     )
 
+    # ETF pipeline skips fundamentals/lockup nodes; pre-filled reports live in init_state.
+    if init_state:
+        from tradingagents.dataflows.instrument import ETF_SKIPPED_ANALYSTS
+
+        skip_stage_ids = {"fundamentals", "lockup"}
+        for stage in PIPELINE_STAGES:
+            if stage["id"] not in skip_stage_ids:
+                continue
+            analyst_key = stage["id"]
+            if analyst_key not in ETF_SKIPPED_ANALYSTS:
+                continue
+            if init_state.get("instrument_type") != "etf":
+                continue
+            content = init_state.get(stage["report_key"], "")
+            if content and tracker.stage_status(stage["id"]) != "done":
+                tracker.mark_stage_done(
+                    stage["id"],
+                    content[:500] + ("…" if len(content) > 500 else ""),
+                )
+
     last_chunk: dict[str, Any] = {}
 
     try:

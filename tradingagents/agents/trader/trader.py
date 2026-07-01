@@ -7,7 +7,12 @@ import functools
 from langchain_core.messages import AIMessage
 
 from tradingagents.agents.schemas import TraderProposal, render_trader_proposal
-from tradingagents.agents.utils.agent_utils import build_instrument_context, get_language_instruction
+from tradingagents.agents.utils.agent_utils import (
+    build_instrument_context,
+    get_debate_notes,
+    get_language_instruction,
+    instrument_type_from_state,
+)
 from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
@@ -19,7 +24,8 @@ def create_trader(llm):
 
     def trader_node(state, name):
         company_name = state["company_of_interest"]
-        instrument_context = build_instrument_context(company_name)
+        instrument_type = instrument_type_from_state(state)
+        instrument_context = build_instrument_context(company_name, instrument_type)
         investment_plan = state["investment_plan"]
 
         # Collect A-stock specific analyst reports
@@ -41,7 +47,7 @@ def create_trader(llm):
             {
                 "role": "system",
                 "content": (
-                    "You are a trading agent specialising in A-share (China mainland) stocks. "
+                    "You are a trading agent specialising in A-share (China mainland) instruments. "
                     "Translate the Research Manager's investment plan into a concrete, executable "
                     "transaction proposal. You must factor in A-stock trading constraints:\n"
                     "- T+1 settlement: shares bought today cannot be sold until the next trading day\n"
@@ -50,6 +56,8 @@ def create_trader(llm):
                     "- Trading hours: 09:30-11:30, 13:00-15:00 Beijing time\n"
                     "Anchor your reasoning in the analysts' reports and the research plan. "
                     "Be specific about entry price, stop loss, and position sizing. "
+                    "Your action (Buy/Hold/Sell) must align with the Research Manager's rating unless "
+                    "you document a clear execution-level reason to differ. "
                     "（以上参数仅供技术研究参考，不构成投资建议）"
                 ),
             },
@@ -60,6 +68,7 @@ def create_trader(llm):
                     f"sentiment, news, fundamentals, policy, capital flow, and lockup/reduction "
                     f"specialists), here is an investment plan for {company_name}.\n\n"
                     f"{instrument_context}\n\n"
+                    f"Instrument notes: {get_debate_notes(instrument_type)}\n\n"
                     f"Proposed Investment Plan:\n{investment_plan}\n\n"
                     + (f"Additional A-Stock Analyst Context:\n{astock_context}\n\n" if astock_context else "")
                     + "Leverage these insights to craft a precise transaction proposal."
