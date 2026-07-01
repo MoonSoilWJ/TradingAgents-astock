@@ -18,8 +18,8 @@ from web.history import (
 
 # Provider display names in recommended order
 _PROVIDERS: list[tuple[str, str]] = [
-    ("MiniMax（推荐·国内直连）", "minimax"),
-    ("DeepSeek", "deepseek"),
+    ("DeepSeek（推荐·国内直连）", "deepseek"),
+    ("MiniMax", "minimax"),
     ("通义千问 Qwen", "qwen"),
     ("智谱 GLM", "glm"),
     ("OpenAI", "openai"),
@@ -159,7 +159,14 @@ def _render_llm_config() -> None:
             key="quick_model_idx",
             help="用于常规分析任务，速度优先",
         )
-        st.session_state["quick_think_llm"] = quick_values[quick_idx]
+        quick_model = quick_values[quick_idx]
+        if quick_model == "custom":
+            quick_model = st.text_input(
+                "自定义快速模型 ID",
+                key="custom_quick_model_id",
+                placeholder="如 glm-5.2 / qwen3.6-flash",
+            ).strip()
+        st.session_state["quick_think_llm"] = quick_model or quick_values[0]
 
         deep_idx = st.selectbox(
             "深度思考模型",
@@ -168,7 +175,14 @@ def _render_llm_config() -> None:
             key="deep_model_idx",
             help="用于辩论/决策等需要深度推理的任务",
         )
-        st.session_state["deep_think_llm"] = deep_values[deep_idx]
+        deep_model = deep_values[deep_idx]
+        if deep_model == "custom":
+            deep_model = st.text_input(
+                "自定义深度模型 ID",
+                key="custom_deep_model_id",
+                placeholder="如 glm-5.2 / qwen3.7-max",
+            ).strip()
+        st.session_state["deep_think_llm"] = deep_model or deep_values[0]
     else:
         custom_quick = st.text_input("快速思考模型 ID", key="custom_quick_model")
         custom_deep = st.text_input("深度思考模型 ID", key="custom_deep_model")
@@ -216,7 +230,7 @@ def render_sidebar() -> None:
         "股票代码",
         placeholder="例: 300750 或 宁德时代",
         key="input_ticker",
-        help="输入6位A股代码或中文股票全称",
+        help="输入6位A股代码、中文名称，或指数/ETF简称（如 科创50→588000）",
     )
 
     trade_date = st.date_input(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import tempfile
 import threading
@@ -13,12 +14,32 @@ from typing import Any
 from tradingagents.default_config import DEFAULT_CONFIG
 
 
-_INCOMPLETE_TASKS_FILE = Path.home() / ".tradingagents" / "incomplete_tasks.json"
 _INCOMPLETE_TASKS_LOCK = threading.Lock()
 
 
+def _tradingagents_home() -> Path:
+    """Resolve the TradingAgents home directory.
+
+    Honor TRADINGAGENTS_HOME if set (allows sandboxed runs to redirect
+    state into a writable path), otherwise fall back to ~/.tradingagents.
+    """
+    override = os.getenv("TRADINGAGENTS_HOME")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".tradingagents"
+
+
+def _incomplete_tasks_file() -> Path:
+    return _tradingagents_home() / "incomplete_tasks.json"
+
+
 def _results_dir() -> Path:
-    return Path.home() / ".tradingagents" / "logs"
+    # Prefer the configured results_dir (honors TRADINGAGENTS_RESULTS_DIR),
+    # fall back to <home>/logs for default installs.
+    configured = os.getenv("TRADINGAGENTS_RESULTS_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    return _tradingagents_home() / "logs"
 
 
 def get_history() -> list[dict[str, str]]:
@@ -55,11 +76,12 @@ def _completed_keys() -> set[tuple[str, str]]:
 
 
 def _load_incomplete_index() -> list[dict[str, Any]]:
-    if not _INCOMPLETE_TASKS_FILE.exists():
+    target = _incomplete_tasks_file()
+    if not target.exists():
         return []
 
     try:
-        with open(_INCOMPLETE_TASKS_FILE, encoding="utf-8") as f:
+        with open(target, encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
         return []
@@ -82,19 +104,20 @@ def _load_incomplete_index() -> list[dict[str, Any]]:
 
 
 def _save_incomplete_index(entries: list[dict[str, Any]]) -> None:
-    parent = _INCOMPLETE_TASKS_FILE.parent
+    target = _incomplete_tasks_file()
+    parent = target.parent
     parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         "w",
         encoding="utf-8",
         dir=parent,
-        prefix=f"{_INCOMPLETE_TASKS_FILE.stem}.",
+        prefix=f"{target.stem}.",
         suffix=".tmp",
         delete=False,
     ) as f:
         json.dump(entries, f, ensure_ascii=False, indent=2)
         tmp = Path(f.name)
-    tmp.replace(_INCOMPLETE_TASKS_FILE)
+    tmp.replace(target)
 
 
 def _checkpoint_step(ticker: str, trade_date: str) -> int | None:
@@ -185,19 +208,21 @@ def load_analysis(path: str) -> dict[str, Any]:
 
 
 def extract_signal(state: dict[str, Any]) -> str:
-    """Extract the short signal (Buy/Sell/Hold) from a final state dict."""
+    """Extract the 5-tier portfolio rating from a final state dict."""
     import re
 
+    from tradingagents.agents.utils.rating import parse_rating
+
     for field in (
+        "final_trade_decision",
         "investment_plan",
         "trader_investment_decision",
-        "final_trade_decision",
     ):
         text = state.get(field, "")
         if not text:
             continue
         cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-        for keyword in ("BUY", "SELL", "HOLD"):
-            if keyword in cleaned.upper():
-                return keyword.capitalize()
+        rating = parse_rating(cleaned, default="")
+        if rating:
+            return rating
     return "N/A"

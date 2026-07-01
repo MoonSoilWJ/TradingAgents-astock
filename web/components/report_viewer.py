@@ -7,6 +7,8 @@ from typing import Any
 
 import streamlit as st
 
+from tradingagents.agents.utils.rating import rating_display_label
+
 from web.pdf_export import generate_markdown, generate_pdf
 from web.stock_display import normalize_stock_mentions, stock_display_label
 
@@ -16,12 +18,14 @@ def _strip_think(text: str) -> str:
 
 
 def _signal_style(signal: str) -> tuple[str, str]:
-    s = signal.upper()
-    if "BUY" in s:
-        return "#22c55e", "买入"
-    if "SELL" in s:
-        return "#ef4444", "卖出"
-    return "#fbbf24", "持有"
+    en, cn = rating_display_label(signal)
+    if en in {"BUY", "OVERWEIGHT"}:
+        return "#22c55e", cn
+    if en in {"SELL", "UNDERWEIGHT"}:
+        return "#ef4444", cn
+    if en == "HOLD":
+        return "#fbbf24", cn
+    return "#888888", cn
 
 
 _ANALYST_SECTIONS = [
@@ -55,6 +59,7 @@ def render_report(
     """Render the full analysis report."""
 
     color, cn_signal = _signal_style(signal)
+    en_signal, _ = rating_display_label(signal)
     ticker_label = stock_display_label(ticker, final_state)
 
     stats_html = ""
@@ -74,7 +79,10 @@ def render_report(
         ">
             <div style="font-size:0.9rem; color:#888; letter-spacing:2px;">TRADING SIGNAL</div>
             <div style="font-size:3.5rem; font-weight:900; color:{color}; margin:0.3rem 0;">
-                {signal.upper()}
+                {en_signal}
+            </div>
+            <div style="font-size:1.1rem; color:{color}; margin-bottom:0.3rem;">
+                {cn_signal}
             </div>
             <div style="font-size:1.2rem; color:#f5f1eb;">
                 {ticker_label} · {trade_date}
@@ -129,9 +137,10 @@ def render_report(
 
     for key, title in _ANALYST_SECTIONS:
         content = final_state.get(key, "")
-        if not content:
-            continue
         with st.expander(title, expanded=False):
+            if not content or not str(content).strip():
+                st.info("该分析师未生成报告（可能因分析中断、模型超时或数据源暂时不可用）。")
+                continue
             st.markdown(_display_report_text(content, ticker, final_state))
 
     debate = final_state.get("investment_debate_state")

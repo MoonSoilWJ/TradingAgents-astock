@@ -61,6 +61,19 @@ class TestParseRating:
         for r in RATINGS_5_TIER:
             assert parse_rating(f"Rating: {r}") == r
 
+    def test_chinese_quoted_rating(self):
+        assert parse_rating('采用"卖出"评级，建议清仓。') == "Sell"
+
+    def test_chinese_label_colon(self):
+        assert parse_rating("评级：买入\n理由如下。") == "Buy"
+
+    def test_chinese_pm_markdown_shape(self):
+        text = '### 基金经理最终裁决：采用"卖出"评级\n| **卖出** | 强证据链 |'
+        assert parse_rating(text) == "Sell"
+
+    def test_chinese_hold(self):
+        assert parse_rating("综合判断，评级：持有") == "Hold"
+
 
 # ---------------------------------------------------------------------------
 # SignalProcessor: thin adapter over the heuristic

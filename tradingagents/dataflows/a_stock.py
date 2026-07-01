@@ -75,6 +75,41 @@ def _normalize_ticker(symbol: str) -> str:
 _name_to_code: dict[str, str] | None = None
 _code_to_name: dict[str, str] | None = None
 
+# Index / ETF aliases checked before mootdx name lookup.
+# mootdx maps 科创50→000688 (Shanghai index code in TDX), but quote APIs
+# treat bare 000688 as Shenzhen stock 国城矿业 — same collision for other
+# index names. Prefer liquid ETFs for analysis in this stock-oriented pipeline.
+_TICKER_ALIASES: dict[str, str] = {
+    "科创50": "588000",
+    "科创50指数": "588000",
+    "科创50etf": "588000",
+    "科创50ETF": "588000",
+    "沪深300": "510300",
+    "沪深300指数": "510300",
+    "中证500": "510500",
+    "中证500指数": "510500",
+    "上证50": "510050",
+    "上证50指数": "510050",
+    "创业板指": "159915",
+    "创业板": "159915",
+    "科创100": "588800",
+    "科创100指数": "588800",
+    "科创半导体": "589020",
+    "科创半导体ETF": "589020",
+    "科创半导体etf": "589020",
+}
+
+
+def _lookup_ticker_alias(clean: str) -> str | None:
+    key = clean.replace(" ", "").replace("　", "")
+    if key in _TICKER_ALIASES:
+        return _TICKER_ALIASES[key]
+    lower = key.lower()
+    for alias, code in _TICKER_ALIASES.items():
+        if alias.lower() == lower:
+            return code
+    return None
+
 
 def _build_name_code_map() -> tuple[dict[str, str], dict[str, str]]:
     """Build name→code and code→name maps via mootdx (both SH & SZ markets)."""
@@ -129,6 +164,12 @@ def resolve_ticker(user_input: str) -> str:
         return _normalize_ticker(s)
 
     clean = s.replace(" ", "").replace("　", "")
+
+    alias = _lookup_ticker_alias(clean)
+    if alias:
+        logger.info("Resolved alias %r -> %s", s, alias)
+        return alias
+
     n2c, _ = _build_name_code_map()
 
     if clean in n2c:
