@@ -542,6 +542,13 @@ def _collect_sections(
     """
     sections: list[tuple[str, str]] = []
 
+    final_decision = final_state.get("final_trade_decision", "")
+    if final_decision:
+        text = _strip_think(str(final_decision))
+        if ticker:
+            text = normalize_stock_mentions(text, ticker, final_state)
+        sections.append(("组合经理最终决策", text))
+
     for key, title in _REPORT_SECTIONS:
         content = final_state.get(key, "")
         if content:
@@ -549,6 +556,13 @@ def _collect_sections(
             if ticker:
                 text = normalize_stock_mentions(text, ticker, final_state)
             sections.append((title, text))
+
+    inv_plan = final_state.get("investment_plan", "")
+    if inv_plan:
+        text = _strip_think(str(inv_plan))
+        if ticker:
+            text = normalize_stock_mentions(text, ticker, final_state)
+        sections.append(("研究经理投资计划", text))
 
     debate = final_state.get("investment_debate_state")
     if debate and isinstance(debate, dict):
@@ -565,19 +579,15 @@ def _collect_sections(
                 text = normalize_stock_mentions(text, ticker, final_state)
             sections.append(("多空辩论", text))
 
-    trader_decision = final_state.get("trader_investment_decision", "")
+    trader_decision = (
+        final_state.get("trader_investment_plan", "")
+        or final_state.get("trader_investment_decision", "")
+    )
     if trader_decision:
         text = _strip_think(str(trader_decision))
         if ticker:
             text = normalize_stock_mentions(text, ticker, final_state)
         sections.append(("交易员决策", text))
-
-    inv_plan = final_state.get("investment_plan", "")
-    if inv_plan:
-        text = _strip_think(str(inv_plan))
-        if ticker:
-            text = normalize_stock_mentions(text, ticker, final_state)
-        sections.append(("最终投资建议", text))
 
     risk = final_state.get("risk_debate_state")
     if risk and isinstance(risk, dict):
@@ -594,13 +604,6 @@ def _collect_sections(
             if ticker:
                 text = normalize_stock_mentions(text, ticker, final_state)
             sections.append(("风控评估", text))
-
-    final_decision = final_state.get("final_trade_decision", "")
-    if final_decision:
-        text = _strip_think(str(final_decision))
-        if ticker:
-            text = normalize_stock_mentions(text, ticker, final_state)
-        sections.append(("最终决策", text))
 
     return sections
 
@@ -637,7 +640,7 @@ def generate_markdown(final_state: dict[str, Any], ticker: str, trade_date: str,
         f"- **股票代码**：{ticker_label}",
         f"- **分析日期**：{trade_date}",
         f"- **生成时间**：{datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        f"- **交易信号**：**{signal.upper()}**",
+        f"- **组合经理最终评级**：**{signal.upper()}**",
         "",
         "> ⚠️ 本报告由 AI 多 Agent 系统自动生成，仅供学习研究与技术演示，"
         "不构成任何投资建议。投资决策请咨询持牌专业机构，使用本报告所产生的"

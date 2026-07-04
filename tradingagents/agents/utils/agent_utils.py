@@ -66,8 +66,16 @@ def build_instrument_context(
     if instrument_type is None:
         instrument_type = classify_astock_instrument(ticker)
 
+    try:
+        from tradingagents.dataflows.a_stock import lookup_astock_name
+
+        official_name = lookup_astock_name(ticker)
+    except Exception:
+        official_name = None
+
+    label = f"`{ticker}` {official_name}" if official_name else f"`{ticker}`"
     base = (
-        f"The instrument to analyze is `{ticker}`. "
+        f"The instrument to analyze is {label}. "
         "Use this exact ticker in every tool call, report, and recommendation, "
         "preserving any exchange suffix (e.g. `.TO`, `.L`, `.HK`, `.T`)."
     )
@@ -91,6 +99,18 @@ def get_balanced_decision_guidance() -> str:
 - Reserve **Sell** for: broken trend with distribution confirmed, material negative catalyst, or risk-reward clearly unfavorable after weighing both sides.
 - When both sides have valid points, prefer **Hold** or **Underweight** over extreme **Sell**.
 - Verify northbound / fund-flow claims against the instrument's **actual exchange** (Shanghai ETF → 沪股通, not 深股通 totals).
+"""
+
+
+def get_pm_rating_alignment_guidance() -> str:
+    """Rules so the PM's 5-tier rating matches the orders in the same report."""
+    return """
+**Rating ↔ action alignment** (mandatory — rating and trading instructions must agree):
+- **Hold**: existing position unchanged; **no new buy or sell orders today**. Do not write "Buy" or "立即买入" in Hold decisions.
+- **Overweight**: constructive / scale-in view — **includes** initiating a small observation lot (e.g. 1–3%), waiting for pullback to add, or "短空长多" with a starter position. Use Overweight when you instruct any new purchase from flat or below-target exposure, even if size is small.
+- **Buy**: strong conviction for immediate meaningful entry (typically ≥5% for a new position, or a decisive add when already invested).
+- **Underweight / Sell**: trim or exit as defined in the scale above.
+If your executive summary or 交易指令 section calls for an immediate purchase, the rating **cannot** be Hold — use **Overweight** (small/conditional entry) or **Buy** (strong entry).
 """
 
 

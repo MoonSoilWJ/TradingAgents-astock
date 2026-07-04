@@ -623,7 +623,9 @@ class TestPortfolioManagerInjection:
         pm_node = create_portfolio_manager(llm)
         result = pm_node(_make_pm_state())
         md = result["final_trade_decision"]
+        assert result["portfolio_rating"] == "Overweight"
         assert "**Rating**: Overweight" in md
+        assert "<!-- TRADINGAGENTS_RATING: Overweight -->" in md
         assert "**Executive Summary**: Build position gradually" in md
         assert "**Investment Thesis**: AI capex cycle" in md
         assert "**Price Target**: 215.0" in md
@@ -639,7 +641,9 @@ class TestPortfolioManagerInjection:
         llm.invoke.return_value = MagicMock(content=plain_response)
         pm_node = create_portfolio_manager(llm)
         result = pm_node(_make_pm_state())
-        assert result["final_trade_decision"] == plain_response
+        assert result["portfolio_rating"] == "Sell"
+        assert "<!-- TRADINGAGENTS_RATING: Sell -->" in result["final_trade_decision"]
+        assert "**Rating**: Sell" in result["final_trade_decision"]
 
     # get_past_context ordering and limits
 

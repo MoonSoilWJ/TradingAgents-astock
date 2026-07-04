@@ -73,6 +73,7 @@ class TestRenderResearchPlan:
         )
         md = render_research_plan(p)
         assert "**Recommendation**: Overweight" in md
+        assert "<!-- TRADINGAGENTS_RATING: Overweight -->" in md
         assert "**Rationale**: Bull case carried" in md
         assert "**Strategic Actions**: Build position" in md
 
@@ -157,7 +158,8 @@ class TestTraderAgent:
         llm.invoke.return_value = MagicMock(content=plain_response)
         trader = create_trader(llm)
         result = trader(_make_trader_state())
-        assert result["trader_investment_plan"] == plain_response
+        assert "**Action**: Sell" in result["trader_investment_plan"]
+        assert "FINAL TRANSACTION PROPOSAL: **SELL**" in result["trader_investment_plan"]
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +210,8 @@ class TestResearchManagerAgent:
         rm = create_research_manager(llm)
         result = rm(_make_rm_state())
         ip = result["investment_plan"]
+        assert result["research_rating"] == "Overweight"
+        assert "<!-- TRADINGAGENTS_RATING: Overweight -->" in ip
         assert "**Recommendation**: Overweight" in ip
         assert "**Rationale**: Bull case" in ip
         assert "**Strategic Actions**: Build position" in ip
@@ -229,4 +233,6 @@ class TestResearchManagerAgent:
         llm.invoke.return_value = MagicMock(content=plain_response)
         rm = create_research_manager(llm)
         result = rm(_make_rm_state())
-        assert result["investment_plan"] == plain_response
+        assert result["research_rating"] == "Sell"
+        assert "<!-- TRADINGAGENTS_RATING: Sell -->" in result["investment_plan"]
+        assert "**Recommendation**: Sell" in result["investment_plan"]

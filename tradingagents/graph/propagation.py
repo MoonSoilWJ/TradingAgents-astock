@@ -69,6 +69,8 @@ class Propagator:
             "policy_report": "",
             "hot_money_report": "",
             "lockup_report": lockup_report,
+            "research_rating": "",
+            "portfolio_rating": "",
         }
 
     def get_graph_args(self, callbacks: Optional[List] = None) -> Dict[str, Any]:

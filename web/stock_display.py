@@ -56,8 +56,14 @@ def _normalize_display_code(ticker: str) -> str:
 @lru_cache(maxsize=1024)
 def _resolve_display_code(ticker: str) -> str:
     code = _normalize_display_code(ticker)
-    if re.match(r"^[036]\d{5}$", code):
-        return code
+    try:
+        from tradingagents.dataflows.instrument import is_listed_astock_code
+
+        if is_listed_astock_code(code):
+            return code
+    except Exception:
+        if re.match(r"^[036]\d{5}$", code):
+            return code
 
     if any("一" <= ch <= "鿿" for ch in code):
         try:
@@ -74,7 +80,12 @@ def _resolve_display_code(ticker: str) -> str:
 def resolve_stock_name(ticker: str) -> str | None:
     """Return the A-share name for a ticker code when local market data can resolve it."""
     code = _resolve_display_code(ticker)
-    if not re.match(r"^[036]\d{5}$", code):
+    try:
+        from tradingagents.dataflows.instrument import is_listed_astock_code
+    except Exception:
+        is_listed_astock_code = lambda c: bool(re.match(r"^[036]\d{5}$", c))  # noqa: E731
+
+    if not is_listed_astock_code(code):
         return None
 
     try:

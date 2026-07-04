@@ -9,6 +9,7 @@ import streamlit as st
 
 from tradingagents.agents.utils.rating import rating_display_label
 
+from web.history import extract_pm_immediate_action, extract_stage_ratings
 from web.pdf_export import generate_markdown, generate_pdf
 from web.stock_display import normalize_stock_mentions, stock_display_label
 
@@ -26,6 +27,40 @@ def _signal_style(signal: str) -> tuple[str, str]:
     if en == "HOLD":
         return "#fbbf24", cn
     return "#888888", cn
+
+
+def _stage_ratings_html(final_state: dict[str, Any], signal: str) -> str:
+    """One-line summary when earlier pipeline stages disagree with the final signal."""
+    from tradingagents.agents.utils.rating import normalize_rating_label
+
+    stage_labels = {
+        "research": "研究经理",
+        "trader": "交易员",
+        "portfolio": "组合经理",
+    }
+    ratings = extract_stage_ratings(final_state)
+    portfolio = normalize_rating_label(signal)
+    if portfolio and portfolio != "N/A":
+        ratings["portfolio"] = portfolio
+    if len(ratings) < 2:
+        return ""
+
+    parts: list[str] = []
+    for key in ("research", "trader", "portfolio"):
+        rating = ratings.get(key)
+        if not rating:
+            continue
+        en, cn = rating_display_label(rating)
+        parts.append(f"{stage_labels[key]} {en}（{cn}）")
+
+    if not parts:
+        return ""
+
+    return (
+        '<div style="font-size:0.85rem; color:#888; margin-top:0.6rem; line-height:1.5;">'
+        f"{' · '.join(parts)}"
+        "</div>"
+    )
 
 
 _ANALYST_SECTIONS = [
@@ -57,10 +92,14 @@ def render_report(
     elapsed: float | None = None,
 ) -> None:
     """Render the full analysis report."""
+    from web.history import resolve_report_signal
+
+    signal = resolve_report_signal(final_state, signal)
 
     color, cn_signal = _signal_style(signal)
     en_signal, _ = rating_display_label(signal)
     ticker_label = stock_display_label(ticker, final_state)
+    stage_ratings_html = _stage_ratings_html(final_state, signal)
 
     stats_html = ""
     if elapsed is not None:
@@ -78,6 +117,7 @@ def render_report(
             margin: 1rem 0 2rem;
         ">
             <div style="font-size:0.9rem; color:#888; letter-spacing:2px;">TRADING SIGNAL</div>
+            <div style="font-size:0.8rem; color:#666; margin-top:0.2rem;">组合经理最终评级（经风控辩论）</div>
             <div style="font-size:3.5rem; font-weight:900; color:{color}; margin:0.3rem 0;">
                 {en_signal}
             </div>
@@ -87,6 +127,7 @@ def render_report(
             <div style="font-size:1.2rem; color:#f5f1eb;">
                 {ticker_label} · {trade_date}
             </div>
+            {stage_ratings_html}
             {stats_html}
         </div>
         """,
@@ -127,9 +168,30 @@ def render_report(
 
     st.markdown("---")
 
+    final_decision = final_state.get("final_trade_decision", "")
+    if final_decision:
+        st.markdown("### 👔 组合经理最终决策")
+        st.caption("顶部 TRADING SIGNAL 取自本节；经三方风控辩论后对研究/交易计划的最终裁决。")
+        pm_en, pm_cn = rating_display_label(signal)
+        st.markdown(f"**组合经理评级：{pm_en}（{pm_cn}）**")
+        pm_action = extract_pm_immediate_action(final_decision)
+        if pm_action == "Buy" and signal == "Hold":
+            st.info(
+                "正文「交易指令」建议 **买入**（如 2% 观察仓、分批建仓），"
+                "属于小仓位试探性建仓，按五档标尺更贴近 **Overweight（增持）** 而非 Hold（不动）。"
+                "本次报告评级字段与操作指令不一致，请以实际操作意图为准；"
+                "后续分析已加强组合经理的评级对齐规则。"
+            )
+        elif pm_action == "Buy" and signal in {"Overweight", "Buy"}:
+            action_cn = {"Buy": "买入", "Overweight": "增持"}.get(signal, signal)
+            st.caption(f"实际操作：{pm_action}（与 {action_cn} 评级一致）")
+        st.markdown(_display_report_text(final_decision, ticker, final_state))
+        st.markdown("---")
+
     inv_plan = final_state.get("investment_plan", "")
     if inv_plan:
-        st.markdown("### 👔 最终投资建议")
+        st.markdown("### 📋 研究经理投资计划")
+        st.caption("多空辩论后的中期方向与战术建议；可能与组合经理最终评级不同。")
         st.markdown(_display_report_text(inv_plan, ticker, final_state))
         st.markdown("---")
 
@@ -154,7 +216,10 @@ def render_report(
         with tab_judge:
             st.markdown(_display_report_text(debate.get("judge_decision", "") or "无数据", ticker, final_state))
 
-    trader_decision = final_state.get("trader_investment_decision", "")
+    trader_decision = (
+        final_state.get("trader_investment_plan", "")
+        or final_state.get("trader_investment_decision", "")
+    )
     if trader_decision:
         with st.expander("💹 交易员决策", expanded=False):
             st.markdown(_display_report_text(trader_decision, ticker, final_state))

@@ -32,6 +32,7 @@ import pandas as pd
 import requests as _requests
 
 from .utils import safe_ticker_component
+from .instrument import is_listed_astock_code
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,10 @@ def _lookup_ticker_alias(clean: str) -> str | None:
     return None
 
 
+def _clean_listed_name(name: str) -> str:
+    return "".join(ch for ch in str(name) if ch.isprintable()).strip()
+
+
 def _build_name_code_map() -> tuple[dict[str, str], dict[str, str]]:
     """Build name→code and code→name maps via mootdx (both SH & SZ markets)."""
     global _name_to_code, _code_to_name
@@ -129,9 +134,13 @@ def _build_name_code_map() -> tuple[dict[str, str], dict[str, str]]:
             for _, row in stocks.iterrows():
                 code = str(row["code"]).strip()
                 name = str(row["name"]).strip()
-                if not _re.match(r"^[036]\d{5}$", code):
+                if not _re.match(r"^\d{6}$", code):
                     continue
-                clean_name = name.replace(" ", "").replace("　", "")
+                if not is_listed_astock_code(code):
+                    continue
+                clean_name = _clean_listed_name(name.replace(" ", "").replace("　", ""))
+                if not clean_name:
+                    continue
                 n2c[clean_name] = code
                 c2n[code] = clean_name
     except Exception as e:
@@ -145,6 +154,22 @@ def _build_name_code_map() -> tuple[dict[str, str], dict[str, str]]:
     _code_to_name = c2n
     logger.info("Built stock name-code map: %d entries", len(n2c))
     return _name_to_code, _code_to_name
+
+
+def lookup_astock_name(code: str) -> str | None:
+    """Return the exchange-listed Chinese name for a 6-digit stock or ETF code."""
+    try:
+        normalized = _normalize_ticker(code)
+    except ValueError:
+        return None
+    if not is_listed_astock_code(normalized):
+        return None
+    try:
+        _, code_to_name = _build_name_code_map()
+    except Exception:
+        return None
+    name = _clean_listed_name(code_to_name.get(normalized, ""))
+    return name or None
 
 
 def resolve_ticker(user_input: str) -> str:

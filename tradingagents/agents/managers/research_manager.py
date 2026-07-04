@@ -61,17 +61,18 @@ Commit to a clear stance whenever the debate's strongest arguments warrant one; 
         )
 
         new_investment_debate_state = {
-            "judge_decision": investment_plan,
+            "judge_decision": investment_plan.markdown,
             "history": investment_debate_state.get("history", ""),
             "bear_history": investment_debate_state.get("bear_history", ""),
             "bull_history": investment_debate_state.get("bull_history", ""),
-            "current_response": investment_plan,
+            "current_response": investment_plan.markdown,
             "count": investment_debate_state["count"],
         }
 
         return {
             "investment_debate_state": new_investment_debate_state,
-            "investment_plan": investment_plan,
+            "investment_plan": investment_plan.markdown,
+            "research_rating": investment_plan.rating or "",
         }
 
     return research_manager_node

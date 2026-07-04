@@ -201,28 +201,185 @@ def get_incomplete_history() -> list[dict[str, Any]]:
     return active_entries
 
 
+def _ratings_need_persist(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    """True when canonicalization added authoritative rating fields or markers."""
+    from tradingagents.agents.utils.rating import normalize_rating_label
+
+    for key in ("research_rating", "portfolio_rating"):
+        if normalize_rating_label(after.get(key)) and not normalize_rating_label(before.get(key)):
+            return True
+    for text_key in ("investment_plan", "final_trade_decision"):
+        after_text = str(after.get(text_key) or "")
+        before_text = str(before.get(text_key) or "")
+        if "<!-- TRADINGAGENTS_RATING:" in after_text and after_text != before_text:
+            return True
+    return False
+
+
 def load_analysis(path: str) -> dict[str, Any]:
     """Load a saved analysis JSON file."""
+    from tradingagents.agents.utils.rating import canonicalize_decision_ratings, normalize_rating_label
+
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        raw = json.load(f)
+    state = canonicalize_decision_ratings(dict(raw))
+    if _ratings_need_persist(raw, state):
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+    return state
+
+
+def _strip_think_tags(text: str) -> str:
+    import re
+
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+
+
+def _extract_trader_action(state: dict[str, Any], field: str) -> str:
+    """Parse the trader's Buy/Hold/Sell action, ignoring cited manager ratings."""
+    import re
+
+    from tradingagents.agents.utils.rating import (
+        normalize_rating_label,
+        parse_rating_from_header,
+    )
+
+    text = _strip_think_tags(str(state.get(field, "") or ""))
+    if not text:
+        return ""
+
+    for pattern in (
+        re.compile(r"\*\*Action\*\*\s*[：:\-]\s*\**(\w+)", re.IGNORECASE),
+        re.compile(r"FINAL TRANSACTION PROPOSAL:\s*\**(\w+)", re.IGNORECASE),
+        re.compile(
+            r"\| \*\*操作\*\* \| \*\*(Buy|Hold|Sell)(?:[（(]|[^\w]|$)",
+            re.IGNORECASE,
+        ),
+    ):
+        match = pattern.search(text)
+        if match:
+            label = normalize_rating_label(match.group(1))
+            if label:
+                return label
+
+    filtered = "\n".join(
+        line for line in text.splitlines()
+        if not re.search(r"研究经理|Research Manager", line, re.IGNORECASE)
+    )
+    parsed = parse_rating_from_header(filtered, default="")
+    return normalize_rating_label(parsed) or ""
+
+
+def extract_pm_immediate_action(text: str) -> str:
+    """Return Buy/Sell when the PM section instructs an immediate trade."""
+    import re
+
+    from tradingagents.agents.utils.rating import normalize_rating_label
+
+    cleaned = _strip_think_tags(str(text or ""))
+    if not cleaned:
+        return ""
+
+    section = cleaned.split("交易指令", 1)[1] if "交易指令" in cleaned else cleaned
+    head = section[:2000]
+
+    if re.search(
+        r"Buy[（(]买入|\*\*Buy\*\*|立即(?:执行|买入)|买入(?:指令|操作)",
+        head,
+        re.IGNORECASE,
+    ):
+        return "Buy"
+    if re.search(
+        r"Sell[（(]卖出|\*\*Sell\*\*|立即(?:卖出|清仓)|全部清仓",
+        head,
+        re.IGNORECASE,
+    ):
+        return "Sell"
+    if re.search(r"持有不变|维持(?:现有|当前)仓位|暂不操作|no action", head, re.IGNORECASE):
+        return "Hold"
+
+    from tradingagents.agents.utils.rating import parse_rating_from_header
+
+    parsed = parse_rating_from_header(head, default="")
+    return normalize_rating_label(parsed) or ""
+
+
+def extract_field_rating(state: dict[str, Any], field: str) -> str:
+    """Parse a 5-tier rating from a single report field, or return empty string."""
+    from tradingagents.agents.utils.rating import (
+        extract_rating_marker,
+        normalize_rating_label,
+        parse_rating_from_header,
+    )
+
+    text = state.get(field, "")
+    if not text:
+        return ""
+    cleaned = _strip_think_tags(str(text))
+    marker = extract_rating_marker(cleaned)
+    if marker:
+        return marker
+    parsed = parse_rating_from_header(cleaned, default="")
+    return normalize_rating_label(parsed) or ""
+
+
+def extract_stage_ratings(state: dict[str, Any]) -> dict[str, str]:
+    """Return parsed ratings from each decision stage when present."""
+    from tradingagents.agents.utils.rating import canonicalize_decision_ratings, normalize_rating_label
+
+    canonicalize_decision_ratings(state)
+    ratings: dict[str, str] = {}
+    research = normalize_rating_label(state.get("research_rating")) or extract_field_rating(
+        state, "investment_plan"
+    )
+    if research:
+        ratings["research"] = research
+    trader = _extract_trader_action(state, "trader_investment_plan") or _extract_trader_action(
+        state, "trader_investment_decision"
+    )
+    if trader:
+        ratings["trader"] = trader
+    portfolio = normalize_rating_label(state.get("portfolio_rating")) or extract_field_rating(
+        state, "final_trade_decision"
+    )
+    if portfolio:
+        ratings["portfolio"] = portfolio
+    return ratings
 
 
 def extract_signal(state: dict[str, Any]) -> str:
-    """Extract the 5-tier portfolio rating from a final state dict."""
-    import re
+    """Extract the portfolio-manager final rating for the top trading signal."""
+    from tradingagents.agents.utils.rating import canonicalize_decision_ratings, normalize_rating_label
 
-    from tradingagents.agents.utils.rating import parse_rating
+    canonicalize_decision_ratings(state)
 
-    for field in (
-        "final_trade_decision",
-        "investment_plan",
-        "trader_investment_plan",
-    ):
-        text = state.get(field, "")
-        if not text:
-            continue
-        cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-        rating = parse_rating(cleaned, default="")
-        if rating:
-            return rating
+    portfolio = normalize_rating_label(state.get("portfolio_rating"))
+    if portfolio:
+        return portfolio
+
+    rating = extract_field_rating(state, "final_trade_decision")
+    if rating:
+        return rating
+
+    risk = state.get("risk_debate_state")
+    if isinstance(risk, dict):
+        judge = str(risk.get("judge_decision") or "")
+        if judge.strip():
+            rating = extract_field_rating({"_judge": judge}, "_judge")
+            if rating:
+                return rating
+
     return "N/A"
+
+
+def resolve_report_signal(state: dict[str, Any], fallback: str = "") -> str:
+    """Resolve the signal shown in the report, with a safe fallback."""
+    from tradingagents.agents.utils.rating import normalize_rating_label
+
+    resolved = extract_signal(state)
+    if not resolved or resolved == "N/A":
+        resolved = normalize_rating_label(fallback) or (fallback.strip() if fallback else "")
+    return resolved or "N/A"

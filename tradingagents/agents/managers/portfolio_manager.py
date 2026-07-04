@@ -16,6 +16,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_balanced_decision_guidance,
     get_debate_notes,
     get_language_instruction,
+    get_pm_rating_alignment_guidance,
     instrument_type_from_state,
 )
 from tradingagents.agents.utils.structured import (
@@ -53,6 +54,8 @@ Note: {get_debate_notes(instrument_type)}
 
 {get_balanced_decision_guidance()}
 
+{get_pm_rating_alignment_guidance()}
+
 ---
 
 **A-Stock Trading Constraints** (must factor into your decision):
@@ -71,6 +74,8 @@ Note: {get_debate_notes(instrument_type)}
 - **Hold**: Maintain current position, no action needed
 - **Underweight**: Reduce exposure, take partial profits
 - **Sell**: Exit position or avoid entry
+
+**Hold means no new trades.** Any immediate purchase (even a 1–3% observation lot) → **Overweight**, not Hold.
 
 **Context:**
 - Research Manager's investment plan: **{research_plan}**
@@ -92,7 +97,7 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
         )
 
         new_risk_debate_state = {
-            "judge_decision": final_trade_decision,
+            "judge_decision": final_trade_decision.markdown,
             "history": risk_debate_state["history"],
             "aggressive_history": risk_debate_state["aggressive_history"],
             "conservative_history": risk_debate_state["conservative_history"],
@@ -106,7 +111,8 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
 
         return {
             "risk_debate_state": new_risk_debate_state,
-            "final_trade_decision": final_trade_decision,
+            "final_trade_decision": final_trade_decision.markdown,
+            "portfolio_rating": final_trade_decision.rating or "",
         }
 
     return portfolio_manager_node

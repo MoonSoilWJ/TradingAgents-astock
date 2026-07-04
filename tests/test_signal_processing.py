@@ -92,6 +92,53 @@ class TestParseRating:
     def test_research_rating_line(self):
         assert parse_rating("**研究评级：Underweight (减配)**") == "Underweight"
 
+    def test_chinese_bold_rating_line(self):
+        assert parse_rating("**评级：** **Overweight（超配）**") == "Overweight"
+
+    def test_rating_marker_wins_over_stop_loss_prose(self):
+        text = (
+            "<!-- TRADINGAGENTS_RATING: Overweight -->\n\n"
+            "**评级：** **Overweight（超配）**\n"
+            "一经触发，**立即全部清仓（Sell All）**，评级下调至\"Underweight\"。"
+        )
+        assert parse_rating(text) == "Overweight"
+
+    def test_pm_markdown_stop_loss_does_not_override_rating(self):
+        from tradingagents.agents.utils.rating import canonicalize_decision_ratings
+
+        text = (
+            "**评级：** **Overweight（超配）**\n"
+            "一经触发，**立即全部清仓（Sell All）**，评级下调至\"Underweight\"。"
+        )
+        state = canonicalize_decision_ratings({"final_trade_decision": text})
+        assert state["portfolio_rating"] == "Overweight"
+        assert "<!-- TRADINGAGENTS_RATING: Overweight -->" in state["final_trade_decision"]
+
+    def test_canonicalize_prefers_portfolio_rating_field(self):
+        from tradingagents.agents.utils.rating import canonicalize_decision_ratings
+
+        state = canonicalize_decision_ratings(
+            {
+                "portfolio_rating": "Overweight",
+                "final_trade_decision": "正文含清仓字样但不改权威字段",
+            }
+        )
+        assert state["portfolio_rating"] == "Overweight"
+
+    def test_canonicalize_prefers_marker_over_stale_field(self):
+        from tradingagents.agents.utils.rating import canonicalize_decision_ratings
+
+        state = canonicalize_decision_ratings(
+            {
+                "portfolio_rating": "Hold",
+                "final_trade_decision": (
+                    "<!-- TRADINGAGENTS_RATING: Overweight -->\n\n"
+                    "**Rating**: Overweight"
+                ),
+            }
+        )
+        assert state["portfolio_rating"] == "Overweight"
+
 
 # ---------------------------------------------------------------------------
 # SignalProcessor: thin adapter over the heuristic

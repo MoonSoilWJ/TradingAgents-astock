@@ -20,6 +20,7 @@ from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.dataflows.utils import safe_ticker_component
 from tradingagents.dataflows.instrument import analysts_for_ticker
+from tradingagents.agents.utils.rating import canonicalize_decision_ratings, normalize_rating_label
 from tradingagents.agents.utils.agent_states import (
     AgentState,
     InvestDebateState,
@@ -385,6 +386,7 @@ class TradingAgentsGraph:
 
     def finalize_graph_run(self, company_name, trade_date, final_state):
         """Persist a completed run and clear its checkpoint."""
+        canonicalize_decision_ratings(final_state)
         self.curr_state = final_state
 
         # Log state to disk.
@@ -403,6 +405,9 @@ class TradingAgentsGraph:
                 self.config["data_cache_dir"], company_name, str(trade_date)
             )
 
+        portfolio = normalize_rating_label(final_state.get("portfolio_rating"))
+        if portfolio:
+            return portfolio
         return self.process_signal(final_state["final_trade_decision"])
 
     def close_graph_run(self) -> None:
@@ -467,7 +472,9 @@ class TradingAgentsGraph:
                 "judge_decision": final_state["risk_debate_state"]["judge_decision"],
             },
             "investment_plan": final_state["investment_plan"],
+            "research_rating": final_state.get("research_rating", ""),
             "final_trade_decision": final_state["final_trade_decision"],
+            "portfolio_rating": final_state.get("portfolio_rating", ""),
         }
 
         # Save to file. Reject ticker values that would escape the

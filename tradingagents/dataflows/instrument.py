@@ -21,9 +21,10 @@ _ETF_PREFIXES: tuple[str, ...] = (
     "560",
     "561",
     "562",
+    "563",
     "588",
     "589",  # SH ETFs (incl. STAR board ETFs)
-    "159",  # SZ ETFs
+    "159",  # SZ ETFs (15xxx)
 )
 
 # Known ETF codes from alias table and common indices (belt-and-suspenders).
@@ -66,6 +67,29 @@ ETF_ANALYSTS: tuple[str, ...] = (
 ETF_SKIPPED_ANALYSTS: frozenset[str] = frozenset({"fundamentals", "lockup"})
 
 
+def is_on_exchange_etf_code(code: str) -> bool:
+    """Return True if ``code`` is a 6-digit on-exchange A-share ETF."""
+    if len(code) != 6 or not code.isdigit():
+        return False
+    if code in _KNOWN_ETF_CODES:
+        return True
+    # SZ 159xxx (colloquial 15xxx); SH 51xxxx / 56xxxx / 588·589 STAR ETFs
+    if code.startswith("159") or code.startswith("51") or code.startswith("56"):
+        return True
+    if code.startswith(("588", "589")):
+        return True
+    return code.startswith(_ETF_PREFIXES)
+
+
+def is_listed_astock_code(code: str) -> bool:
+    """True for A-share stocks and on-exchange ETFs resolvable in the name map."""
+    if len(code) != 6 or not code.isdigit():
+        return False
+    if code[0] in "036":
+        return True
+    return is_on_exchange_etf_code(code)
+
+
 def normalize_astock_code(ticker: str) -> str:
     """Return a 6-digit A-share code from ticker input."""
     return safe_ticker_component(ticker.strip())
@@ -77,9 +101,7 @@ def classify_astock_instrument(ticker: str) -> InstrumentType:
         code = normalize_astock_code(ticker)
     except ValueError:
         return "stock"
-    if code in _KNOWN_ETF_CODES:
-        return "etf"
-    if code.startswith(_ETF_PREFIXES):
+    if is_on_exchange_etf_code(code):
         return "etf"
     return "stock"
 

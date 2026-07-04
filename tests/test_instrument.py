@@ -19,8 +19,24 @@ class InstrumentClassificationTests(unittest.TestCase):
             self.assertEqual(classify_astock_instrument(code), "stock")
 
     def test_etf_codes(self):
-        for code in ("589020", "588000", "510300", "159915"):
+        for code in ("589020", "588000", "510300", "159915", "517400", "563000"):
             self.assertEqual(classify_astock_instrument(code), "etf")
+
+    def test_is_on_exchange_etf_code(self):
+        from tradingagents.dataflows.instrument import is_on_exchange_etf_code
+
+        self.assertTrue(is_on_exchange_etf_code("517400"))
+        self.assertTrue(is_on_exchange_etf_code("159570"))
+        self.assertTrue(is_on_exchange_etf_code("563000"))
+        self.assertFalse(is_on_exchange_etf_code("603936"))
+
+    def test_is_listed_astock_code(self):
+        from tradingagents.dataflows.instrument import is_listed_astock_code
+
+        self.assertTrue(is_listed_astock_code("603936"))
+        self.assertTrue(is_listed_astock_code("517400"))
+        self.assertTrue(is_listed_astock_code("159915"))
+        self.assertFalse(is_listed_astock_code("999999"))
 
     def test_analyst_pipeline_differs(self):
         stock = analysts_for_ticker("603936")

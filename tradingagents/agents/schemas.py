@@ -23,6 +23,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from tradingagents.agents.utils.rating import embed_rating_marker
+
 
 # ---------------------------------------------------------------------------
 # Shared rating types
@@ -92,13 +94,14 @@ class ResearchPlan(BaseModel):
 
 def render_research_plan(plan: ResearchPlan) -> str:
     """Render a ResearchPlan to markdown for storage and the trader's prompt context."""
-    return "\n".join([
+    body = "\n".join([
         f"**Recommendation**: {plan.recommendation.value}",
         "",
         f"**Rationale**: {plan.rationale}",
         "",
         f"**Strategic Actions**: {plan.strategic_actions}",
     ])
+    return embed_rating_marker(plan.recommendation.value, body)
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +183,9 @@ class PortfolioDecision(BaseModel):
     rating: PortfolioRating = Field(
         description=(
             "The final position rating. Exactly one of Buy / Overweight / Hold / "
-            "Underweight / Sell, picked based on the analysts' debate."
+            "Underweight / Sell. Hold only when NO new buy or sell is instructed "
+            "and size stays unchanged. Any immediate purchase (including a small "
+            "observation lot) must be Overweight or Buy, never Hold."
         ),
     )
     executive_summary: str = Field(
@@ -225,4 +230,4 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
         parts.extend(["", f"**Price Target**: {decision.price_target}"])
     if decision.time_horizon:
         parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
-    return "\n".join(parts)
+    return embed_rating_marker(decision.rating.value, "\n".join(parts))

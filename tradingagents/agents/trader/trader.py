@@ -86,8 +86,8 @@ def create_trader(llm):
         )
 
         return {
-            "messages": [AIMessage(content=trader_plan)],
-            "trader_investment_plan": trader_plan,
+            "messages": [AIMessage(content=trader_plan.markdown)],
+            "trader_investment_plan": trader_plan.markdown,
             "sender": name,
         }
 
