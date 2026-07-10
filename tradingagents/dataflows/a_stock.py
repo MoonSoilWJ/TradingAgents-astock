@@ -423,7 +423,7 @@ def _sina_kline_fallback(code: str, start_date: str = None, end_date: str = None
 
     Returns DataFrame with columns: Date, Open, High, Low, Close, Volume.
     """
-    prefix = "sh" if code.startswith("6") else "sz"
+    prefix = _get_prefix(code)
     url = (
         "http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
         "CN_MarketData.getKLineData"
@@ -1148,7 +1148,7 @@ def _fetch_news_eastmoney(code: str, page_size: int = 20) -> list[dict]:
 
 def _fetch_news_sina(code: str, page_size: int = 20) -> list[dict]:
     """Sina Finance stock news API (backup source)."""
-    prefix = "sh" if code.startswith(("6", "9")) else "sz"
+    prefix = _get_prefix(code)
     url = (
         f"https://vip.stock.finance.sina.com.cn/corp/view/"
         f"vCB_AllNewsStock.php?symbol={prefix}{code}&Page=1"
