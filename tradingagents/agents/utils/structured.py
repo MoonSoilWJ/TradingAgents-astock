@@ -115,75 +115,40 @@ def _parse_intraday_fallback(text: str) -> IntradayOrderResult:
     )
 
 
-def invoke_intraday_structured_or_freetext(
+R = TypeVar("R")
+
+
+def _invoke_with_fallback(
     structured_llm: Optional[Any],
     plain_llm: Any,
     prompt: Any,
-    render: Callable[[T], str],
     agent_name: str,
-) -> IntradayOrderResult:
-    if structured_llm is not None:
-        try:
-            result = structured_llm.invoke(prompt)
-            action = getattr(result.action, "value", str(result.action))
-            rendered = render(result)
-            if not rendered or not str(rendered).strip():
-                raise ValueError("structured output rendered empty")
-            return IntradayOrderResult(
-                markdown=str(rendered),
-                action=action,
-                quantity_shares=int(result.quantity_shares or 0),
-                reason=str(result.reason or ""),
-            )
-        except Exception as exc:
-            msg = str(exc)
-            if "Thinking mode" in msg and "tool_choice" in msg:
-                logger.info(
-                    "%s: thinking model skips structured output; using free text",
-                    agent_name,
-                )
-            else:
-                logger.warning(
-                    "%s: structured-output invocation failed (%s); retrying once as free text",
-                    agent_name,
-                    exc,
-                )
+    process_structured: Callable[[Any], R],
+    process_freetext: Callable[[str], R],
+) -> R:
+    """Run the structured call; fall back to free-text on any failure.
 
-    response = plain_llm.invoke(prompt)
-    content = response.content if hasattr(response, "content") else str(response)
-    if not content or not str(content).strip():
-        raise ValueError(f"{agent_name} produced empty free-text output")
-    parsed = _parse_intraday_fallback(str(content))
-    return IntradayOrderResult(
-        markdown=parsed.markdown,
-        action=parsed.action,
-        quantity_shares=parsed.quantity_shares,
-        reason=parsed.reason,
-    )
+    Encapsulates the shared error-handling and fallback flow used by both
+    ``invoke_structured_or_freetext`` and
+    ``invoke_intraday_structured_or_freetext``.
 
+    Args:
+        structured_llm: LLM bound with ``with_structured_output`` (may be ``None``).
+        plain_llm: Plain LLM used for the free-text fallback.
+        prompt: Input forwarded to both paths.
+        agent_name: Agent label included in log messages.
+        process_structured: Callback that converts the structured result
+            into the final return value.  May raise to trigger fallback.
+        process_freetext: Callback that converts the free-text string into
+            the final return value.
 
-def invoke_structured_or_freetext(
-    structured_llm: Optional[Any],
-    plain_llm: Any,
-    prompt: Any,
-    render: Callable[[T], str],
-    agent_name: str,
-) -> AgentMarkdownResult:
-    """Run the structured call and render to markdown; fall back to free-text on any failure.
-
-    ``prompt`` is whatever the underlying LLM accepts (a string for chat
-    invocations, a list of message dicts for chat models that take that
-    shape). The same value is forwarded to the free-text path so the
-    fallback sees the same input the structured call did.
+    Returns:
+        The value produced by either callback depending on which path ran.
     """
     if structured_llm is not None:
         try:
             result = structured_llm.invoke(prompt)
-            rating = rating_from_structured_model(result)
-            rendered = render(result)
-            if not rendered or not str(rendered).strip():
-                raise ValueError("structured output rendered empty")
-            return _finalize_markdown(str(rendered), rating)
+            return process_structured(result)
         except Exception as exc:
             msg = str(exc)
             if "Thinking mode" in msg and "tool_choice" in msg:
@@ -201,4 +166,79 @@ def invoke_structured_or_freetext(
     content = response.content if hasattr(response, "content") else str(response)
     if not content or not str(content).strip():
         raise ValueError(f"{agent_name} produced empty free-text output")
-    return _finalize_markdown(str(content), None)
+    return process_freetext(str(content))
+
+
+def invoke_intraday_structured_or_freetext(
+    structured_llm: Optional[Any],
+    plain_llm: Any,
+    prompt: Any,
+    render: Callable[[T], str],
+    agent_name: str,
+) -> IntradayOrderResult:
+    """Run the intraday structured call; fall back to free-text on any failure."""
+
+    def process_structured(result: Any) -> IntradayOrderResult:
+        action = getattr(result.action, "value", str(result.action))
+        rendered = render(result)
+        if not rendered or not str(rendered).strip():
+            raise ValueError("structured output rendered empty")
+        return IntradayOrderResult(
+            markdown=str(rendered),
+            action=action,
+            quantity_shares=int(result.quantity_shares or 0),
+            reason=str(result.reason or ""),
+        )
+
+    def process_freetext(content: str) -> IntradayOrderResult:
+        parsed = _parse_intraday_fallback(content)
+        return IntradayOrderResult(
+            markdown=parsed.markdown,
+            action=parsed.action,
+            quantity_shares=parsed.quantity_shares,
+            reason=parsed.reason,
+        )
+
+    return _invoke_with_fallback(
+        structured_llm=structured_llm,
+        plain_llm=plain_llm,
+        prompt=prompt,
+        agent_name=agent_name,
+        process_structured=process_structured,
+        process_freetext=process_freetext,
+    )
+
+
+def invoke_structured_or_freetext(
+    structured_llm: Optional[Any],
+    plain_llm: Any,
+    prompt: Any,
+    render: Callable[[T], str],
+    agent_name: str,
+) -> AgentMarkdownResult:
+    """Run the structured call and render to markdown; fall back to free-text on any failure.
+
+    ``prompt`` is whatever the underlying LLM accepts (a string for chat
+    invocations, a list of message dicts for chat models that take that
+    shape). The same value is forwarded to the free-text path so the
+    fallback sees the same input the structured call did.
+    """
+
+    def process_structured(result: Any) -> AgentMarkdownResult:
+        rating = rating_from_structured_model(result)
+        rendered = render(result)
+        if not rendered or not str(rendered).strip():
+            raise ValueError("structured output rendered empty")
+        return _finalize_markdown(str(rendered), rating)
+
+    def process_freetext(content: str) -> AgentMarkdownResult:
+        return _finalize_markdown(content, None)
+
+    return _invoke_with_fallback(
+        structured_llm=structured_llm,
+        plain_llm=plain_llm,
+        prompt=prompt,
+        agent_name=agent_name,
+        process_structured=process_structured,
+        process_freetext=process_freetext,
+    )
