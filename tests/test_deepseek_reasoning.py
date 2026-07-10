@@ -135,8 +135,8 @@ class TestDeepSeekReasonerStructuredOutput:
         with pytest.raises(NotImplementedError):
             client.with_structured_output(_Sample)
 
-    def test_with_structured_output_works_for_v4(self):
-        """V4 models (non-reasoner) accept tool_choice; structured output works."""
+    def test_with_structured_output_raises_for_v4_thinking(self):
+        """V4 thinking models reject tool_choice; bind_structured skips them."""
         client = DeepSeekChatOpenAI(
             model="deepseek-v4-flash",
             api_key="placeholder",
@@ -147,10 +147,8 @@ class TestDeepSeekReasonerStructuredOutput:
         class _Sample(BaseModel):
             answer: str
 
-        # Should return a Runnable, not raise. (The actual API call would
-        # require a real key; we only assert binding succeeds.)
-        wrapped = client.with_structured_output(_Sample)
-        assert wrapped is not None
+        with pytest.raises(NotImplementedError):
+            client.with_structured_output(_Sample)
 
 
 # ---------------------------------------------------------------------------

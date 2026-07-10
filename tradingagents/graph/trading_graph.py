@@ -20,6 +20,7 @@ from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.dataflows.utils import safe_ticker_component
 from tradingagents.dataflows.instrument import analysts_for_ticker
+from tradingagents.graph.state_json import persistable_graph_state
 from tradingagents.agents.utils.rating import canonicalize_decision_ratings, normalize_rating_label
 from tradingagents.agents.utils.agent_states import (
     AgentState,
@@ -124,6 +125,7 @@ class TradingAgentsGraph:
             self.deep_thinking_llm,
             self.tool_nodes,
             self.conditional_logic,
+            intraday_mode=bool(self.config.get("intraday_mode")),
         )
 
         self.propagator = Propagator()
@@ -393,11 +395,13 @@ class TradingAgentsGraph:
         self._log_state(trade_date, final_state)
 
         # Store decision for deferred reflection on the next same-ticker run.
-        self.memory_log.store_decision(
-            ticker=company_name,
-            trade_date=trade_date,
-            final_trade_decision=final_state["final_trade_decision"],
-        )
+        final_trade_decision = final_state.get("final_trade_decision", "")
+        if final_trade_decision:
+            self.memory_log.store_decision(
+                ticker=company_name,
+                trade_date=trade_date,
+                final_trade_decision=final_trade_decision,
+            )
 
         # Clear checkpoint on successful completion to avoid stale state.
         if self.config.get("checkpoint_enabled"):
@@ -441,41 +445,7 @@ class TradingAgentsGraph:
 
     def _log_state(self, trade_date, final_state):
         """Log the final state to a JSON file."""
-        self.log_states_dict[str(trade_date)] = {
-            "company_of_interest": final_state["company_of_interest"],
-            "trade_date": final_state["trade_date"],
-            "instrument_type": final_state.get("instrument_type", "stock"),
-            "market_report": final_state["market_report"],
-            "sentiment_report": final_state["sentiment_report"],
-            "news_report": final_state["news_report"],
-            "fundamentals_report": final_state["fundamentals_report"],
-            "policy_report": final_state.get("policy_report", ""),
-            "hot_money_report": final_state.get("hot_money_report", ""),
-            "lockup_report": final_state.get("lockup_report", ""),
-            "investment_debate_state": {
-                "bull_history": final_state["investment_debate_state"]["bull_history"],
-                "bear_history": final_state["investment_debate_state"]["bear_history"],
-                "history": final_state["investment_debate_state"]["history"],
-                "current_response": final_state["investment_debate_state"][
-                    "current_response"
-                ],
-                "judge_decision": final_state["investment_debate_state"][
-                    "judge_decision"
-                ],
-            },
-            "trader_investment_decision": final_state["trader_investment_plan"],
-            "risk_debate_state": {
-                "aggressive_history": final_state["risk_debate_state"]["aggressive_history"],
-                "conservative_history": final_state["risk_debate_state"]["conservative_history"],
-                "neutral_history": final_state["risk_debate_state"]["neutral_history"],
-                "history": final_state["risk_debate_state"]["history"],
-                "judge_decision": final_state["risk_debate_state"]["judge_decision"],
-            },
-            "investment_plan": final_state["investment_plan"],
-            "research_rating": final_state.get("research_rating", ""),
-            "final_trade_decision": final_state["final_trade_decision"],
-            "portfolio_rating": final_state.get("portfolio_rating", ""),
-        }
+        self.log_states_dict[str(trade_date)] = persistable_graph_state(final_state)
 
         # Save to file. Reject ticker values that would escape the
         # results directory when joined as a path component.

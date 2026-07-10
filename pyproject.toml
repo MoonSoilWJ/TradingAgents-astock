@@ -51,6 +51,7 @@ google = ["langchain-google-genai>=4.0.0"]
 [project.scripts]
 tradingagents = "cli.main:app"
 tradingagents-web = "web.launch:main"
+tradingagents-intraday = "tradingagents.intraday.daemon_entry:main"
 
 [tool.setuptools.packages.find]
 include = ["tradingagents*", "cli*", "web*"]

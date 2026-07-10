@@ -8,6 +8,7 @@ from tradingagents.dataflows.instrument import (
     analysts_for_ticker,
     classify_astock_instrument,
     etf_skip_report,
+    settlement_rule,
 )
 from tradingagents.agents.utils.agent_utils import build_instrument_context
 from tradingagents.graph.propagation import Propagator
@@ -61,6 +62,24 @@ class InstrumentClassificationTests(unittest.TestCase):
         self.assertEqual(state["instrument_type"], "etf")
         self.assertIn("ETF 分析模式", state["fundamentals_report"])
         self.assertIn("ETF 分析模式", state["lockup_report"])
+
+    def test_settlement_rule_stock_is_t1(self):
+        self.assertEqual(settlement_rule("603936"), "T1")
+
+    def test_settlement_rule_equity_etf_is_t1(self):
+        for code in ("517400", "510300", "159915", "588000"):
+            self.assertEqual(settlement_rule(code), "T1", code)
+
+    def test_settlement_rule_cross_border_etf_is_t0(self):
+        for code in ("513100", "513180", "159920", "513600"):
+            self.assertEqual(settlement_rule(code), "T0", code)
+
+    def test_settlement_rule_t0_by_name_keyword(self):
+        # 159xxx equity ETFs are T+1 unless the name marks cross-border / HK indices.
+        self.assertEqual(settlement_rule("159999", "纳指ETF"), "T0")
+        self.assertEqual(settlement_rule("159999", "港股通科技ETF"), "T0")
+        self.assertEqual(settlement_rule("159999", "恒生ETF"), "T0")
+        self.assertEqual(settlement_rule("159999", "创业板ETF"), "T1")
 
 
 if __name__ == "__main__":

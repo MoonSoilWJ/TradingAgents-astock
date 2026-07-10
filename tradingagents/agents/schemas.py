@@ -231,3 +231,53 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
     if decision.time_horizon:
         parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
     return embed_rating_marker(decision.rating.value, "\n".join(parts))
+
+
+# ---------------------------------------------------------------------------
+# Intraday actionable orders (buy/sell/hold with share counts)
+# ---------------------------------------------------------------------------
+
+
+class IntradayAction(str, Enum):
+    BUY = "buy"
+    SELL = "sell"
+    HOLD = "hold"
+
+
+class IntradayDecision(BaseModel):
+    """Actionable intraday order for portfolio alerts."""
+
+    action: IntradayAction = Field(
+        description="Exactly one of buy / sell / hold. hold means no trade this round.",
+    )
+    quantity_shares: int = Field(
+        default=0,
+        ge=0,
+        description="Shares to buy or sell this round; 0 when action is hold.",
+    )
+    limit_price: Optional[float] = Field(
+        default=None,
+        description="Optional limit reference price in CNY.",
+    )
+    reason: str = Field(
+        description="One or two sentences explaining the action in plain Chinese.",
+    )
+
+
+def render_intraday_decision(decision: IntradayDecision) -> str:
+    """Render intraday decision as markdown for logs and UI."""
+    action_label = {
+        IntradayAction.BUY: "买入",
+        IntradayAction.SELL: "卖出",
+        IntradayAction.HOLD: "不动",
+    }[decision.action]
+    qty = decision.quantity_shares if decision.action != IntradayAction.HOLD else 0
+    parts = [
+        f"<!-- TRADINGAGENTS_INTRADAY: {decision.action.value}:{qty} -->",
+        f"**操作**: {action_label}",
+        f"**数量**: {qty} 股",
+    ]
+    if decision.limit_price is not None:
+        parts.append(f"**参考价**: {decision.limit_price}")
+    parts.extend(["", f"**理由**: {decision.reason}"])
+    return "\n".join(parts)

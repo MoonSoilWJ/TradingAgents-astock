@@ -81,3 +81,16 @@ class AgentState(MessagesState):
     final_trade_decision: Annotated[str, "Final decision made by the Risk Analysts"]
     portfolio_rating: Annotated[str, "5-tier rating from the Portfolio Manager"]
     past_context: Annotated[str, "Memory log context injected at run start (same-ticker decisions + cross-ticker lessons)"]
+
+    # Intraday monitoring (optional — injected when intraday_mode is enabled)
+    intraday_action: Annotated[str, "buy / sell / hold from intraday PM"]
+    intraday_quantity: Annotated[int, "Share count for this round"]
+    intraday_reason: Annotated[str, "Short reason for the intraday order"]
+    portfolio_shares: Annotated[int, "Current holdings for intraday PM context"]
+    portfolio_cash: Annotated[float, "Available cash for intraday PM context"]
+    portfolio_capital: Annotated[float, "Total capital for intraday PM context"]
+    portfolio_max_pct: Annotated[float, "Max position percent for intraday PM context"]
+    portfolio_price: Annotated[float, "Latest price for intraday PM context"]
+    portfolio_settlement: Annotated[str, "T0 or T1 settlement rule"]
+    portfolio_sellable: Annotated[int, "Sellable shares after T+0/T+1 rules"]
+    portfolio_lot: Annotated[int, "Minimum lot size for the instrument"]

@@ -19,12 +19,14 @@ class GraphSetup:
         deep_thinking_llm: Any,
         tool_nodes: Dict[str, ToolNode],
         conditional_logic: ConditionalLogic,
+        intraday_mode: bool = False,
     ):
         """Initialize with required components."""
         self.quick_thinking_llm = quick_thinking_llm
         self.deep_thinking_llm = deep_thinking_llm
         self.tool_nodes = tool_nodes
         self.conditional_logic = conditional_logic
+        self.intraday_mode = intraday_mode
 
     def setup_graph(
         self, selected_analysts=["market", "social", "news", "fundamentals", "policy", "hot_money", "lockup"]
@@ -111,7 +113,12 @@ class GraphSetup:
         aggressive_analyst = create_aggressive_debator(self.quick_thinking_llm)
         neutral_analyst = create_neutral_debator(self.quick_thinking_llm)
         conservative_analyst = create_conservative_debator(self.quick_thinking_llm)
-        portfolio_manager_node = create_portfolio_manager(self.deep_thinking_llm)
+        if self.intraday_mode:
+            from tradingagents.agents.managers.intraday_pm import create_intraday_portfolio_manager
+
+            portfolio_manager_node = create_intraday_portfolio_manager(self.deep_thinking_llm)
+        else:
+            portfolio_manager_node = create_portfolio_manager(self.deep_thinking_llm)
 
         # Create workflow
         workflow = StateGraph(AgentState)

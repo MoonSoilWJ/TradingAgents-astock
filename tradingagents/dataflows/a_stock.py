@@ -26,7 +26,6 @@ import re as _re
 import socket
 import time
 import uuid
-import urllib.request
 
 import pandas as pd
 import requests as _requests
@@ -45,8 +44,11 @@ def _get_prefix(code: str) -> str:
     """6-digit A-stock code -> market prefix for Tencent API."""
     if code.startswith(("6", "9")):
         return "sh"
-    elif code.startswith("8"):
+    if code.startswith("8"):
         return "bj"
+    # Shanghai on-exchange ETFs (51x / 56x / 58x)
+    if code.startswith(("51", "56", "58")):
+        return "sh"
     return "sz"
 
 
@@ -278,10 +280,13 @@ def _tencent_quote(codes: list[str]) -> dict[str, dict]:
     """
     prefixed = [f"{_get_prefix(c)}{c}" for c in codes]
     url = "https://qt.gtimg.cn/q=" + ",".join(prefixed)
-    req = urllib.request.Request(url)
-    req.add_header("User-Agent", "Mozilla/5.0")
-    resp = urllib.request.urlopen(req, timeout=10)
-    raw = resp.read().decode("gbk")
+    resp = _requests.get(
+        url,
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    raw = resp.content.decode("gbk")
 
     result = {}
     for line in raw.strip().split(";"):

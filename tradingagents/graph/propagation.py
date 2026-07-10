@@ -71,6 +71,17 @@ class Propagator:
             "lockup_report": lockup_report,
             "research_rating": "",
             "portfolio_rating": "",
+            "intraday_action": "",
+            "intraday_quantity": 0,
+            "intraday_reason": "",
+            "portfolio_shares": 0,
+            "portfolio_cash": 0.0,
+            "portfolio_capital": 0.0,
+            "portfolio_max_pct": 30.0,
+            "portfolio_price": 0.0,
+            "portfolio_settlement": "T1",
+            "portfolio_sellable": 0,
+            "portfolio_lot": 100,
         }
 
     def get_graph_args(self, callbacks: Optional[List] = None) -> Dict[str, Any]:

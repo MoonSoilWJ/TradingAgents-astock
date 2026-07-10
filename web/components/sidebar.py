@@ -312,4 +312,9 @@ def render_sidebar() -> None:
             st.session_state["start_analysis"] = None
 
     st.markdown("---")
+    with st.expander("📡 盘中监控", expanded=False):
+        from web.components.intraday_panel import render_intraday_panel
+
+        render_intraday_panel(compact=True)
+
     st.caption("⚠️ 仅供学习研究，不构成投资建议")
