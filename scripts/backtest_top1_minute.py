@@ -367,7 +367,11 @@ def run_minute_backtest(etf_daily: dict, etf_5min: dict, top_n: int = 1,
                         stop_loss: float = -0.5,
                         take_profit: float = 0.0,
                         use_trix: bool = False,
-                        fee_pct: float = 0.0) -> list[dict]:
+                        fee_pct: float = 0.0,
+                        sell_time: str = "",
+                        start_date: str = "",
+                        end_date: str = "",
+                        buy_time: str = "14:55") -> list[dict]:
     """分钟线精确回测。
 
     流程：
@@ -388,6 +392,10 @@ def run_minute_backtest(etf_daily: dict, etf_5min: dict, top_n: int = 1,
     all_dates = sorted(all_dates)
 
     eval_dates = all_dates[SCORE_WINDOW:-1]
+    if start_date:
+        eval_dates = [d for d in eval_dates if d >= start_date]
+    if end_date:
+        eval_dates = [d for d in eval_dates if d <= end_date]
 
     trades = []
     for date in eval_dates:
@@ -397,6 +405,16 @@ def run_minute_backtest(etf_daily: dict, etf_5min: dict, top_n: int = 1,
             continue
 
         # 计算 v6 得分选 TOP1
+        # 关键：如果指定了 buy_time（如 14:55），信号计算时间 = buy_time - 5min
+        # 用当日该时间点之前的分钟 K 线拼接出"部分日 K 线"来算得分
+        # 而不是用完整日 K 线（含尾盘 5 分钟）
+        signal_time = ""
+        if buy_time and buy_time != "15:00":
+            # 信号时间 = 买入时间 - 5 分钟
+            parts = buy_time.split(":")
+            signal_min = int(parts[0]) * 60 + int(parts[1]) - 5
+            signal_time = f"{signal_min // 60:02d}:{signal_min % 60:02d}"
+
         scores = []
         for code, info in etf_daily.items():
             returns = info["returns"]
@@ -406,7 +424,48 @@ def run_minute_backtest(etf_daily: dict, etf_5min: dict, top_n: int = 1,
             idx = idx_map[date]
             if idx < SCORE_WINDOW:
                 continue
-            score = compute_v6_score(returns, idx)
+
+            if signal_time:
+                # 用分钟线重构当日部分 K 线数据
+                min_info = etf_5min.get(code, {})
+                bars_by_date = min_info.get("bars_by_date", {})
+                today_bars = bars_by_date.get(date, [])
+
+                # 找到信号时间点之前的所有 bar
+                partial_bars = []
+                for bar in today_bars:
+                    bar_time = bar.get("day", "")
+                    time_part = bar_time[11:16] if len(bar_time) > 15 else ""
+                    if time_part and time_part <= signal_time:
+                        partial_bars.append(bar)
+
+                if partial_bars and len(partial_bars) >= 5:
+                    # 用部分 bar 构建当日"截至信号时间"的 OHLCV
+                    closes = [float(b.get("close", 0)) for b in partial_bars]
+                    vols = [float(b.get("volume", 0)) for b in partial_bars]
+                    partial_close = closes[-1]
+                    partial_vol = sum(vols)
+
+                    # 替换当日数据
+                    modified_returns = list(returns)  # 浅拷贝
+                    if idx > 0:
+                        prev_close = returns[idx - 1]["close"]
+                        partial_ret = ((partial_close - prev_close) / prev_close * 100) if prev_close else 0.0
+                    else:
+                        partial_ret = 0.0
+                    modified_returns[idx] = {
+                        "date": returns[idx]["date"],
+                        "close": partial_close,
+                        "return_pct": partial_ret,
+                        "volume": partial_vol,
+                    }
+
+                    score = compute_v6_score(modified_returns, idx)
+                else:
+                    score = compute_v6_score(returns, idx)
+            else:
+                score = compute_v6_score(returns, idx)
+
             scores.append((code, info["name"], info["etf_code"], score))
 
         if len(scores) < top_n * 2:
@@ -420,19 +479,23 @@ def run_minute_backtest(etf_daily: dict, etf_5min: dict, top_n: int = 1,
             min_info = etf_5min.get(code, {})
             bars_by_date = min_info.get("bars_by_date", {})
 
-            # 获取当日分钟 K 线，找 14:55 附近的收盘价作为买入价
+            # 获取当日分钟 K 线，根据 buy_time 找买入价
             today_bars = bars_by_date.get(date, [])
             buy_price = None
-            for bar in today_bars:
-                bar_time = bar.get("day", "")
-                # 14:50-14:59 区间的 K 线
-                if "14:5" in bar_time or "15:00" in bar_time:
-                    buy_price = float(bar.get("close", 0))
-                    break
 
-            # 如果没找到，用当日最后一根 K 线的收盘价
-            if buy_price is None and today_bars:
-                buy_price = float(today_bars[-1].get("close", 0))
+            if buy_time == "15:00":
+                if today_bars:
+                    buy_price = float(today_bars[-1].get("close", 0))
+            else:
+                # 找 buy_time 对应的 K 线收盘价
+                for bar in today_bars:
+                    bar_time = bar.get("day", "")
+                    time_part = bar_time[11:16] if len(bar_time) > 15 else ""
+                    if time_part == buy_time or (time_part and time_part <= buy_time and time_part >= "14:3"):
+                        buy_price = float(bar.get("close", 0))
+                # 如果没找到，用最接近的
+                if buy_price is None and today_bars:
+                    buy_price = float(today_bars[-1].get("close", 0))
 
             if buy_price is None or buy_price <= 0:
                 # 回退到日 K 收盘价
@@ -443,10 +506,26 @@ def run_minute_backtest(etf_daily: dict, etf_5min: dict, top_n: int = 1,
                 else:
                     continue
 
-            # 获取次日 5 分钟 K 线
+            # 获取次日分钟 K 线
             next_bars = bars_by_date.get(next_date, [])
             if not next_bars:
                 continue
+
+            # 如果指定了卖出时间（如 09:50），只取到该时间点的 K 线
+            if sell_time:
+                cutoff_bars = []
+                for bar in next_bars:
+                    bar_time = bar.get("day", "")
+                    # 提取时间部分 HH:MM
+                    time_part = bar_time[11:16] if len(bar_time) > 15 else ""
+                    if time_part and time_part <= sell_time:
+                        cutoff_bars.append(bar)
+                if not cutoff_bars:
+                    # 没有该时间点的数据，用前几根
+                    cutoff_bars = next_bars[:3] if len(next_bars) >= 3 else next_bars
+                next_bars_for_strategy = cutoff_bars
+            else:
+                next_bars_for_strategy = next_bars
 
             buy_cost = buy_price  # 买入价（手续费在最后统一扣）
 
@@ -466,16 +545,16 @@ def run_minute_backtest(etf_daily: dict, etf_5min: dict, top_n: int = 1,
             # 分钟线精确回测（不含手续费）
             if use_trix:
                 ret_minute, reason, detail = simulate_next_day_trix_cross(
-                    buy_cost, today_bars, next_bars)
+                    buy_cost, today_bars, next_bars_for_strategy)
             elif trail_trigger > 0:
                 ret_minute, reason, detail = simulate_next_day_trailing(
-                    buy_cost, next_bars, trail_trigger, trail_drop, stop_loss)
+                    buy_cost, next_bars_for_strategy, trail_trigger, trail_drop, stop_loss)
             elif take_profit > 0:
                 ret_minute, reason = simulate_next_day_fixed(
-                    buy_cost, next_bars, take_profit, stop_loss)
+                    buy_cost, next_bars_for_strategy, take_profit, stop_loss)
                 detail = {}
             else:
-                last_close = float(next_bars[-1].get("close", 0)) if next_bars else buy_cost
+                last_close = float(next_bars_for_strategy[-1].get("close", 0)) if next_bars_for_strategy else buy_cost
                 ret_minute = (last_close - buy_cost) / buy_cost * 100
                 reason = "close"
                 detail = {}
@@ -624,6 +703,14 @@ def main():
                         help="固定止盈（默认 0=用追踪止盈）")
     parser.add_argument("--fee", type=float, default=0.0,
                         help="单边手续费百分比（默认 0，万3填 0.03）")
+    parser.add_argument("--sell-time", type=str, default="",
+                        help="次日卖出时间，如 09:50 表示开盘后到9:50就卖（默认空=全天策略）")
+    parser.add_argument("--start-date", type=str, default="",
+                        help="回测起始日期 YYYY-MM-DD（默认空=不限制）")
+    parser.add_argument("--end-date", type=str, default="",
+                        help="回测结束日期 YYYY-MM-DD（默认空=不限制）")
+    parser.add_argument("--buy-time", type=str, default="14:55",
+                        help="买入时间 14:55 或 15:00（收盘价，默认 14:55）")
     parser.add_argument("--compare", action="store_true",
                         help="多组参数对比模式")
     args = parser.parse_args()
@@ -717,7 +804,10 @@ def main():
     trades = run_minute_backtest(
         etf_daily, etf_5min,
         trail_trigger=args.trail_trigger, trail_drop=args.trail_drop,
-        stop_loss=args.stop_loss, take_profit=args.take_profit)
+        stop_loss=args.stop_loss, take_profit=args.take_profit,
+        fee_pct=args.fee, sell_time=args.sell_time,
+        start_date=args.start_date, end_date=args.end_date,
+        buy_time=args.buy_time)
 
     # 4. 报告
     print()
@@ -765,7 +855,11 @@ def run_minute_compare(etf_daily: dict, etf_5min: dict, args):
                                      trail_trigger=tt, trail_drop=td,
                                      stop_loss=sl, take_profit=tp,
                                      use_trix=use_trix,
-                                     fee_pct=args.fee)
+                                     fee_pct=args.fee,
+                                     sell_time=args.sell_time,
+                                     start_date=args.start_date,
+                                     end_date=args.end_date,
+                                     buy_time=args.buy_time)
         if not trades:
             continue
         stats = _calc_stats([t["ret_minute"] for t in trades])
