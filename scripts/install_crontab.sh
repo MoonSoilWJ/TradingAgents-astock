@@ -9,11 +9,11 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 MONITOR_CMD="cd ${PROJECT_DIR} && $(which python3) scripts/rotation_monitor.py --alert-only"
-CRON_LINE="50 14 * * 1-5 ${MONITOR_CMD}"
+CRON_LINE="30 09 * * 1-5 ${MONITOR_CMD}"
 
 echo "=== 安装板块轮动监控定时任务 ==="
 echo ""
-echo "定时计划: 每个交易日（周一至周五）14:50 盘中运行"
+echo "定时计划: 每个交易日（周一至周五）09:30 开盘后运行"
 echo "运行模式: --alert-only（仅轮动信号时推送钉钉）"
 echo "命令: ${MONITOR_CMD}"
 echo ""

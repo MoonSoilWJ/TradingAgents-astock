@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""板块轮动监控系统（v5 公式：10日涨幅 × 量能 × 资金流CMF）
+"""板块轮动监控系统（v6 公式：3日涨幅 × 量能因子）
 
-功能：
-1. 拉取 49 个行业板块领涨股 K 线
-2. 计算 v5 动量得分排名
-3. 与上次运行状态对比，检测轮动信号（新进/退出 TOP5）
-4. 推送钉钉告警 + 控制台输出
+操作流程：
+1. 09:30 跑信号，推送钉钉 TOP1 ETF
+2. 09:50 买入 TOP1 ETF
+3. 次日 09:35 卖出（追踪止盈：触+3%回落0.5%卖，止损-0.5%）
 
 用法:
     python scripts/rotation_monitor.py              # 每日报告（推送钉钉）
@@ -13,7 +12,7 @@
     python scripts/rotation_monitor.py --alert-only  # 仅在有轮动信号时推送
 
 定时运行（crontab）:
-    30 15 * * 1-5 cd /path/to/project && python3 scripts/rotation_monitor.py
+    30 09 * * 1-5 cd /path/to/project && python3 scripts/rotation_monitor.py
 """
 
 import argparse
@@ -353,6 +352,9 @@ def run_monitor(dry_run: bool = False, alert_only: bool = False) -> int:
     print("=" * 60)
     print(f"  板块轮动监控报告 | {top5[0]['date']}")
     print("=" * 60)
+    print(f"  操作: 09:50 买入 TOP1 → 次日 09:35 卖")
+    print(f"  策略: 追踪触3%落0.5%止-0.5%")
+    print()
 
     if new_entries:
         print(f"\n  NEW  轮动信号: {len(new_entries)} 个板块新进入 TOP5")
@@ -408,6 +410,9 @@ def run_monitor(dry_run: bool = False, alert_only: bool = False) -> int:
             title = f"板块轮动{'信号' if new_entries else '日报'}"
             lines = [
                 f"### 板块轮动监控 | {top5[0]['date']}",
+                "",
+                f"**操作**: 09:50 买入 TOP1 → 次日 09:35 卖",
+                f"**策略**: 追踪触3%落0.5%止-0.5%",
                 "",
             ]
             if new_entries:
