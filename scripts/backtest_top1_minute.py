@@ -206,6 +206,52 @@ def calc_trix_signal(trix: list[float], signal_period: int = 9) -> list[float]:
     return _ema(trix, signal_period)
 
 
+def calc_obv(bars: list[dict]) -> list[float]:
+    """计算 OBV（On Balance Volume）。
+
+    OBV 逻辑：
+    - 收盘价上涨 → OBV += 成交量
+    - 收盘价下跌 → OBV -= 成交量
+    - 收盘价不变 → OBV 不变
+    """
+    obv = [0.0]
+    for i in range(1, len(bars)):
+        prev_close = float(bars[i - 1].get("close", 0))
+        curr_close = float(bars[i].get("close", 0))
+        vol = float(bars[i].get("volume", 0))
+        if curr_close > prev_close:
+            obv.append(obv[-1] + vol)
+        elif curr_close < prev_close:
+            obv.append(obv[-1] - vol)
+        else:
+            obv.append(obv[-1])
+    return obv
+
+
+def find_first_obv_death_cross(bars: list[dict], ma_period: int = 5):
+    """找第一个 OBV 死叉（OBV 下穿其 MA）。
+
+    OBV 死叉 = OBV 从上方下穿 OBV 的移动平均线。
+    """
+    if len(bars) < ma_period + 1:
+        return None
+
+    obv = calc_obv(bars)
+    obv_ma = []
+    for i in range(len(obv)):
+        if i < ma_period - 1:
+            obv_ma.append(obv[i])
+        else:
+            window = obv[i - ma_period + 1:i + 1]
+            obv_ma.append(sum(window) / len(window))
+
+    for i in range(ma_period, len(obv)):
+        if obv[i - 1] >= obv_ma[i - 1] and obv[i] < obv_ma[i]:
+            return i, float(bars[i].get("close", 0))
+
+    return None
+
+
 def find_first_trix_death_cross(bars: list[dict], period: int = 12,
                                  signal_period: int = 9):
     """在 5 分钟 K 线中找到第一个 TRIX 死叉（TRIX 下穿 signal）。
@@ -264,6 +310,17 @@ def simulate_next_day_trailing(buy_cost: float, min_bars: list[dict],
         bar_low = float(bar.get("low", 0))
         bar_close = float(bar.get("close", 0))
 
+        # 检查这根K线是否同时触及止损和触发价（K线内路径不确定）
+        stop_hit = stop_loss < 0 and bar_low <= stop_price
+        trigger_hit = bar_high >= trigger_price
+
+        if stop_hit and trigger_hit and not tracking:
+            # K线内既可能先止损也可能先触发追踪，用平均价模拟
+            avg_price = (stop_price + trigger_price) / 2
+            ret = (avg_price - buy_cost) / buy_cost * 100
+            return ret, "ambiguous", {"sell_price": avg_price, "bar": bar["day"],
+                                       "stop_price": stop_price, "trigger_price": trigger_price}
+
         # 1. 先检查止损（每根 K 线的最低价）
         if stop_loss < 0 and bar_low <= stop_price:
             ret = (stop_price - buy_cost) / buy_cost * 100
@@ -281,6 +338,14 @@ def simulate_next_day_trailing(buy_cost: float, min_bars: list[dict],
         if tracking:
             trail_sell_price = peak_high * (1 - trail_drop / 100)
             if bar_low <= trail_sell_price:
+                # 检查是否同时创了新高（K线内先涨后跌 vs 先跌后涨不确定）
+                if bar_high > peak_high:
+                    # 用新高和回落价的平均
+                    avg_sell = (bar_high + trail_sell_price) / 2
+                    ret = (avg_sell - buy_cost) / buy_cost * 100
+                    return ret, "trailing_stop", {"sell_price": avg_sell,
+                                                   "peak_high": bar_high, "bar": bar["day"],
+                                                   "note": "avg_high_low"}
                 ret = (trail_sell_price - buy_cost) / buy_cost * 100
                 return ret, "trailing_stop", {"sell_price": trail_sell_price,
                                                "peak_high": peak_high, "bar": bar["day"]}
@@ -362,11 +427,54 @@ def simulate_next_day_trix_cross(buy_cost: float, min_bars_today: list[dict],
     return ret, "close", {"reason": "no_death_cross"}
 
 
+def simulate_next_day_obv_cross(buy_cost: float, min_bars_today: list[dict],
+                                  min_bars_next: list[dict],
+                                  ma_period: int = 5) -> tuple[float, str, dict]:
+    """用分钟 K 线模拟次日 OBV 死叉卖出。
+
+    策略：
+    1. 用前一日 K 线 + 次日 K 线计算 OBV
+    2. 次日开盘后逐根检查，第一个 OBV 死叉（OBV 下穿其 MA）就卖出
+    3. 如果全天没有死叉，收盘卖
+    """
+    all_bars = min_bars_today + min_bars_next
+    if len(all_bars) < ma_period + 2:
+        last_close = float(min_bars_next[-1].get("close", 0)) if min_bars_next else buy_cost
+        ret = (last_close - buy_cost) / buy_cost * 100
+        return ret, "close", {"reason": "insufficient_data"}
+
+    warmup_len = len(min_bars_today)
+    obv = calc_obv(all_bars)
+    obv_ma = []
+    for i in range(len(obv)):
+        if i < ma_period - 1:
+            obv_ma.append(obv[i])
+        else:
+            window = obv[i - ma_period + 1:i + 1]
+            obv_ma.append(sum(window) / len(window))
+
+    search_start = max(warmup_len, ma_period + 1)
+    for i in range(search_start, len(obv)):
+        if obv[i - 1] >= obv_ma[i - 1] and obv[i] < obv_ma[i]:
+            sell_price = float(all_bars[i].get("close", 0))
+            ret = (sell_price - buy_cost) / buy_cost * 100
+            bar_time = all_bars[i].get("day", "")
+            return ret, "obv_death_cross", {
+                "sell_price": sell_price, "bar": bar_time,
+                "obv": obv[i], "obv_ma": obv_ma[i],
+            }
+
+    last_close = float(all_bars[-1].get("close", 0)) if all_bars else buy_cost
+    ret = (last_close - buy_cost) / buy_cost * 100
+    return ret, "close", {"reason": "no_death_cross"}
+
+
 def run_minute_backtest(etf_daily: dict, etf_5min: dict, top_n: int = 1,
                         trail_trigger: float = 3.0, trail_drop: float = 0.5,
                         stop_loss: float = -0.5,
                         take_profit: float = 0.0,
                         use_trix: bool = False,
+                        use_obv: bool = False,
                         fee_pct: float = 0.0,
                         sell_time: str = "",
                         start_date: str = "",
@@ -391,7 +499,7 @@ def run_minute_backtest(etf_daily: dict, etf_5min: dict, top_n: int = 1,
             all_dates.add(r["date"])
     all_dates = sorted(all_dates)
 
-    eval_dates = all_dates[SCORE_WINDOW:-1]
+    eval_dates = all_dates[SCORE_WINDOW:]
     if start_date:
         eval_dates = [d for d in eval_dates if d >= start_date]
     if end_date:
@@ -401,8 +509,6 @@ def run_minute_backtest(etf_daily: dict, etf_5min: dict, top_n: int = 1,
     for date in eval_dates:
         date_idx = all_dates.index(date)
         next_date = all_dates[date_idx + 1] if date_idx + 1 < len(all_dates) else None
-        if not next_date:
-            continue
 
         # 计算 v6 得分选 TOP1
         # 关键：如果指定了 buy_time（如 14:55），信号计算时间 = buy_time - 5min
@@ -469,6 +575,7 @@ def run_minute_backtest(etf_daily: dict, etf_5min: dict, top_n: int = 1,
             scores.append((code, info["name"], info["etf_code"], score))
 
         if len(scores) < top_n * 2:
+            print(f"    [DEBUG] {date} 跳过: 可计算v6得分的ETF只有 {len(scores)} 个，需要至少 {top_n * 2} 个")
             continue
 
         scores.sort(key=lambda x: x[3], reverse=True)
@@ -506,9 +613,30 @@ def run_minute_backtest(etf_daily: dict, etf_5min: dict, top_n: int = 1,
                 else:
                     continue
 
+            buy_cost = buy_price
+
+            # 最后一天（无次日数据）：只记录买入，卖点显示"-"
+            if not next_date:
+                trades.append({
+                    "date": date,
+                    "next_date": "",
+                    "sector": name,
+                    "etf_code": etf_code,
+                    "score": score,
+                    "buy_price": buy_cost,
+                    "buy_time": buy_time,
+                    "ret_high": 0.0,
+                    "ret_close": 0.0,
+                    "ret_minute": 0.0,
+                    "sell_reason": "pending",
+                    "detail": {},
+                })
+                continue
+
             # 获取次日分钟 K 线
             next_bars = bars_by_date.get(next_date, [])
             if not next_bars:
+                print(f"    [DEBUG] {date} 跳过: TOP1 {etf_code} {name} 在次日 {next_date} 无分钟K线数据")
                 continue
 
             # 如果指定了卖出时间（如 09:50），只取到该时间点的 K 线
@@ -527,8 +655,6 @@ def run_minute_backtest(etf_daily: dict, etf_5min: dict, top_n: int = 1,
             else:
                 next_bars_for_strategy = next_bars
 
-            buy_cost = buy_price  # 买入价（手续费在最后统一扣）
-
             # 日 K 线的 high/close（用于对比）
             daily_high = None
             daily_close = None
@@ -543,16 +669,21 @@ def run_minute_backtest(etf_daily: dict, etf_5min: dict, top_n: int = 1,
             ret_close = (daily_close - buy_cost) / buy_cost * 100 if daily_close else 0
 
             # 分钟线精确回测（不含手续费）
+            # 优先级：TRIX > OBV > 固定止盈 > 追踪止盈 > 收盘卖
+            # 注意：take_profit 显式指定时优先于 trail_trigger（因 trail_trigger 默认 3.0）
             if use_trix:
                 ret_minute, reason, detail = simulate_next_day_trix_cross(
                     buy_cost, today_bars, next_bars_for_strategy)
-            elif trail_trigger > 0:
-                ret_minute, reason, detail = simulate_next_day_trailing(
-                    buy_cost, next_bars_for_strategy, trail_trigger, trail_drop, stop_loss)
+            elif use_obv:
+                ret_minute, reason, detail = simulate_next_day_obv_cross(
+                    buy_cost, today_bars, next_bars_for_strategy)
             elif take_profit > 0:
                 ret_minute, reason = simulate_next_day_fixed(
                     buy_cost, next_bars_for_strategy, take_profit, stop_loss)
                 detail = {}
+            elif trail_trigger > 0:
+                ret_minute, reason, detail = simulate_next_day_trailing(
+                    buy_cost, next_bars_for_strategy, trail_trigger, trail_drop, stop_loss)
             else:
                 last_close = float(next_bars_for_strategy[-1].get("close", 0)) if next_bars_for_strategy else buy_cost
                 ret_minute = (last_close - buy_cost) / buy_cost * 100
@@ -581,7 +712,7 @@ def run_minute_backtest(etf_daily: dict, etf_5min: dict, top_n: int = 1,
     return trades
 
 
-def _calc_stats(rets: list[float]) -> dict:
+def _calc_stats(rets: list[float], total_days: int = 0) -> dict:
     if not rets:
         return {}
     wins = sum(1 for r in rets if r > 0)
@@ -590,8 +721,11 @@ def _calc_stats(rets: list[float]) -> dict:
         cum *= (1 + r / 100)
     cum_pct = (cum - 1) * 100
     avg = sum(rets) / len(rets)
-    if len(rets) > 1:
-        ann = (cum ** (250 / len(rets)) - 1) * 100
+    # 年化：用实际交易日数（total_days）而非交易笔数
+    # 过滤后很多天没交易，但时间仍在流逝，必须用实际天数
+    days = total_days if total_days > 0 else len(rets)
+    if days > 1:
+        ann = (cum ** (250 / days) - 1) * 100
         var = sum((r - avg) ** 2 for r in rets) / len(rets)
         std = var ** 0.5
         sharpe = (avg / std * (250 ** 0.5)) if std > 0 else 0
@@ -637,8 +771,17 @@ def print_minute_report(trades: list[dict], trail_trigger: float,
         print("无交易记录")
         return
 
-    # A. 分钟线精确
-    stats_min = _calc_stats([t["ret_minute"] for t in trades])
+    # 计算实际交易日跨度（从首笔信号日到末笔卖出日）
+    all_trade_dates = set()
+    for t in trades:
+        all_trade_dates.add(t["date"])
+        if t.get("next_date"):
+            all_trade_dates.add(t["next_date"])
+    total_days = len(all_trade_dates) if all_trade_dates else len(trades)
+
+    # A. 分钟线精确（排除 pending 未平仓）
+    closed_trades = [t for t in trades if t["sell_reason"] != "pending"]
+    stats_min = _calc_stats([t["ret_minute"] for t in closed_trades], total_days)
     print("─" * 60)
     print("A. 分钟线精确回测（追踪止盈）")
     print("─" * 60)
@@ -652,14 +795,15 @@ def print_minute_report(trades: list[dict], trail_trigger: float,
     print(f"  夏普比率: {stats_min['sharpe']:.2f}")
 
     tp = sum(1 for t in trades if t["sell_reason"] == "trailing_stop")
+    tp_fixed = sum(1 for t in trades if t["sell_reason"] == "take_profit")
     sl = sum(1 for t in trades if t["sell_reason"] == "stop_loss")
     cl = sum(1 for t in trades if t["sell_reason"] == "close")
-    print(f"  追踪触发: {tp} 次 | 止损触发: {sl} 次 | 收盘卖: {cl} 次")
+    print(f"  追踪触发: {tp} 次 | 止盈触发: {tp_fixed} 次 | 止损触发: {sl} 次 | 收盘卖: {cl} 次")
     print()
 
-    # B. 日 K 线粗略（对比）
-    stats_high = _calc_stats([t["ret_high"] for t in trades])
-    stats_close = _calc_stats([t["ret_close"] for t in trades])
+    # B. 日 K 线粗略（对比，排除 pending）
+    stats_high = _calc_stats([t["ret_high"] for t in closed_trades], total_days)
+    stats_close = _calc_stats([t["ret_close"] for t in closed_trades], total_days)
     print("─" * 60)
     print("B. 日 K 线粗略回测（对比）")
     print("─" * 60)
@@ -675,10 +819,16 @@ def print_minute_report(trades: list[dict], trail_trigger: float,
           f"{'日K最高':>8s} {'分钟精确':>8s} {'收盘':>8s} {'原因':>10s}")
     for t in trades:
         reason_cn = {"trailing_stop": "追踪止盈", "stop_loss": "止损",
-                     "take_profit": "止盈", "close": "收盘"}.get(t["sell_reason"], t["sell_reason"])
-        print(f"  {t['date']:>12s} {t['sector']:10s} {t['etf_code']:>8s} "
-              f"{t['buy_price']:8.3f} {t['ret_high']:+7.2f}% {t['ret_minute']:+7.2f}% "
-              f"{t['ret_close']:+7.2f}% {reason_cn:>10s}")
+                     "take_profit": "止盈", "close": "收盘",
+                     "pending": "-"}.get(t["sell_reason"], t["sell_reason"])
+        if t["sell_reason"] == "pending":
+            print(f"  {t['date']:>12s} {t['sector']:10s} {t['etf_code']:>8s} "
+                  f"{t['buy_price']:8.3f} {'-':>8s} {'-':>8s} "
+                  f"{'-':>8s} {reason_cn:>10s}")
+        else:
+            print(f"  {t['date']:>12s} {t['sector']:10s} {t['etf_code']:>8s} "
+                  f"{t['buy_price']:8.3f} {t['ret_high']:+7.2f}% {t['ret_minute']:+7.2f}% "
+                  f"{t['ret_close']:+7.2f}% {reason_cn:>10s}")
 
     print()
     print("=" * 80)
@@ -834,27 +984,26 @@ def main():
 def run_minute_compare(etf_daily: dict, etf_5min: dict, args):
     """多组参数分钟线对比。"""
     param_sets = [
-        # (trail_trigger, trail_drop, stop_loss, take_profit, use_trix)
+        # (trail_trigger, trail_drop, stop_loss, take_profit, use_trix, use_obv)
         # 固定止盈止损
-        (0, 0, 0, 0, False),           # 收盘卖（基线）
-        (0, 0, -1.0, 4.0, False),      # 止盈+4% 止损-1%
-        (0, 0, -1.0, 2.0, False),      # 止盈+2% 止损-1%
-        # 追踪止盈
-        (3.0, 0.5, -0.5, 0, False),
-        (3.0, 1.0, -0.5, 0, False),
-        (3.0, 1.0, -1.0, 0, False),
+        (0, 0, 0, 0, False, False),           # 收盘卖（基线）
+        (0, 0, -1.0, 4.0, False, False),      # 止盈+4% 止损-1%
+        # 追踪止盈（最优策略）
+        (3.0, 0.5, -0.5, 0, False, False),    # 追踪触3%落0.5%止-0.5%
         # TRIX 死叉
-        (0, 0, 0, 0, True),            # TRIX 死叉卖出
+        (0, 0, 0, 0, True, False),            # TRIX 死叉卖出
+        # OBV 死叉
+        (0, 0, 0, 0, False, True),            # OBV 死叉卖出
     ]
 
     print(f"\n>>> 运行 {len(param_sets)} 组参数分钟线对比...")
     all_results = []
 
-    for tt, td, sl, tp, use_trix in param_sets:
+    for tt, td, sl, tp, use_trix, use_obv in param_sets:
         trades = run_minute_backtest(etf_daily, etf_5min,
                                      trail_trigger=tt, trail_drop=td,
                                      stop_loss=sl, take_profit=tp,
-                                     use_trix=use_trix,
+                                     use_trix=use_trix, use_obv=use_obv,
                                      fee_pct=args.fee,
                                      sell_time=args.sell_time,
                                      start_date=args.start_date,
@@ -862,23 +1011,33 @@ def run_minute_compare(etf_daily: dict, etf_5min: dict, args):
                                      buy_time=args.buy_time)
         if not trades:
             continue
-        stats = _calc_stats([t["ret_minute"] for t in trades])
+        # 计算实际交易日跨度
+        all_trade_dates = set()
+        for t in trades:
+            all_trade_dates.add(t["date"])
+            if t.get("next_date"):
+                all_trade_dates.add(t["next_date"])
+        td_actual = len(all_trade_dates) if all_trade_dates else len(trades)
+        stats = _calc_stats([t["ret_minute"] for t in trades], td_actual)
         trail_h = sum(1 for t in trades if t["sell_reason"] == "trailing_stop")
         tp_h = sum(1 for t in trades if t["sell_reason"] == "take_profit")
         sl_h = sum(1 for t in trades if t["sell_reason"] == "stop_loss")
         trix_h = sum(1 for t in trades if t["sell_reason"] == "trix_death_cross")
+        obv_h = sum(1 for t in trades if t["sell_reason"] == "obv_death_cross")
         cl = sum(1 for t in trades if t["sell_reason"] == "close")
 
-        stats_high = _calc_stats([t["ret_high"] for t in trades])
-        stats_close = _calc_stats([t["ret_close"] for t in trades])
+        stats_high = _calc_stats([t["ret_high"] for t in trades], td_actual)
+        stats_close = _calc_stats([t["ret_close"] for t in trades], td_actual)
 
         all_results.append({
-            "tt": tt, "td": td, "sl": sl, "tp": tp, "use_trix": use_trix,
+            "tt": tt, "td": td, "sl": sl, "tp": tp,
+            "use_trix": use_trix, "use_obv": use_obv,
             "stats": stats,
             "stats_high": stats_high,
             "stats_close": stats_close,
             "trail_hits": trail_h, "tp_hits": tp_h,
-            "sl_hits": sl_h, "trix_hits": trix_h, "close_hits": cl,
+            "sl_hits": sl_h, "trix_hits": trix_h, "obv_hits": obv_h,
+            "close_hits": cl,
             "rets": [t["ret_minute"] for t in trades],
         })
 
@@ -886,13 +1045,15 @@ def run_minute_compare(etf_daily: dict, etf_5min: dict, args):
     print(f"  分钟线精确回测参数对比（14:55 买入，手续费万{args.fee * 100:.0f}）")
     print("=" * 125)
     print(f"  {'策略':>24} {'分钟累计%':>10} {'年化%':>9} {'胜率%':>6} "
-          f"{'夏普':>5} {'回撤%':>7} {'均笔':>7} {'日K最高%':>9} {'日K收盘%':>9} {'TRIX':>4} {'止盈':>4} {'追踪':>4} {'止损':>4} {'收盘':>4}")
-    print("  " + "─" * 121)
+          f"{'夏普':>5} {'回撤%':>7} {'均笔':>7} {'日K最高%':>9} {'日K收盘%':>9} {'TRIX':>4} {'OBV':>4} {'止盈':>4} {'追踪':>4} {'止损':>4} {'收盘':>4}")
+    print("  " + "─" * 125)
 
     for r in sorted(all_results, key=lambda x: x["stats"]["cum"], reverse=True):
         s = r["stats"]
         if r["use_trix"]:
             label = "TRIX 死叉卖"
+        elif r["use_obv"]:
+            label = "OBV 死叉卖"
         elif r["tt"] > 0:
             label = f"追踪 触{r['tt']}% 落{r['td']}% 止{r['sl']}"
         elif r["tp"] > 0:
@@ -903,13 +1064,15 @@ def run_minute_compare(etf_daily: dict, etf_5min: dict, args):
               f"{s['win_rate']:5.1f}% {s['sharpe']:4.2f} {s['max_drawdown']:+6.2f}% "
               f"{s['avg']:+6.3f}% "
               f"{r['stats_high']['cum']:+8.2f}% {r['stats_close']['cum']:+8.2f}% "
-              f"{r['trix_hits']:4d} {r['tp_hits']:4d} {r['trail_hits']:4d} {r['sl_hits']:4d} {r['close_hits']:4d}")
+              f"{r['trix_hits']:4d} {r['obv_hits']:4d} {r['tp_hits']:4d} {r['trail_hits']:4d} {r['sl_hits']:4d} {r['close_hits']:4d}")
 
     best = max(all_results, key=lambda x: x["stats"]["cum"])
     best_sharpe = max(all_results, key=lambda x: x["stats"]["sharpe"])
     print()
     if best["use_trix"]:
         bl = "TRIX 死叉卖"
+    elif best["use_obv"]:
+        bl = "OBV 死叉卖"
     elif best["tt"] > 0:
         bl = f"追踪 触{best['tt']}% 落{best['td']}% 止{best['sl']}"
     elif best["tp"] > 0:
