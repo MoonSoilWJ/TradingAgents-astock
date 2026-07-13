@@ -732,7 +732,7 @@ def run_all_groups(
 def load_market_data(sectors: list[dict], lookback: int) -> tuple[dict, dict, list[str]]:
     etf_codes = sorted({s["etf_code"] for s in sectors})
     datalen = lookback + 15
-    datalen_5m = min(lookback * 50 + 200, 3000)
+    datalen_5m = min(lookback * 50 + 200, 5000)
 
     etf_daily: dict = {}
     etf_5min: dict = {}
