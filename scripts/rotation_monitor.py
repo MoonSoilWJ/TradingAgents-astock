@@ -2,9 +2,9 @@
 """板块轮动监控系统（v6 公式：3日涨幅 × 量能因子）
 
 操作流程：
-1. 09:30 跑信号，推送钉钉 TOP1 ETF
-2. 09:50 买入 TOP1 ETF
-3. 次日 09:35 卖出（追踪止盈：触+3%回落0.5%卖，止损-0.5%）
+1. 信号时点（09:25/11:00/13:00/14:50）跑 v6 排名，推送 TOP1 ETF
+2. 买入 TOP1 ETF：上涨 0.3% 或 下跌 2% 再回弹 0.3%
+3. 次日卖出：追踪触 +3% 回落 0.5% 止盈，止损 -0.5%
 
 用法:
     python scripts/rotation_monitor.py              # 每日报告（推送钉钉）
@@ -12,7 +12,8 @@
     python scripts/rotation_monitor.py --alert-only  # 仅在有轮动信号时推送
 
 定时运行（crontab）:
-    30 09 * * 1-5 cd /path/to/project && python3 scripts/rotation_monitor.py
+    bash scripts/install_crontab.sh
+    # 09:25 / 11:00 / 13:00 / 14:50 各跑一次
 """
 
 import argparse
@@ -41,12 +42,15 @@ STATE_FILE = STATE_DIR / "monitor_state.json"
 LOOKBACK = 30  # K 线天数
 TOP_N = 5
 
+BUY_STRATEGY = "上涨0.3%或下跌2%再回弹0.3%"
+SELL_STRATEGY = "追踪触3%落0.5%止-0.5%"
+
 # ── 板块 → 代表性 ETF 映射 ────────────────────────────
 # 代码为场内 ETF 交易代码，可直接买卖
 # 无直接对应 ETF 的板块标注 "—"
 SECTOR_ETF_MAP: dict[str, tuple[str, str]] = {
     "电子信息": ("159997", "电子ETF"),
-    "电子器件": ("159995", "芯片ETF"),
+    "电子器件": ("512480", "半导体ETF"),
     "生物制药": ("512010", "医药ETF"),
     "医疗器械": ("159883", "医疗器械ETF"),
     "钢铁行业": ("515210", "钢铁ETF"),
@@ -65,11 +69,11 @@ SECTOR_ETF_MAP: dict[str, tuple[str, str]] = {
     "水泥行业": ("159745", "建材ETF"),
     "玻璃行业": ("159745", "建材ETF"),
     "陶瓷行业": ("159745", "建材ETF"),
-    "机械行业": ("159883", "机械ETF"),
-    "仪器仪表": ("159883", "机械ETF"),
+    "机械行业": ("515970", "华夏机械"),
+    "仪器仪表": ("515970", "华夏机械"),
     "汽车制造": ("516110", "汽车ETF"),
     "摩托车":   ("516110", "汽车ETF"),
-    "金融行业": ("512800", "银行ETF"),
+    "金融行业": ("510230", "金融ETF"),
     "房地产":   ("512200", "房地产ETF"),
     "交通运输": ("159662", "交运ETF"),
     "公路桥梁": ("159662", "交运ETF"),
@@ -79,7 +83,7 @@ SECTOR_ETF_MAP: dict[str, tuple[str, str]] = {
     "传媒娱乐": ("512980", "传媒ETF"),
     "船舶制造": ("512660", "军工ETF"),
     "飞机制造": ("512660", "军工ETF"),
-    "石油行业": ("162419", "石油基金"),
+    "石油行业": ("", "—"),
     "商业百货": ("159928", "消费ETF"),
     "服装鞋类": ("159928", "消费ETF"),
     # 以下板块无直接对应 ETF
@@ -367,12 +371,15 @@ def run_monitor(dry_run: bool = False, alert_only: bool = False) -> int:
     exit_names = [s["name"] for s in scored_etf if s["code"] in exits]
 
     # 5. 控制台输出
+    run_ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    data_date = top5[0]["date"]
     print()
     print("=" * 60)
-    print(f"  板块轮动监控报告 | {top5[0]['date']}")
+    print(f"  板块轮动监控报告 | {run_ts}")
+    print(f"  数据截止: {data_date} (日K最近交易日)")
     print("=" * 60)
-    print(f"  操作: 09:50 买入 TOP1 → 次日 09:35 卖")
-    print(f"  策略: 追踪触3%落0.5%止-0.5%")
+    print(f"  买入: {BUY_STRATEGY}")
+    print(f"  卖出: {SELL_STRATEGY}")
     print()
 
     if new_entries:
@@ -428,10 +435,11 @@ def run_monitor(dry_run: bool = False, alert_only: bool = False) -> int:
         else:
             title = f"板块轮动{'信号' if new_entries else '日报'}"
             lines = [
-                f"### 板块轮动监控 | {top5[0]['date']}",
+                f"### 板块轮动监控 | {run_ts}",
+                f"数据截止: {data_date} (日K最近交易日)",
                 "",
-                f"**操作**: 09:50 买入 TOP1 → 次日 09:35 卖",
-                f"**策略**: 追踪触3%落0.5%止-0.5%",
+                f"**买入**: {BUY_STRATEGY}",
+                f"**卖出**: {SELL_STRATEGY}",
                 "",
             ]
             if new_entries:
