@@ -4,9 +4,9 @@
 板块池: 平安证券 79 个（行业 + 概念），数据 scripts/pingan_sector_etf.json
 
 操作流程：
-1. 信号时点（09:25/11:00/13:00/14:50）跑 v6 排名，推送 TOP1 ETF
-2. 买入 TOP1 ETF：上涨 0.3% 或 下跌 2% 再回弹 0.3%
-3. 次日卖出：追踪触 +3% 回落 0.5% 止盈，止损 -0.5%
+1. 信号时点（09:40/11:00/13:00/14:50）跑 v6 排名，推送 TOP1 ETF
+2. 买入 TOP1 ETF：上涨 1.0% 或 下跌 2% 再回弹 0.3%
+3. 次日卖出：追踪触 +3% 回落 0.5% 止盈，或 T+1 收盘卖（无固定止损）
 
 v6 选股（与 backtest_rotation_8way 一致，见 rotation_v6.py）：
 - 09:25 等开盘前：T-1 日完整 v6
@@ -71,8 +71,9 @@ SECTOR_POOL = "pingan"
 LOOKBACK = 30  # K 线天数
 TOP_N = 5
 
-BUY_STRATEGY = "上涨0.3%或下跌2%再回弹0.3%"
-SELL_STRATEGY = "追踪触3%落0.5%止-0.5%"
+BUY_STRATEGY = "上涨1.0%追涨（不抄底）"
+SELL_STRATEGY = "追踪触+3%落0.5%止盈 / T+1收盘卖（无固定止损）"
+FILTER_RULE = "前一日涨幅>7%则跳过（防追高次日暴跌）"
 
 # ── 数据采集 ──────────────────────────────────────────
 
@@ -379,6 +380,7 @@ def run_monitor(dry_run: bool = False, alert_only: bool = False) -> int:
     print("=" * 60)
     print(f"  买入: {BUY_STRATEGY}")
     print(f"  卖出: {SELL_STRATEGY}")
+    print(f"  过滤: {FILTER_RULE}")
     print()
 
     if new_entries:

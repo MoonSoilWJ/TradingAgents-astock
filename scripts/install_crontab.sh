@@ -1,6 +1,6 @@
 #!/bin/bash
 # 安装板块轮动监控定时任务
-# 每个交易日在 09:25 / 11:00 / 13:00 / 14:50 自动运行并推送钉钉日报
+# 每个交易日在 09:40 / 11:00 / 13:00 / 14:50 自动运行并推送钉钉日报
 #
 # 用法: bash scripts/install_crontab.sh
 
@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 MONITOR_CMD="cd ${PROJECT_DIR} && $(which python3) scripts/rotation_monitor.py"
 CRON_TIMES=(
-    "25 09"   # 09:25
+    "40 09"   # 09:40（回测最优信号时点）
     "0 11"    # 11:00
     "0 13"    # 13:00
     "50 14"   # 14:50
@@ -19,10 +19,8 @@ CRON_TIMES=(
 echo "=== 安装板块轮动监控定时任务 ==="
 echo ""
 echo "定时计划: 每个交易日（周一至周五）"
-echo "  - 09:25"
-echo "  - 11:00"
-echo "  - 13:00"
-echo "  - 14:50"
+echo "  - 09:40（主信号，回测30天+11.73%/60天+17.49%）"
+echo "  - 11:00 / 13:00 / 14:50（辅助信号）"
 echo "运行模式: 每次推送 TOP5 日报（无 --alert-only）"
 echo "命令: ${MONITOR_CMD}"
 echo ""

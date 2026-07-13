@@ -3,10 +3,11 @@
 
 信号组 1~5: 09:10 / 09:25 / 09:40 / 14:40 / 14:50（平安 79 板块 v6 TOP1）
 信号组 6: 卖出后即时发信号（首日空仓 09:30 发首信号）
-买入: 上涨 0.3% 或 下跌 2% 再回弹 0.3%（相对信号时点基准价）
-卖出: 追踪触 +3% 回落 0.5%，止损 -0.5%（仅买入次日，T+1）
+买入: 上涨 1.0% 追涨（不抄底）
+卖出: 追踪触 +3% 回落 0.5%，T+1 收盘卖（无固定止损）
+过滤: 前一日涨幅 >7% 则跳过（防追高次日暴跌）
 约束: 单仓位、先卖后买、手续费万分之 3（双边）
-未买入: 全部 6 组均在信号日当天尝试，收盘未触发则按收盘价兜底买入
+未买入: 信号日当天未触发追涨则放弃（不兜底）
 开盘前信号(09:10/09:25/09:30): v6 用 T-1 日完整得分（无 5 分 K 时不偷看当日收盘）
 
 用法:
@@ -41,13 +42,15 @@ SINA_INTERVAL = 0.25
 TIMEOUT = 15
 
 SIGNAL_TIMES = ("09:10", "09:25", "09:40", "14:40", "14:50")
-BUY_UP = 0.3
-BUY_DOWN = 2.0
+BUY_UP = 1.0
+BUY_DOWN = 99.0  # 禁用抄底（回测显示抄底单亏损率高）
 BUY_REBOUND = 0.3
-STOP_LOSS = -0.5
+STOP_LOSS = -99.0  # 禁用固定止损（靠追踪止盈+T+1收盘卖）
 TRAIL_TRIGGER = 3.0
 TRAIL_DROP = 0.5
 FEE_PCT = 0.03  # 万分之 3
+MAX_3D_RETURN = 99.0  # 禁用过热过滤（设极高值）
+PREV_DAY_SURGE_LIMIT = 7.0  # 前一日涨幅超过此值(%)则不买（防追高暴跌）
 
 
 def time_to_min(t: str) -> int:
@@ -120,7 +123,7 @@ def price_at_time(bars: list[dict], target: str) -> float | None:
         if len(parts) < 2:
             continue
         bar_min = int(parts[0]) * 60 + int(parts[1])
-        if bar_min <= target_min:
+        if bar_min < target_min:  # 只用已完成的 bar，不含当前未完成 bar
             diff = target_min - bar_min
             if diff < best_diff:
                 best_diff = diff
@@ -179,6 +182,10 @@ def rank_sectors(
             if len(returns) < SCORE_WINDOW + 1:
                 continue
             idx = len(returns) - 1
+            # 过热过滤（盘中无日K当日的情况）
+            ret_3d = sum(r["return_pct"] for r in returns[idx - SCORE_WINDOW + 1 : idx + 1])
+            if ret_3d > MAX_3D_RETURN:
+                continue
             score = score_at_signal(returns, idx, partial_close, partial_vol)
             if score is None:
                 continue
@@ -187,6 +194,10 @@ def rank_sectors(
 
         idx = idx_map[signal_date]
         if idx < SCORE_WINDOW:
+            continue
+        # 过热过滤：3日累计涨幅过高则跳过（防跳空回落）
+        ret_3d = sum(r["return_pct"] for r in returns[idx - SCORE_WINDOW + 1 : idx + 1])
+        if ret_3d > MAX_3D_RETURN:
             continue
         score = score_at_signal(returns, idx, partial_close, partial_vol)
         if score is None:
@@ -218,7 +229,7 @@ def _partial_close_vol(bars: list[dict], cutoff: str) -> tuple[float | None, flo
         if len(parts) < 2:
             continue
         bar_min = int(parts[0]) * 60 + int(parts[1])
-        if bar_min <= cutoff_min:
+        if bar_min < cutoff_min:  # 只用已完成的 bar，不含当前未完成 bar
             close = b["close"]
             vol += b["volume"]
     return close, vol
@@ -390,6 +401,17 @@ def run_one(
                 etf = top1["etf_code"]
                 baseline = signal_baseline(etf, day, signal_time, etf_daily, etf_5min)
                 if baseline and baseline > 0:
+                    # 前一日涨幅检查：暴涨则跳过（防追高次日暴跌）
+                    info = etf_daily.get(etf, {})
+                    returns = info.get("returns", [])
+                    idx_map = {r["date"]: i for i, r in enumerate(returns)}
+                    if day in idx_map and idx_map[day] > 0:
+                        prev_ret = returns[idx_map[day] - 1]["return_pct"]
+                        if prev_ret > PREV_DAY_SURGE_LIMIT:
+                            log(day, signal_time, "信号跳过",
+                                sector=top1["name"], etf=etf,
+                                reason=f"前日涨{prev_ret:+.1f}%>{PREV_DAY_SURGE_LIMIT}%")
+                            continue
                     pending = {
                         "sector": top1["name"],
                         "etf": etf,
@@ -410,7 +432,7 @@ def run_one(
 
         holding, pending = _try_buy_same_day(
             pending, day, signal_time, sold_at_min, etf_5min,
-            fee_pct, all_dates, log, close_fallback=True,
+            fee_pct, all_dates, log, close_fallback=False,
             etf_daily=etf_daily,
         )
 
@@ -458,6 +480,17 @@ def _issue_signal(
         baseline = signal_baseline(etf, day, signal_time, etf_daily, etf_5min)
         if not baseline or baseline <= 0:
             continue
+        # 前一日涨幅检查
+        info = etf_daily.get(etf, {})
+        returns = info.get("returns", [])
+        idx_map = {r["date"]: i for i, r in enumerate(returns)}
+        if day in idx_map and idx_map[day] > 0:
+            prev_ret = returns[idx_map[day] - 1]["return_pct"]
+            if prev_ret > PREV_DAY_SURGE_LIMIT:
+                log(day, signal_time, "信号跳过",
+                    sector=top1["name"], etf=etf,
+                    reason=f"前日涨{prev_ret:+.1f}%>{PREV_DAY_SURGE_LIMIT}%")
+                continue
         log(day, signal_time, "信号",
             sector=top1["name"], etf=etf,
             baseline=round(baseline, 4), top1_score="v6")
@@ -653,7 +686,7 @@ def run_one_post_sell(
 
         holding, pending = _try_buy_same_day(
             pending, day, pending["signal_time"], sold_at_min, etf_5min,
-            fee_pct, all_dates, log, close_fallback=True,
+            fee_pct, all_dates, log, close_fallback=False,
             etf_daily=etf_daily,
         )
         if not holding:
@@ -795,7 +828,7 @@ def save_daily_reports(results: list[dict], eval_days: int) -> Path:
     parts = [
         f"# 板块轮动 6 组回测 — 按天明细",
         f"",
-        f"区间: 最近 {eval_days} 个交易日 | 手续费万3 | T+1 | 先卖后买 | 当日未买则收盘兜底",
+        f"区间: 最近 {eval_days} 个交易日 | 手续费万3 | T+1 | 先卖后买 | 未触发则放弃",
         f"",
     ]
     for r in results:
@@ -809,10 +842,17 @@ def save_daily_reports(results: list[dict], eval_days: int) -> Path:
 def print_report(results: list[dict], eval_days: int):
     print()
     print("=" * 80)
-    print("  板块轮动 6 组回测对比（平安板块池，当日未买则收盘兜底）")
+    print("  板块轮动 6 组回测对比（平安板块池，未触发则放弃）")
     print("=" * 80)
     print(f"  区间: 最近 {eval_days} 个交易日 | 手续费万3双边 | T+1卖出 | 单仓位 | 先卖后买")
-    print(f"  买入: 涨{BUY_UP}% / 跌{BUY_DOWN}%回弹{BUY_REBOUND}% | 卖出: 追踪+{TRAIL_TRIGGER}%落{TRAIL_DROP}% 止{STOP_LOSS}%")
+    sl_display = "无止损" if STOP_LOSS <= -50 else f"止{STOP_LOSS}%"
+    dip_display = "不抄底" if BUY_DOWN > 50 else f"跌{BUY_DOWN}%回弹"
+    surge_display = f"前日涨>{PREV_DAY_SURGE_LIMIT}%跳过" if PREV_DAY_SURGE_LIMIT < 50 else ""
+    print(f"  买入: 涨{BUY_UP}% {dip_display} | 卖出: 追踪+{TRAIL_TRIGGER}%落{TRAIL_DROP}% {sl_display}")
+    note = "未触发则放弃"
+    if surge_display:
+        note += f" | {surge_display}"
+    print(f"  注: {note}")
     print()
     print(f"  {'信号':>6} {'成交':>4} {'累计收益':>10} {'胜率':>8} {'均笔':>8} {'资金阻塞':>6}")
     print("  " + "-" * 58)
@@ -837,14 +877,14 @@ def print_report(results: list[dict], eval_days: int):
 def main():
     parser = argparse.ArgumentParser(description="板块轮动 6 组回测")
     parser.add_argument("--days", type=int, default=30, help="回测交易日数（默认30）")
-    parser.add_argument("--fee", type=float, default=FEE_PCT, help="单边手续费%（默认0.03=万3）")
+    parser.add_argument("--fee", type=float, default=FEE_PCT, help="单边手续费(默认0.03=万3)")
     parser.add_argument("--daily", action="store_true", help="输出按天明细到 markdown 文件")
     args = parser.parse_args()
 
     sectors = load_pingan_sectors()
     print(f"=== 板块轮动 6 组回测 ===")
     print(f"板块池: 平安 {len(sectors)} 个 | 回测 {args.days} 日 | 手续费万{args.fee * 100:.0f}")
-    print(f"信号: {', '.join(SIGNAL_TIMES)} + 卖出后动态 | 当日未买则收盘兜底")
+    print(f"信号: {', '.join(SIGNAL_TIMES)} + 卖出后动态 | 未触发则放弃")
     print(f"选股: 盘中 partial v6；开盘前 T-1 日 v6")
     print()
 
