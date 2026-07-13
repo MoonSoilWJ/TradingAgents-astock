@@ -25,42 +25,18 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
+from sector_etf_map import etf_to_sina_symbol, load_pingan_sectors  # noqa: E402
+
 PROXY = os.environ.get("ROTATION_PROXY", "http://127.0.0.1:7890")
 SINA_INTERVAL = 0.2
 TIMEOUT = 15
-
-SECTOR_ETF_MAP: dict[str, tuple[str, str]] = {
-    "电子信息": ("159997", "电子ETF"), "电子器件": ("159995", "芯片ETF"),
-    "生物制药": ("512010", "医药ETF"), "医疗器械": ("159883", "医疗器械ETF"),
-    "钢铁行业": ("515210", "钢铁ETF"), "煤炭行业": ("515220", "煤炭ETF"),
-    "有色金属": ("512400", "有色金属ETF"), "电力行业": ("159611", "电力ETF"),
-    "发电设备": ("159637", "电力设备ETF"), "电器行业": ("159996", "家电ETF"),
-    "家电行业": ("159996", "家电ETF"), "酿酒行业": ("512690", "酒ETF"),
-    "食品行业": ("515170", "食品ETF"), "化工行业": ("516020", "化工ETF"),
-    "化纤行业": ("516020", "化工ETF"), "农药化肥": ("516020", "化工ETF"),
-    "建筑建材": ("159745", "建材ETF"), "水泥行业": ("159745", "建材ETF"),
-    "玻璃行业": ("159745", "建材ETF"), "陶瓷行业": ("159745", "建材ETF"),
-    "机械行业": ("159883", "机械ETF"), "仪器仪表": ("159883", "机械ETF"),
-    "汽车制造": ("516110", "汽车ETF"), "摩托车":   ("516110", "汽车ETF"),
-    "金融行业": ("512800", "银行ETF"), "房地产":   ("512200", "房地产ETF"),
-    "交通运输": ("159662", "交运ETF"), "公路桥梁": ("159662", "交运ETF"),
-    "酒店旅游": ("159766", "旅游ETF"), "农林牧渔": ("159825", "农业ETF"),
-    "环保行业": ("512580", "环保ETF"), "传媒娱乐": ("512980", "传媒ETF"),
-    "船舶制造": ("512660", "军工ETF"), "飞机制造": ("512660", "军工ETF"),
-    "石油行业": ("162419", "石油基金"), "商业百货": ("159928", "消费ETF"),
-    "服装鞋类": ("159928", "消费ETF"),
-}
 
 SCORE_WINDOW = 3
 VOL_THRESHOLD = 1.5
 VOL_AVG_PERIOD = 5
 VOL_BASE = 0.3
-
-
-def etf_to_sina_symbol(etf_code: str) -> str:
-    if etf_code.startswith("5"):
-        return f"sh{etf_code}"
-    return f"sz{etf_code}"
 
 
 def curl_get(url: str) -> str:
@@ -81,27 +57,6 @@ def curl_get(url: str) -> str:
         except subprocess.TimeoutExpired:
             continue
     return ""
-
-
-def fetch_sina_sectors() -> list[dict]:
-    raw = curl_get("http://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php")
-    if not raw or "=" not in raw:
-        return []
-    json_str = raw.split("=", 1)[1].strip().rstrip(";")
-    try:
-        data = json.loads(json_str)
-    except json.JSONDecodeError:
-        return []
-    sectors = []
-    for _, val in data.items():
-        parts = val.split(",")
-        if len(parts) < 13:
-            continue
-        try:
-            sectors.append({"code": parts[0], "name": parts[1]})
-        except (ValueError, IndexError):
-            continue
-    return sectors
 
 
 def fetch_daily_kline(symbol: str, datalen: int = 30) -> list[dict]:
@@ -870,13 +825,13 @@ def main():
     print(f"历史天数: {args.lookback}")
     print()
 
-    # 1. 获取板块列表
-    print(">>> 获取板块列表...")
-    sectors = fetch_sina_sectors()
-    print(f"    {len(sectors)} 个行业板块")
+    # 1. 获取板块列表（平安证券）
+    print(">>> 获取板块列表（平安证券）...")
+    sectors = load_pingan_sectors()
+    print(f"    {len(sectors)} 个板块（均有 ETF）")
 
     # 2. 获取日 K 线（选 TOP1）+ 分钟 K 线（精确模拟）
-    etf_sectors = [s for s in sectors if s["name"] in SECTOR_ETF_MAP]
+    etf_sectors = sectors
 
     # 根据回测时长选择分钟 K 线周期
     # 5分钟: 每日48根, 5000根上限≈104天
@@ -908,7 +863,7 @@ def main():
     etf_daily = {}
     etf_5min = {}
     for i, sec in enumerate(etf_sectors):
-        etf_code, etf_name = SECTOR_ETF_MAP[sec["name"]]
+        etf_code, etf_name = sec["etf_code"], sec["etf_name"]
 
         # 日 K 线
         daily_klines = fetch_daily_kline(etf_code, datalen=args.lookback)

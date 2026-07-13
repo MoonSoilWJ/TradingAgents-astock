@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""板块轮动动量验证脚本（新浪数据源版）
-
-完全使用新浪财经 API，不依赖东财（避免 IP 封禁问题）。
+"""板块轮动动量验证脚本（平安板块池 + ETF）
 
 数据链路：
-1. 新浪板块列表 → 49 个行业板块 + 领涨股
-2. 新浪领涨股 K 线（30 天）→ 作为板块价格代理
+1. 平安板块列表 → scripts/pingan_sector_etf.json（79 个行业 + 概念）
+2. 新浪 ETF 日 K 线（30 天）→ 板块价格代理
 3. 计算动量得分 → 验证持续性 / 排名稳定性 / 轮动信号质量
 
 用法:
@@ -21,60 +19,15 @@ import sys
 import time
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
+from sector_etf_map import etf_to_sina_symbol, load_pingan_sectors  # noqa: E402
 
 PROXY = os.environ.get("ROTATION_PROXY", "http://127.0.0.1:7890")
 SINA_INTERVAL = 0.3  # 新浪不限流，但仍加小延迟
 TIMEOUT = 15
-
-# ── 板块 → 代表性 ETF 映射 ────────────────────────────
-SECTOR_ETF_MAP: dict[str, tuple[str, str]] = {
-    "电子信息": ("159997", "电子ETF"),
-    "电子器件": ("159995", "芯片ETF"),
-    "生物制药": ("512010", "医药ETF"),
-    "医疗器械": ("159883", "医疗器械ETF"),
-    "钢铁行业": ("515210", "钢铁ETF"),
-    "煤炭行业": ("515220", "煤炭ETF"),
-    "有色金属": ("512400", "有色金属ETF"),
-    "电力行业": ("159611", "电力ETF"),
-    "发电设备": ("159637", "电力设备ETF"),
-    "电器行业": ("159996", "家电ETF"),
-    "家电行业": ("159996", "家电ETF"),
-    "酿酒行业": ("512690", "酒ETF"),
-    "食品行业": ("515170", "食品ETF"),
-    "化工行业": ("516020", "化工ETF"),
-    "化纤行业": ("516020", "化工ETF"),
-    "农药化肥": ("516020", "化工ETF"),
-    "建筑建材": ("159745", "建材ETF"),
-    "水泥行业": ("159745", "建材ETF"),
-    "玻璃行业": ("159745", "建材ETF"),
-    "陶瓷行业": ("159745", "建材ETF"),
-    "机械行业": ("159883", "机械ETF"),
-    "仪器仪表": ("159883", "机械ETF"),
-    "汽车制造": ("516110", "汽车ETF"),
-    "摩托车":   ("516110", "汽车ETF"),
-    "金融行业": ("512800", "银行ETF"),
-    "房地产":   ("512200", "房地产ETF"),
-    "交通运输": ("159662", "交运ETF"),
-    "公路桥梁": ("159662", "交运ETF"),
-    "酒店旅游": ("159766", "旅游ETF"),
-    "农林牧渔": ("159825", "农业ETF"),
-    "环保行业": ("512580", "环保ETF"),
-    "传媒娱乐": ("512980", "传媒ETF"),
-    "船舶制造": ("512660", "军工ETF"),
-    "飞机制造": ("512660", "军工ETF"),
-    "石油行业": ("162419", "石油基金"),
-    "商业百货": ("159928", "消费ETF"),
-    "服装鞋类": ("159928", "消费ETF"),
-}
-
-
-def etf_to_sina_symbol(etf_code: str) -> str:
-    """ETF 代码转新浪格式: 5开头→sh, 1开头→sz。"""
-    if etf_code.startswith("5"):
-        return f"sh{etf_code}"
-    elif etf_code.startswith("1"):
-        return f"sz{etf_code}"
-    return f"sh{etf_code}"
 
 
 def curl_get(url: str) -> str:
@@ -99,46 +52,6 @@ def curl_get(url: str) -> str:
 
 
 # ── 数据采集 ──────────────────────────────────────────
-
-def fetch_sina_sectors() -> list[dict]:
-    """获取新浪行业板块列表。
-
-    返回: [{code, name, stock_count, avg_chg_pct, leader_code, leader_name}, ...]
-    """
-    raw = curl_get("http://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php")
-    if not raw or "=" not in raw:
-        return []
-
-    json_str = raw.split("=", 1)[1].strip().rstrip(";")
-    try:
-        data = json.loads(json_str)
-    except json.JSONDecodeError:
-        return []
-
-    sectors = []
-    for key, val in data.items():
-        parts = val.split(",")
-        if len(parts) < 13:
-            continue
-        try:
-            sectors.append({
-                "code": parts[0],
-                "name": parts[1],
-                "stock_count": int(parts[2]) if parts[2] else 0,
-                "avg_pe": float(parts[3]) if parts[3] else 0,
-                "avg_chg_pct": float(parts[4]) if parts[4] else 0,
-                "volume": parts[6],
-                "turnover": parts[7],
-                "leader_code": parts[8],
-                "leader_chg_pct": float(parts[9]) if parts[9] else 0,
-                "leader_price": float(parts[10]) if parts[10] else 0,
-                "leader_name": parts[12],
-            })
-        except (ValueError, IndexError):
-            continue
-
-    return sectors
-
 
 def fetch_sina_kline(symbol: str, datalen: int = 30) -> list[dict]:
     """获取新浪股票日 K 线。
@@ -598,9 +511,9 @@ def print_report(sectors, all_returns, results, top_n):
     print("          板块轮动动量验证报告")
     print("=" * 70)
     print(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"板块总数: {len(sectors)}（新浪行业分类）")
+    print(f"板块总数: {len(sectors)}（平安证券板块池）")
     print(f"有 K 线数据的板块: {len(all_returns)}")
-    print(f"数据源: 新浪财经（板块列表 + 领涨股 K 线代理）")
+    print(f"数据源: 平安板块列表 + 新浪 ETF 日 K 线")
     print()
 
     if all_returns:
@@ -1099,68 +1012,33 @@ def print_deep_tuning(results: list[dict], window: int):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="板块轮动动量验证（新浪数据源）")
+    parser = argparse.ArgumentParser(description="板块轮动动量验证（平安板块池 + ETF）")
     parser.add_argument("--top-n", type=int, default=5, help="TOP N 板块数（默认 5）")
     parser.add_argument("--lookback", type=int, default=30, help="历史天数（默认 30）")
     args = parser.parse_args()
 
     print(f"代理: {PROXY}")
-    print(f"数据源: 新浪财经")
+    print(f"数据源: 平安板块池 + 新浪 ETF K 线")
     print(f"TOP N: {args.top_n}, 历史天数: {args.lookback}")
     print()
 
-    # 1. 获取板块列表
-    print(">>> 获取新浪行业板块列表...")
-    sectors = fetch_sina_sectors()
-    print(f"    获取到 {len(sectors)} 个行业板块")
+    print(">>> 获取平安板块列表...")
+    sectors = load_pingan_sectors()
+    print(f"    获取到 {len(sectors)} 个板块（均有 ETF）")
     if not sectors:
-        print("❌ 无法获取板块列表，请检查网络/代理")
+        print("❌ 无法加载平安板块列表 (pingan_sector_etf.json)")
         sys.exit(1)
 
     for s in sectors[:5]:
-        print(f"    {s['name']:10s} 涨幅={s['avg_chg_pct']:+.2f}% 领涨={s['leader_code']} {s['leader_name']}")
+        print(f"    {s['name']:10s} ETF={s['etf_code']} {s['etf_name']}")
     print()
 
-    # 2. 获取每个板块领涨股的 K 线
-    print(f">>> 获取 {len(sectors)} 个板块领涨股的 {args.lookback} 日 K 线...")
+    print(f">>> 获取 {len(sectors)} 个板块 ETF 的 {args.lookback} 日 K 线...")
     print(f"    预计耗时: ~{len(sectors) * SINA_INTERVAL:.0f} 秒")
-    all_returns = {}
-    for i, sec in enumerate(sectors):
-        leader = sec["leader_code"]
-        if not leader or len(leader) < 4:
-            continue
-        klines = fetch_sina_kline(leader, datalen=args.lookback)
-        if klines and len(klines) > 3:
-            returns = compute_daily_returns(klines)
-            all_returns[sec["code"]] = {
-                "name": sec["name"],
-                "leader": leader,
-                "leader_name": sec["leader_name"],
-                "returns": returns,
-            }
-        if (i + 1) % 10 == 0:
-            print(f"    进度: {i+1}/{len(sectors)} ({len(all_returns)} 有数据)")
-
-    print(f"    完成: {len(all_returns)}/{len(sectors)} 个板块有 K 线数据")
-
-    # 3. 验证动量（领涨股）
-    print("\n>>> [A] 领涨股验证: 计算动量得分并验证...")
-    results = validate_momentum(all_returns, top_n=args.top_n)
-
-    # 4. 输出领涨股报告
-    print()
-    print("=" * 70)
-    print("  [A] 领涨股验证报告")
-    print("=" * 70)
-    print_report(sectors, all_returns, results, args.top_n)
-
-    # 5. ETF 验证（独立计算，不与领涨股混合）
     etf_returns = {}
-    etf_sectors = [s for s in sectors if s["name"] in SECTOR_ETF_MAP]
-    print(f"\n\n>>> [B] ETF 验证: 获取 {len(etf_sectors)} 个板块的 ETF K 线...")
-    for i, sec in enumerate(etf_sectors):
-        etf_code, etf_name = SECTOR_ETF_MAP[sec["name"]]
-        sina_sym = etf_to_sina_symbol(etf_code)
+    for i, sec in enumerate(sectors):
+        etf_code, etf_name = sec["etf_code"], sec["etf_name"]
+        sina_sym = etf_to_sina_symbol(sec["etf_raw"])
         klines = fetch_sina_kline(sina_sym, datalen=args.lookback)
         if klines and len(klines) > 3:
             returns = compute_daily_returns(klines)
@@ -1171,25 +1049,24 @@ def main():
                 "returns": returns,
             }
         if (i + 1) % 10 == 0:
-            print(f"    进度: {i+1}/{len(etf_sectors)} ({len(etf_returns)} 有数据)")
+            print(f"    进度: {i+1}/{len(sectors)} ({len(etf_returns)} 有数据)")
 
-    print(f"    完成: {len(etf_returns)}/{len(etf_sectors)} 个 ETF 有 K 线数据")
+    print(f"    完成: {len(etf_returns)}/{len(sectors)} 个 ETF 有 K 线数据")
 
-    if len(etf_returns) >= args.top_n * 2:
-        print("\n>>> [B] ETF 验证: 计算动量得分并验证...")
-        etf_results = validate_momentum(etf_returns, top_n=args.top_n)
-        print()
-        print("=" * 70)
-        print("  [B] ETF 验证报告（独立计算，不与领涨股混合）")
-        print("=" * 70)
-        print_report(etf_sectors, etf_returns, etf_results, args.top_n)
-    else:
-        etf_results = None
-        print("    ETF 数据不足，跳过 ETF 验证")
+    if len(etf_returns) < args.top_n * 2:
+        print("❌ ETF 数据不足，无法验证")
+        sys.exit(1)
 
-    # 6. 对比汇总
+    print("\n>>> ETF 验证: 计算动量得分并验证...")
+    etf_results = validate_momentum(etf_returns, top_n=args.top_n)
+    print()
+    print("=" * 70)
+    print("  ETF 验证报告（平安板块池）")
+    print("=" * 70)
+    print_report(sectors, etf_returns, etf_results, args.top_n)
+
     print("\n\n" + "=" * 70)
-    print("  [A] vs [B] 领涨股 vs ETF 对比汇总")
+    print("  ETF 动量汇总")
     print("=" * 70)
 
     def _summary(res, label):
@@ -1212,36 +1089,26 @@ def main():
             pos = sum(1 for r in rqv if r["positive"])
             print(f"  {label} v4 量价:     {pos}/{len(rqv)} = {pos/len(rqv)*100:.1f}%")
 
-    _summary(results, "领涨股")
-    print()
     _summary(etf_results, "ETF    ")
     print("=" * 70)
 
-    # 7. ETF 参数搜索
-    if etf_returns:
-        print("\n>>> [C] ETF 参数搜索...")
-        tune_results = tune_etf(etf_returns, top_n=args.top_n)
-        print()
-        print_tuning(tune_results)
+    print("\n>>> ETF 参数搜索...")
+    tune_results = tune_etf(etf_returns, top_n=args.top_n)
+    print()
+    print_tuning(tune_results)
 
-        # 深度调参: 取基础搜索中持续性最优的窗口
-        best_w = max(tune_results, key=lambda x: x["persistence"])["window"]
-        print(f"\n>>> [D] ETF 深度调参（{best_w}日窗口）...")
-        deep_results = tune_etf_deep(etf_returns, window=best_w, top_n=args.top_n)
-        print()
-        print_deep_tuning(deep_results, best_w)
-    else:
-        tune_results = None
+    best_w = max(tune_results, key=lambda x: x["persistence"])["window"]
+    print(f"\n>>> ETF 深度调参（{best_w}日窗口）...")
+    deep_results = tune_etf_deep(etf_returns, window=best_w, top_n=args.top_n)
+    print()
+    print_deep_tuning(deep_results, best_w)
 
-    # 7. 保存原始数据
     cache_dir = os.path.expanduser("~/.tradingagents/rotation")
     os.makedirs(cache_dir, exist_ok=True)
     cache_file = os.path.join(cache_dir, f"validation_{datetime.now().strftime('%Y%m%d_%H%M')}.json")
     with open(cache_file, "w", encoding="utf-8") as f:
         json.dump({
             "sectors": sectors,
-            "all_returns": all_returns,
-            "results": results,
             "etf_returns": etf_returns,
             "etf_results": etf_results,
         }, f, ensure_ascii=False, indent=2, default=str)

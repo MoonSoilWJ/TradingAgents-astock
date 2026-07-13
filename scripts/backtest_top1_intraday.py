@@ -39,10 +39,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from backtest_top1 import (
-    SECTOR_ETF_MAP, SCORE_WINDOW, VOL_THRESHOLD, VOL_AVG_PERIOD, VOL_BASE,
-    fetch_sina_sectors, fetch_sina_kline, compute_daily_data, compute_v6_score,
+    SCORE_WINDOW, VOL_THRESHOLD, VOL_AVG_PERIOD, VOL_BASE,
+    fetch_sina_kline, compute_daily_data, compute_v6_score,
     _calc_stats, _print_stats,
 )
+from sector_etf_map import etf_to_sina_symbol, load_pingan_sectors  # noqa: E402
 
 # ── 5 分钟 K 线 ──────────────────────────────────────
 
@@ -550,18 +551,18 @@ def main():
     print(f"历史: {args.lookback} 天, 滑点: {args.slippage}%, 手续费: {args.fee}%")
     print()
 
-    # 1. 获取板块列表
-    print(">>> 获取板块列表...")
-    sectors = fetch_sina_sectors()
-    print(f"    {len(sectors)} 个行业板块")
+    # 1. 获取板块列表（平安证券）
+    print(">>> 获取板块列表（平安证券）...")
+    sectors = load_pingan_sectors()
+    print(f"    {len(sectors)} 个板块（均有 ETF）")
 
     # 2. 拉日 K 线（算 v6 得分）
-    etf_sectors = [s for s in sectors if s["name"] in SECTOR_ETF_MAP and SECTOR_ETF_MAP[s["name"]][0]]
+    etf_sectors = sectors
     print(f">>> 获取 {len(etf_sectors)} 个 ETF 的日 K 线 ({args.lookback + 10} 日)...")
     etf_daily = {}
     for i, sec in enumerate(etf_sectors):
-        etf_code, etf_name = SECTOR_ETF_MAP[sec["name"]]
-        sina_sym = etf_to_sina_symbol(etf_code)
+        etf_code, etf_name = sec["etf_code"], sec["etf_name"]
+        sina_sym = etf_to_sina_symbol(sec["etf_raw"])
         klines = fetch_sina_kline(sina_sym, datalen=args.lookback + 10)
         if klines and len(klines) > SCORE_WINDOW + 1:
             returns = compute_daily_data(klines)

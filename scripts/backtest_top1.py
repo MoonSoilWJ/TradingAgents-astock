@@ -33,45 +33,19 @@ from pathlib import Path
 # 复用验证脚本的数据采集和公式逻辑
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
+from sector_etf_map import etf_to_sina_symbol, load_pingan_sectors  # noqa: E402
 
 PROXY = os.environ.get("ROTATION_PROXY", "http://127.0.0.1:7890")
 SINA_INTERVAL = 0.3
 TIMEOUT = 15
 
-# ── ETF 映射（与监控脚本一致） ────────────────────────
-
-SECTOR_ETF_MAP: dict[str, tuple[str, str]] = {
-    "电子信息": ("159997", "电子ETF"), "电子器件": ("512480", "半导体ETF"),
-    "生物制药": ("512010", "医药ETF"), "医疗器械": ("159883", "医疗器械ETF"),
-    "钢铁行业": ("515210", "钢铁ETF"), "煤炭行业": ("515220", "煤炭ETF"),
-    "有色金属": ("512400", "有色金属ETF"), "电力行业": ("159611", "电力ETF"),
-    "发电设备": ("159637", "电力设备ETF"), "电器行业": ("159996", "家电ETF"),
-    "家电行业": ("159996", "家电ETF"), "酿酒行业": ("512690", "酒ETF"),
-    "食品行业": ("515170", "食品ETF"), "化工行业": ("516020", "化工ETF"),
-    "化纤行业": ("516020", "化工ETF"), "农药化肥": ("516020", "化工ETF"),
-    "建筑建材": ("159745", "建材ETF"), "水泥行业": ("159745", "建材ETF"),
-    "玻璃行业": ("159745", "建材ETF"), "陶瓷行业": ("159745", "建材ETF"),
-    "机械行业": ("515970", "华夏机械"), "仪器仪表": ("515970", "华夏机械"),
-    "汽车制造": ("516110", "汽车ETF"), "摩托车":   ("516110", "汽车ETF"),
-    "金融行业": ("510230", "金融ETF"), "房地产":   ("512200", "房地产ETF"),
-    "交通运输": ("159662", "交运ETF"), "公路桥梁": ("159662", "交运ETF"),
-    "酒店旅游": ("159766", "旅游ETF"), "农林牧渔": ("159825", "农业ETF"),
-    "环保行业": ("512580", "环保ETF"), "传媒娱乐": ("512980", "传媒ETF"),
-    "船舶制造": ("512660", "军工ETF"), "飞机制造": ("512660", "军工ETF"),
-    "石油行业": ("", "—"), "商业百货": ("159928", "消费ETF"),
-    "服装鞋类": ("159928", "消费ETF"),
-}
-
-SCORE_WINDOW = 3
-VOL_THRESHOLD = 1.5
-VOL_AVG_PERIOD = 5
-VOL_BASE = 0.3
-
-
-def etf_to_sina_symbol(etf_code: str) -> str:
-    if etf_code.startswith("5"):
-        return f"sh{etf_code}"
-    return f"sz{etf_code}"
+from rotation_v6 import (  # noqa: E402
+    SCORE_WINDOW,
+    VOL_AVG_PERIOD,
+    VOL_BASE,
+    VOL_THRESHOLD,
+    compute_v6_score,
+)
 
 
 def curl_get(url: str) -> str:
@@ -92,27 +66,6 @@ def curl_get(url: str) -> str:
         except subprocess.TimeoutExpired:
             continue
     return ""
-
-
-def fetch_sina_sectors() -> list[dict]:
-    raw = curl_get("http://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php")
-    if not raw or "=" not in raw:
-        return []
-    json_str = raw.split("=", 1)[1].strip().rstrip(";")
-    try:
-        data = json.loads(json_str)
-    except json.JSONDecodeError:
-        return []
-    sectors = []
-    for _, val in data.items():
-        parts = val.split(",")
-        if len(parts) < 13:
-            continue
-        try:
-            sectors.append({"code": parts[0], "name": parts[1]})
-        except (ValueError, IndexError):
-            continue
-    return sectors
 
 
 def fetch_sina_kline(symbol: str, datalen: int = 30) -> list[dict]:
@@ -196,10 +149,7 @@ def fetch_mootdx_kline(symbol: str, offset: int = 800) -> list[dict]:
 
 def fetch_kline(symbol: str, lookback: int = 30) -> list[dict]:
     """获取 K 线，新浪 API 支持 datalen 最多约 1000 天。"""
-    sina_symbol = symbol
-    if len(symbol) == 6:
-        sina_symbol = f"sh{symbol}" if symbol.startswith("6") else f"sz{symbol}"
-    return fetch_sina_kline(sina_symbol, datalen=lookback)
+    return fetch_sina_kline(etf_to_sina_symbol(symbol), datalen=lookback)
 
 
 def compute_daily_data(klines: list[dict]) -> list[dict]:
@@ -221,20 +171,6 @@ def compute_daily_data(klines: list[dict]) -> list[dict]:
             "return_pct": ret, "volume": volume,
         })
     return result
-
-
-def compute_v6_score(returns: list[dict], idx: int) -> float:
-    """计算 v6 得分（3日涨幅 × 量能因子）。"""
-    if idx < SCORE_WINDOW:
-        return 0.0
-    ret_w = sum(r["return_pct"] for r in returns[idx - SCORE_WINDOW + 1:idx + 1])
-    vol_today = returns[idx].get("volume", 0)
-    vol_prev = [returns[j].get("volume", 0)
-                for j in range(max(0, idx - VOL_AVG_PERIOD), idx)]
-    avg_vol = sum(vol_prev) / len(vol_prev) if vol_prev and sum(vol_prev) > 0 else vol_today
-    vol_ratio = vol_today / avg_vol if avg_vol > 0 else 1.0
-    vol_factor = VOL_BASE + (1 - VOL_BASE) * min(vol_ratio / VOL_THRESHOLD, 1.0)
-    return ret_w * vol_factor
 
 
 def calc_trailing_stop_ret(buy_cost: float, sell_high: float, sell_close: float,
@@ -647,19 +583,19 @@ def main():
     print(f"止盈: +{tp}%, 止损: {sl}%")
     print()
 
-    # 1. 获取板块列表
-    print(">>> 获取板块列表...")
-    sectors = fetch_sina_sectors()
-    print(f"    {len(sectors)} 个行业板块")
+    # 1. 获取板块列表（平安证券）
+    print(">>> 获取板块列表（平安证券）...")
+    sectors = load_pingan_sectors()
+    print(f"    {len(sectors)} 个板块（均有 ETF）")
 
     # 2. 获取 ETF K 线
-    etf_sectors = [s for s in sectors if s["name"] in SECTOR_ETF_MAP]
+    etf_sectors = sectors
     print(f">>> 获取 {len(etf_sectors)} 个板块的 ETF K 线 ({args.lookback} 日)...")
     if args.lookback > 90:
         print(f"    新浪 API 分批拉取（每批 90 天）")
     etf_data = {}
     for i, sec in enumerate(etf_sectors):
-        etf_code, etf_name = SECTOR_ETF_MAP[sec["name"]]
+        etf_code, etf_name = sec["etf_code"], sec["etf_name"]
         klines = fetch_kline(etf_code, lookback=args.lookback)
         if klines and len(klines) > SCORE_WINDOW + 1:
             returns = compute_daily_data(klines)

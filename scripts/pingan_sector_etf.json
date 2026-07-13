@@ -1,0 +1,401 @@
+{
+  "responseCode": "0",
+  "rows": [
+    {
+      "sectorName": "油气开采",
+      "fund1Code": "SZ159697",
+      "fund1Abbrname": "石油ETF鹏华"
+    },
+    {
+      "sectorName": "中药",
+      "fund1Code": "SH560080",
+      "fund1Abbrname": "中药ETF汇添富"
+    },
+    {
+      "sectorName": "股份制银行",
+      "fund1Code": "SH512730",
+      "fund1Abbrname": "银行ETF鹏华"
+    },
+    {
+      "sectorName": "创新药",
+      "fund1Code": "SZ159377",
+      "fund1Abbrname": "创业板医药ETF国泰"
+    },
+    {
+      "sectorName": "生物疫苗",
+      "fund1Code": "SH562860",
+      "fund1Abbrname": "疫苗ETF嘉实"
+    },
+    {
+      "sectorName": "超级品牌",
+      "fund1Code": "SZ159736",
+      "fund1Abbrname": "食品饮料ETF天弘"
+    },
+    {
+      "sectorName": "房屋建设",
+      "fund1Code": "SH516970",
+      "fund1Abbrname": "基建ETF广发"
+    },
+    {
+      "sectorName": "猪肉",
+      "fund1Code": "SZ159011",
+      "fund1Abbrname": "养殖ETF华安"
+    },
+    {
+      "sectorName": "证券",
+      "fund1Code": "SZ159841",
+      "fund1Abbrname": "证券ETF天弘"
+    },
+    {
+      "sectorName": "养鸡",
+      "fund1Code": "SZ159023",
+      "fund1Abbrname": "养殖ETF万家"
+    },
+    {
+      "sectorName": "生物制品",
+      "fund1Code": "SH562860",
+      "fund1Abbrname": "疫苗ETF嘉实"
+    },
+    {
+      "sectorName": "煤炭开采",
+      "fund1Code": "SH515220",
+      "fund1Abbrname": "煤炭ETF国泰"
+    },
+    {
+      "sectorName": "养殖业",
+      "fund1Code": "SZ159011",
+      "fund1Abbrname": "养殖ETF华安"
+    },
+    {
+      "sectorName": "大消费",
+      "fund1Code": "SZ159736",
+      "fund1Abbrname": "食品饮料ETF天弘"
+    },
+    {
+      "sectorName": "中特估100",
+      "fund1Code": "SH515110",
+      "fund1Abbrname": "一带一路ETF易方达"
+    },
+    {
+      "sectorName": "白酒",
+      "fund1Code": "SH512690",
+      "fund1Abbrname": "酒ETF鹏华"
+    },
+    {
+      "sectorName": "基础建设",
+      "fund1Code": "SH516970",
+      "fund1Abbrname": "基建ETF广发"
+    },
+    {
+      "sectorName": "医疗器械",
+      "fund1Code": "SZ159873",
+      "fund1Abbrname": "医疗设备ETF天弘"
+    },
+    {
+      "sectorName": "电力",
+      "fund1Code": "SZ159146",
+      "fund1Abbrname": "电力ETF华宝"
+    },
+    {
+      "sectorName": "中字头股票",
+      "fund1Code": "SH515110",
+      "fund1Abbrname": "一带一路ETF易方达"
+    },
+    {
+      "sectorName": "住房租赁",
+      "fund1Code": "SH512200",
+      "fund1Abbrname": "房地产ETF南方"
+    },
+    {
+      "sectorName": "房地产开发",
+      "fund1Code": "SH512200",
+      "fund1Abbrname": "房地产ETF南方"
+    },
+    {
+      "sectorName": "特钢概念",
+      "fund1Code": "SH515210",
+      "fund1Abbrname": "钢铁ETF国泰"
+    },
+    {
+      "sectorName": "水泥",
+      "fund1Code": "SZ159745",
+      "fund1Abbrname": "建材ETF国泰"
+    },
+    {
+      "sectorName": "绿色电力",
+      "fund1Code": "SZ159625",
+      "fund1Abbrname": "绿色电力ETF嘉实"
+    },
+    {
+      "sectorName": "教育",
+      "fund1Code": "SH513360",
+      "fund1Abbrname": "教育ETF博时"
+    },
+    {
+      "sectorName": "半导体",
+      "fund1Code": "SH512480",
+      "fund1Abbrname": "半导体ETF国联安"
+    },
+    {
+      "sectorName": "一带一路",
+      "fund1Code": "SH516970",
+      "fund1Abbrname": "基建ETF广发"
+    },
+    {
+      "sectorName": "AI算力芯片",
+      "fund1Code": "SH589390",
+      "fund1Abbrname": "科创芯片设计ETF招商"
+    },
+    {
+      "sectorName": "旅游及景区",
+      "fund1Code": "SZ159766",
+      "fund1Abbrname": "旅游ETF富国"
+    },
+    {
+      "sectorName": "互联网金融",
+      "fund1Code": "SZ159851",
+      "fund1Abbrname": "金融科技ETF华宝"
+    },
+    {
+      "sectorName": "金融科技",
+      "fund1Code": "SZ159851",
+      "fund1Abbrname": "金融科技ETF华宝"
+    },
+    {
+      "sectorName": "氟化工概念",
+      "fund1Code": "SH516020",
+      "fund1Abbrname": "化工ETF华宝"
+    },
+    {
+      "sectorName": "磷化工",
+      "fund1Code": "SZ159870",
+      "fund1Abbrname": "化工ETF鹏华"
+    },
+    {
+      "sectorName": "金属铜",
+      "fund1Code": "SZ159871",
+      "fund1Abbrname": "有色ETF银华"
+    },
+    {
+      "sectorName": "装修建材",
+      "fund1Code": "SZ159745",
+      "fund1Abbrname": "建材ETF国泰"
+    },
+    {
+      "sectorName": "人工智能",
+      "fund1Code": "SH515230",
+      "fund1Abbrname": "软件ETF国泰"
+    },
+    {
+      "sectorName": "区块链",
+      "fund1Code": "SH516860",
+      "fund1Abbrname": "金融科技ETF博时"
+    },
+    {
+      "sectorName": "网络安全",
+      "fund1Code": "SH562920",
+      "fund1Abbrname": "信息安全ETF易方达"
+    },
+    {
+      "sectorName": "软件开发",
+      "fund1Code": "SZ159899",
+      "fund1Abbrname": "软件ETF招商"
+    },
+    {
+      "sectorName": "物联网",
+      "fund1Code": "SH562920",
+      "fund1Abbrname": "信息安全ETF易方达"
+    },
+    {
+      "sectorName": "信创",
+      "fund1Code": "SZ159036",
+      "fund1Abbrname": "软件开发ETF华宝"
+    },
+    {
+      "sectorName": "汽车零部件",
+      "fund1Code": "SZ159565",
+      "fund1Abbrname": "汽车零部件ETF易方达"
+    },
+    {
+      "sectorName": "大数据",
+      "fund1Code": "SZ159590",
+      "fund1Abbrname": "软件ETF汇添富"
+    },
+    {
+      "sectorName": "智慧城市",
+      "fund1Code": "SZ159586",
+      "fund1Abbrname": "计算机ETF南方"
+    },
+    {
+      "sectorName": "数据中心",
+      "fund1Code": "SH562920",
+      "fund1Abbrname": "信息安全ETF易方达"
+    },
+    {
+      "sectorName": "云游戏",
+      "fund1Code": "SH517770",
+      "fund1Abbrname": "游戏传媒ETF浦银"
+    },
+    {
+      "sectorName": "小米概念股",
+      "fund1Code": "SZ159786",
+      "fund1Abbrname": "VRETF银华"
+    },
+    {
+      "sectorName": "VR&AR",
+      "fund1Code": "SZ159786",
+      "fund1Abbrname": "VRETF银华"
+    },
+    {
+      "sectorName": "华为产业链",
+      "fund1Code": "SH516520",
+      "fund1Abbrname": "智能驾驶ETF华泰柏瑞"
+    },
+    {
+      "sectorName": "苹果产业链",
+      "fund1Code": "SZ159786",
+      "fund1Abbrname": "VRETF银华"
+    },
+    {
+      "sectorName": "磷酸铁锂",
+      "fund1Code": "SH515030",
+      "fund1Abbrname": "新能源车ETF华夏"
+    },
+    {
+      "sectorName": "汽车芯片",
+      "fund1Code": "SH562820",
+      "fund1Abbrname": "集成电路ETF嘉实"
+    },
+    {
+      "sectorName": "智能制造",
+      "fund1Code": "SZ159770",
+      "fund1Abbrname": "机器人ETF天弘"
+    },
+    {
+      "sectorName": "大飞机",
+      "fund1Code": "SH512560",
+      "fund1Abbrname": "军工ETF易方达"
+    },
+    {
+      "sectorName": "数字货币",
+      "fund1Code": "SZ159851",
+      "fund1Abbrname": "金融科技ETF华宝"
+    },
+    {
+      "sectorName": "无人驾驶",
+      "fund1Code": "SH515250",
+      "fund1Abbrname": "智能汽车ETF富国"
+    },
+    {
+      "sectorName": "工业自动化",
+      "fund1Code": "SH560630",
+      "fund1Abbrname": "机器人ETF万家"
+    },
+    {
+      "sectorName": "航母",
+      "fund1Code": "SH512810",
+      "fund1Abbrname": "军工ETF华宝"
+    },
+    {
+      "sectorName": "工业母机",
+      "fund1Code": "SZ159667",
+      "fund1Abbrname": "工业母机ETF国泰"
+    },
+    {
+      "sectorName": "电子竞技",
+      "fund1Code": "SZ159869",
+      "fund1Abbrname": "游戏ETF华夏"
+    },
+    {
+      "sectorName": "手机游戏",
+      "fund1Code": "SH512980",
+      "fund1Abbrname": "传媒ETF广发"
+    },
+    {
+      "sectorName": "央企国企改革",
+      "fund1Code": "SH515110",
+      "fund1Abbrname": "一带一路ETF易方达"
+    },
+    {
+      "sectorName": "机器人概念",
+      "fund1Code": "SZ159039",
+      "fund1Abbrname": "机器人ETF华安"
+    },
+    {
+      "sectorName": "稀土永磁",
+      "fund1Code": "SH516780",
+      "fund1Abbrname": "稀土ETF华泰柏瑞"
+    },
+    {
+      "sectorName": "苹果概念",
+      "fund1Code": "SZ159786",
+      "fund1Abbrname": "VRETF银华"
+    },
+    {
+      "sectorName": "云计算",
+      "fund1Code": "SZ159899",
+      "fund1Abbrname": "软件ETF招商"
+    },
+    {
+      "sectorName": "芯片概念",
+      "fund1Code": "SH588240",
+      "fund1Abbrname": "科创200ETF鹏华"
+    },
+    {
+      "sectorName": "网络游戏",
+      "fund1Code": "SH512980",
+      "fund1Abbrname": "传媒ETF广发"
+    },
+    {
+      "sectorName": "汽车电子",
+      "fund1Code": "SH516520",
+      "fund1Abbrname": "智能驾驶ETF华泰柏瑞"
+    },
+    {
+      "sectorName": "小金属",
+      "fund1Code": "SH561050",
+      "fund1Abbrname": "稀有金属ETF易方达"
+    },
+    {
+      "sectorName": "消费电子",
+      "fund1Code": "SZ159732",
+      "fund1Abbrname": "消费电子ETF华夏"
+    },
+    {
+      "sectorName": "乘用车",
+      "fund1Code": "SZ159512",
+      "fund1Abbrname": "汽车ETF广发"
+    },
+    {
+      "sectorName": "光伏设备",
+      "fund1Code": "SH516290",
+      "fund1Abbrname": "光伏ETF汇添富"
+    },
+    {
+      "sectorName": "电池",
+      "fund1Code": "SZ159757",
+      "fund1Abbrname": "电池ETF景顺"
+    },
+    {
+      "sectorName": "航空装备",
+      "fund1Code": "SZ159208",
+      "fund1Abbrname": "航空航天ETF万家"
+    },
+    {
+      "sectorName": "游戏",
+      "fund1Code": "SZ159869",
+      "fund1Abbrname": "游戏ETF华夏"
+    },
+    {
+      "sectorName": "影视院线",
+      "fund1Code": "SH516620",
+      "fund1Abbrname": "影视ETF国泰"
+    },
+    {
+      "sectorName": "通信设备",
+      "fund1Code": "SZ159507",
+      "fund1Abbrname": "通信ETF广发"
+    }
+  ],
+  "total": 79
+}

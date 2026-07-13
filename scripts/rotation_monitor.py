@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """板块轮动监控系统（v6 公式：3日涨幅 × 量能因子）
 
+板块池: 平安证券 79 个（行业 + 概念），数据 scripts/pingan_sector_etf.json
+
 操作流程：
 1. 信号时点（09:25/11:00/13:00/14:50）跑 v6 排名，推送 TOP1 ETF
 2. 买入 TOP1 ETF：上涨 0.3% 或 下跌 2% 再回弹 0.3%
 3. 次日卖出：追踪触 +3% 回落 0.5% 止盈，止损 -0.5%
 
+v6 选股（与 backtest_rotation_8way 一致，见 rotation_v6.py）：
+- 09:25 等开盘前：T-1 日完整 v6
+- 11:00 及以后：盘中实时 partial v6
+
 用法:
-    python scripts/rotation_monitor.py              # 每日报告（推送钉钉）
-    python scripts/rotation_monitor.py --dry-run    # 仅打印不推送
+    python scripts/rotation_monitor.py              # 定时/推送钉钉
+    python scripts/rotation_monitor.py --dry-run    # 手动查看（不推送）
     python scripts/rotation_monitor.py --alert-only  # 仅在有轮动信号时推送
 
 定时运行（crontab）:
@@ -22,7 +28,7 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 try:
@@ -32,6 +38,28 @@ try:
 except Exception:
     pass
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+from sector_etf_map import (  # noqa: E402
+    etf_to_sina_symbol,
+    load_pingan_sectors,
+)
+from rotation_v6 import (  # noqa: E402
+    SCORE_WINDOW,
+    VOL_AVG_PERIOD,
+    VOL_BASE,
+    VOL_THRESHOLD,
+    compute_v6_metrics,
+)
+
+try:
+    from tradingagents.intraday.calendar import is_trading_day
+except ImportError:
+    def is_trading_day(day: date | None = None) -> bool:  # type: ignore[misc]
+        day = day or date.today()
+        return day.weekday() < 5
+
 # ── 配置 ──────────────────────────────────────────────
 
 PROXY = os.environ.get("ROTATION_PROXY", "http://127.0.0.1:7890")
@@ -39,78 +67,14 @@ SINA_INTERVAL = 0.3
 TIMEOUT = 15
 STATE_DIR = Path.home() / ".tradingagents" / "rotation"
 STATE_FILE = STATE_DIR / "monitor_state.json"
+SECTOR_POOL = "pingan"
 LOOKBACK = 30  # K 线天数
 TOP_N = 5
 
 BUY_STRATEGY = "上涨0.3%或下跌2%再回弹0.3%"
 SELL_STRATEGY = "追踪触3%落0.5%止-0.5%"
 
-# ── 板块 → 代表性 ETF 映射 ────────────────────────────
-# 代码为场内 ETF 交易代码，可直接买卖
-# 无直接对应 ETF 的板块标注 "—"
-SECTOR_ETF_MAP: dict[str, tuple[str, str]] = {
-    "电子信息": ("159997", "电子ETF"),
-    "电子器件": ("512480", "半导体ETF"),
-    "生物制药": ("512010", "医药ETF"),
-    "医疗器械": ("159883", "医疗器械ETF"),
-    "钢铁行业": ("515210", "钢铁ETF"),
-    "煤炭行业": ("515220", "煤炭ETF"),
-    "有色金属": ("512400", "有色金属ETF"),
-    "电力行业": ("159611", "电力ETF"),
-    "发电设备": ("159637", "电力设备ETF"),
-    "电器行业": ("159996", "家电ETF"),
-    "家电行业": ("159996", "家电ETF"),
-    "酿酒行业": ("512690", "酒ETF"),
-    "食品行业": ("515170", "食品ETF"),
-    "化工行业": ("516020", "化工ETF"),
-    "化纤行业": ("516020", "化工ETF"),
-    "农药化肥": ("516020", "化工ETF"),
-    "建筑建材": ("159745", "建材ETF"),
-    "水泥行业": ("159745", "建材ETF"),
-    "玻璃行业": ("159745", "建材ETF"),
-    "陶瓷行业": ("159745", "建材ETF"),
-    "机械行业": ("515970", "华夏机械"),
-    "仪器仪表": ("515970", "华夏机械"),
-    "汽车制造": ("516110", "汽车ETF"),
-    "摩托车":   ("516110", "汽车ETF"),
-    "金融行业": ("510230", "金融ETF"),
-    "房地产":   ("512200", "房地产ETF"),
-    "交通运输": ("159662", "交运ETF"),
-    "公路桥梁": ("159662", "交运ETF"),
-    "酒店旅游": ("159766", "旅游ETF"),
-    "农林牧渔": ("159825", "农业ETF"),
-    "环保行业": ("512580", "环保ETF"),
-    "传媒娱乐": ("512980", "传媒ETF"),
-    "船舶制造": ("512660", "军工ETF"),
-    "飞机制造": ("512660", "军工ETF"),
-    "石油行业": ("", "—"),
-    "商业百货": ("159928", "消费ETF"),
-    "服装鞋类": ("159928", "消费ETF"),
-    # 以下板块无直接对应 ETF
-    "供水供气": ("", "—"),
-    "其它行业": ("", "—"),
-    "塑料制品": ("", "—"),
-    "家具行业": ("", "—"),
-    "开发区":   ("", "—"),
-    "纺织机械": ("", "—"),
-    "纺织行业": ("", "—"),
-    "综合行业": ("", "—"),
-    "造纸行业": ("", "—"),
-    "物资外贸": ("", "—"),
-    "次新股":   ("", "—"),
-    "印刷包装": ("", "—"),
-}
-
-
-def etf_to_sina_symbol(etf_code: str) -> str:
-    """ETF 代码转新浪格式: 5开头→sh, 1开头→sz。"""
-    if etf_code.startswith("5"):
-        return f"sh{etf_code}"
-    elif etf_code.startswith("1"):
-        return f"sz{etf_code}"
-    return f"sh{etf_code}"
-
-# ── 数据采集（复用验证脚本逻辑） ──────────────────────
+# ── 数据采集 ──────────────────────────────────────────
 
 def curl_get(url: str) -> str:
     """获取数据，先不走代理（新浪国内直连），失败再走代理。"""
@@ -133,33 +97,6 @@ def curl_get(url: str) -> str:
     return ""
 
 
-def fetch_sina_sectors() -> list[dict]:
-    raw = curl_get("http://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php")
-    if not raw or "=" not in raw:
-        return []
-    json_str = raw.split("=", 1)[1].strip().rstrip(";")
-    try:
-        data = json.loads(json_str)
-    except json.JSONDecodeError:
-        return []
-    sectors = []
-    for _, val in data.items():
-        parts = val.split(",")
-        if len(parts) < 13:
-            continue
-        try:
-            sectors.append({
-                "code": parts[0],
-                "name": parts[1],
-                "avg_chg_pct": float(parts[4]) if parts[4] else 0,
-                "leader_code": parts[8],
-                "leader_name": parts[12],
-            })
-        except (ValueError, IndexError):
-            continue
-    return sectors
-
-
 def fetch_sina_kline(symbol: str, datalen: int = 30) -> list[dict]:
     url = (
         f"http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
@@ -173,6 +110,101 @@ def fetch_sina_kline(symbol: str, datalen: int = 30) -> list[dict]:
         return json.loads(raw)
     except json.JSONDecodeError:
         return []
+
+
+def fetch_tencent_quotes(codes: list[str]) -> dict[str, dict]:
+    """批量拉腾讯实时行情（qt.gtimg.cn），用于合成当日未收盘 Bar。"""
+    uniq: list[str] = []
+    seen: set[str] = set()
+    for code in codes:
+        c = code.strip()
+        if not c or c in seen:
+            continue
+        seen.add(c)
+        uniq.append(c)
+    if not uniq:
+        return {}
+
+    prefixed = [f"{'sh' if c.startswith(('5', '6')) else 'sz'}{c}" for c in uniq]
+    url = "https://qt.gtimg.cn/q=" + ",".join(prefixed)
+    raw = curl_get(url)
+    if not raw:
+        return {}
+
+    result: dict[str, dict] = {}
+    for line in raw.strip().split(";"):
+        if not line.strip() or "=" not in line or '"' not in line:
+            continue
+        key = line.split("=")[0].split("_")[-1]
+        vals = line.split('"')[1].split("~")
+        if len(vals) < 35:
+            continue
+        code = key[2:] if len(key) > 2 else key
+        try:
+            vol_lots = float(vals[6]) if vals[6] else 0.0
+            result[code] = {
+                "price": float(vals[3]) if vals[3] else 0.0,
+                "last_close": float(vals[4]) if vals[4] else 0.0,
+                "open": float(vals[5]) if vals[5] else 0.0,
+                "change_pct": float(vals[32]) if vals[32] else 0.0,
+                "high": float(vals[33]) if vals[33] else 0.0,
+                "low": float(vals[34]) if vals[34] else 0.0,
+                "volume": vol_lots * 100,
+                "quote_time": vals[30],
+            }
+        except (ValueError, IndexError):
+            continue
+    return result
+
+
+def _format_quote_time(raw: str) -> str:
+    """20260713113138 → 2026-07-13 11:31"""
+    if len(raw) < 12:
+        return raw
+    return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]} {raw[8:10]}:{raw[10:12]}"
+
+
+def merge_intraday_bar(returns: list[dict], quote: dict | None) -> tuple[list[dict], bool]:
+    """日K未含今日时，用实时行情追加当日 Bar（v6 动量需要当日涨幅+成交量）。"""
+    if not returns or not quote:
+        return returns, False
+
+    today = date.today().isoformat()
+    last_date = returns[-1]["date"][:10]
+    if last_date >= today or not is_trading_day():
+        return returns, False
+
+    qt = quote.get("quote_time", "")
+    if len(qt) < 12 or qt[:8] != today.replace("-", ""):
+        return returns, False
+
+    try:
+        hh, mm = int(qt[8:10]), int(qt[10:12])
+        if hh < 9 or (hh == 9 and mm < 30):
+            return returns, False
+    except ValueError:
+        return returns, False
+
+    price = quote.get("price", 0)
+    last_close = quote.get("last_close", 0)
+    if not price or not last_close:
+        return returns, False
+
+    ret = quote.get("change_pct")
+    if ret is None:
+        ret = (price - last_close) / last_close * 100
+
+    merged = list(returns)
+    merged.append({
+        "date": today,
+        "high": quote.get("high") or price,
+        "low": quote.get("low") or price,
+        "close": price,
+        "return_pct": ret,
+        "volume": quote.get("volume", 0),
+        "intraday": True,
+    })
+    return merged, True
 
 
 def compute_daily_data(klines: list[dict]) -> list[dict]:
@@ -195,50 +227,6 @@ def compute_daily_data(klines: list[dict]) -> list[dict]:
             "close": close, "return_pct": ret, "volume": volume,
         })
     return result
-
-
-# ── v6 得分计算（ETF 优化版） ─────────────────────────
-
-# 公式: 3日累计涨幅 × 量能因子
-# 量能因子 = 0.3 + 0.7 × min(量比 / 1.5, 1.0)
-# 量比 = 今日成交量 / 过去5日平均成交量
-# 验证结果(ETF): 收盘涨率52.6% / 盘中高77.2% / 持续性69.2% (57样本)
-
-SCORE_WINDOW = 3
-VOL_THRESHOLD = 1.5
-VOL_AVG_PERIOD = 5
-VOL_BASE = 0.3
-
-
-def compute_v6_score(returns: list[dict]) -> dict:
-    """计算 v6 综合得分（ETF 优化版，3日窗口 + 量价，无 CMF）。"""
-    idx = len(returns) - 1
-    if idx < SCORE_WINDOW:
-        return {}
-
-    # 3 日累计涨幅
-    ret_w = sum(r["return_pct"] for r in returns[idx - SCORE_WINDOW + 1:idx + 1])
-
-    # 量能因子
-    vol_today = returns[idx].get("volume", 0)
-    vol_prev = [returns[j].get("volume", 0)
-                for j in range(max(0, idx - VOL_AVG_PERIOD), idx)]
-    avg_vol = sum(vol_prev) / len(vol_prev) if vol_prev and sum(vol_prev) > 0 else vol_today
-    vol_ratio = vol_today / avg_vol if avg_vol > 0 else 1.0
-    vol_factor = VOL_BASE + (1 - VOL_BASE) * min(vol_ratio / VOL_THRESHOLD, 1.0)
-
-    score = ret_w * vol_factor
-    today_ret = returns[idx]["return_pct"]
-    last_date = returns[idx]["date"]
-
-    return {
-        "score": score,
-        "ret_3d": ret_w,
-        "vol_ratio": vol_ratio,
-        "vol_factor": vol_factor,
-        "today_ret": today_ret,
-        "date": last_date,
-    }
 
 
 # ── 状态管理 ──────────────────────────────────────────
@@ -284,99 +272,110 @@ def send_dingtalk(title: str, text: str) -> bool:
 
 def run_monitor(dry_run: bool = False, alert_only: bool = False) -> int:
     print(f"=== 板块轮动监控 v6（ETF 优化版）===")
-    print(f"公式: {SCORE_WINDOW}日涨幅 × 量能因子(阈{VOL_THRESHOLD} 均{VOL_AVG_PERIOD} 底{VOL_BASE})")
+    print(
+        f"公式: {SCORE_WINDOW}日涨幅 × 量能因子(阈{VOL_THRESHOLD} 均{VOL_AVG_PERIOD} 底{VOL_BASE})"
+    )
+    print("选股: 开盘前 T-1 v6 | 盘中 partial v6（与回测一致）")
     print(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print()
 
-    # 1. 获取板块列表
-    print(">>> 获取板块列表...")
-    sectors = fetch_sina_sectors()
-    print(f"    {len(sectors)} 个行业板块")
+    print(">>> 获取板块列表（平安证券）...")
+    sectors = load_pingan_sectors()
+    print(f"    {len(sectors)} 个板块（均有 ETF）")
     if not sectors:
-        print("ERROR: 无法获取板块列表")
+        print("ERROR: 无法加载平安板块列表 (pingan_sector_etf.json)")
         return 1
 
-    # 2. 获取 K 线 + 计算 v6 得分
-    #    优先用 ETF，无 ETF 的板块回退到领涨股
-    etf_count = 0
-    leader_count = 0
-    print(f">>> 获取 K 线数据 ({LOOKBACK} 日，优先 ETF)...")
-    scored = []
+    intraday_count = 0
+    print(f">>> 获取 K 线数据 ({LOOKBACK} 日)...")
+    pending: list[dict] = []
+    quote_codes: list[str] = []
     for i, sec in enumerate(sectors):
-        etf_code, etf_name = SECTOR_ETF_MAP.get(sec["name"], ("", ""))
-        symbol = None
-        source = ""
-
-        if etf_code:
-            sina_sym = etf_to_sina_symbol(etf_code)
-            klines = fetch_sina_kline(sina_sym, datalen=LOOKBACK)
-            if klines and len(klines) > SCORE_WINDOW:
-                symbol = etf_code
-                source = f"ETF {etf_code} {etf_name}"
-                etf_count += 1
-
-        if not symbol:
-            leader = sec["leader_code"]
-            if leader and len(leader) >= 4:
-                klines = fetch_sina_kline(leader, datalen=LOOKBACK)
-                if klines and len(klines) > SCORE_WINDOW:
-                    symbol = leader
-                    source = f"领涨股 {leader} {sec['leader_name']}"
-                    leader_count += 1
-
-        if not symbol or not klines:
+        etf_raw = sec["etf_raw"]
+        etf_code = sec["etf_code"]
+        etf_name = sec["etf_name"]
+        sina_sym = etf_to_sina_symbol(etf_raw)
+        klines = fetch_sina_kline(sina_sym, datalen=LOOKBACK)
+        if not klines or len(klines) <= SCORE_WINDOW:
             continue
 
-        returns = compute_daily_data(klines)
-        metrics = compute_v6_score(returns)
-        if not metrics:
-            continue
-        scored.append({
-            "code": sec["code"],
-            "name": sec["name"],
-            "symbol": symbol,
-            "source": source,
+        pending.append({
+            "sec": sec,
+            "klines": klines,
             "etf_code": etf_code,
             "etf_name": etf_name,
-            **metrics,
+            "quote_code": etf_code,
         })
+        quote_codes.append(etf_code)
         if (i + 1) % 10 == 0:
             print(f"    进度: {i+1}/{len(sectors)}")
 
-    print(f"    完成: {len(scored)} 个板块有数据 (ETF:{etf_count} 领涨股:{leader_count})")
+    quotes = fetch_tencent_quotes(quote_codes)
+    if quotes:
+        print(f">>> 接入盘中实时 ({len(quotes)} 个标的，腾讯行情)")
 
-    # 只对有 ETF 的板块排名（避免领涨股波动大导致不公平比较）
-    scored_etf = [s for s in scored if s.get("etf_code")]
-    scored_leader = [s for s in scored if not s.get("etf_code")]
-    print(f"    ETF 板块: {len(scored_etf)} 个（参与排名）")
-    print(f"    领涨股板块: {len(scored_leader)} 个（仅展示，不参与排名）")
+    scored = []
+    for item in pending:
+        returns = compute_daily_data(item["klines"])
+        quote = quotes.get(item["quote_code"])
+        returns, merged = merge_intraday_bar(returns, quote)
+        quote_ts = ""
+        if merged and quote:
+            quote_ts = _format_quote_time(quote.get("quote_time", ""))
+            returns[-1]["quote_time"] = quote_ts
+            intraday_count += 1
 
-    if len(scored_etf) < TOP_N * 2:
-        print(f"ERROR: ETF 板块数不足（{len(scored_etf)} < {TOP_N * 2}）")
+        metrics = compute_v6_metrics(returns)
+        if not metrics:
+            continue
+        if quote_ts:
+            metrics["quote_time"] = quote_ts
+        sec = item["sec"]
+        scored.append({
+            "code": sec["code"],
+            "name": sec["name"],
+            "type_name": sec.get("type_name", ""),
+            "symbol": item["etf_code"],
+            "source": f"ETF {item['etf_code']} {item['etf_name']}",
+            "etf_code": item["etf_code"],
+            "etf_name": item["etf_name"],
+            **metrics,
+        })
+
+    print(f"    完成: {len(scored)}/{len(sectors)} 个板块有数据"
+          f"{f', 盘中:{intraday_count}' if intraday_count else ''}")
+
+    if len(scored) < TOP_N * 2:
+        print(f"ERROR: 有效板块数不足（{len(scored)} < {TOP_N * 2}）")
         return 1
 
-    # 3. 排名（仅 ETF 板块）
-    scored_etf.sort(key=lambda x: x["score"], reverse=True)
-    top5 = scored_etf[:TOP_N]
-    bottom5 = scored_etf[-TOP_N:]
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    top5 = scored[:TOP_N]
+    bottom5 = scored[-TOP_N:]
     current_top5_codes = {s["code"] for s in top5}
 
-    # 4. 加载上次状态
     prev_state = load_state()
+    if prev_state.get("sector_pool") != SECTOR_POOL:
+        if prev_state.get("top5_codes"):
+            print(">>> 板块池已切换为平安，忽略旧 TOP5 状态（避免误报轮动）")
+        prev_state = {}
     prev_top5_codes = set(prev_state.get("top5_codes", []))
-    prev_date = prev_state.get("date", "")
 
     new_entries = [s for s in top5 if s["code"] not in prev_top5_codes]
-    exits = [s["code"] for s in scored_etf[TOP_N:] if s["code"] in prev_top5_codes]
-    exit_names = [s["name"] for s in scored_etf if s["code"] in exits]
+    exits = [s["code"] for s in scored[TOP_N:] if s["code"] in prev_top5_codes]
+    exit_names = [s["name"] for s in scored if s["code"] in exits]
 
-    # 5. 控制台输出
     run_ts = datetime.now().strftime("%Y-%m-%d %H:%M")
     data_date = top5[0]["date"]
+    has_intraday = any(s.get("intraday") for s in top5)
+    quote_ts = next((s.get("quote_time") for s in top5 if s.get("quote_time")), "")
+    last_bar_label = "盘中涨" if has_intraday else "今日"
+    data_note = f"含盘中实时 {quote_ts or data_date}" if has_intraday else "日K最近交易日"
+
     print()
     print("=" * 60)
     print(f"  板块轮动监控报告 | {run_ts}")
-    print(f"  数据截止: {data_date} (日K最近交易日)")
+    print(f"  数据截止: {data_date} ({data_note})")
     print("=" * 60)
     print(f"  买入: {BUY_STRATEGY}")
     print(f"  卖出: {SELL_STRATEGY}")
@@ -395,30 +394,23 @@ def run_monitor(dry_run: bool = False, alert_only: bool = False) -> int:
 
     print(f"\n  {'─' * 56}")
     print(f"  TOP {TOP_N} 强势板块:")
-    print(f"  {'排名':>4} {'板块':10s} {'标的':>10s} {'V6得分':>8} {'3日涨幅':>8} {'量比':>6} {'今日':>7}")
+    print(f"  {'排名':>4} {'板块':12s} {'标的':>10s} {'V6得分':>8} {'3日涨幅':>8} {'量比':>6} {last_bar_label:>7}")
     for i, s in enumerate(top5):
         etf_str = s.get("etf_code") or s["symbol"]
+        type_tag = f"[{s['type_name']}]" if s.get("type_name") else ""
         marker = " NEW" if s["code"] not in prev_top5_codes else ""
-        print(f"  {i+1:4d} {s['name']:10s} {etf_str:>10s} {s['score']:8.2f} {s['ret_3d']:+7.1f}% "
-              f"{s['vol_ratio']:5.1f}x {s['today_ret']:+6.2f}%{marker}")
+        print(f"  {i+1:4d} {s['name']+type_tag:12s} {etf_str:>10s} {s['score']:8.2f} {s['ret_3d']:+7.1f}% "
+              f"{s['vol_ratio']:5.1f}x {s['last_bar_ret']:+6.2f}%{marker}")
 
     print(f"\n  BOTTOM {TOP_N} 弱势板块:")
     for i, s in enumerate(bottom5):
         etf_str = s.get("etf_code") or s["symbol"]
-        print(f"  {i+1:4d} {s['name']:10s} {etf_str:>10s} {s['score']:8.2f} {s['ret_3d']:+7.1f}% "
-              f"{s['vol_ratio']:5.1f}x {s['today_ret']:+6.2f}%")
-
-    # 无 ETF 板块（仅展示，不参与排名）
-    if scored_leader:
-        scored_leader.sort(key=lambda x: x["score"], reverse=True)
-        print(f"\n  无 ETF 板块（领涨股代理，仅供参考）:")
-        for s in scored_leader[:5]:
-            print(f"  {s['name']:10s} {s['symbol']:>10s} 得分={s['score']:.2f} "
-                  f"3日={s['ret_3d']:+.1f}% 量比={s['vol_ratio']:.1f}x")
+        type_tag = f"[{s['type_name']}]" if s.get("type_name") else ""
+        print(f"  {i+1:4d} {s['name']+type_tag:12s} {etf_str:>10s} {s['score']:8.2f} {s['ret_3d']:+7.1f}% "
+              f"{s['vol_ratio']:5.1f}x {s['last_bar_ret']:+6.2f}%")
 
     print()
 
-    # 6. 钉钉推送
     should_push = True
     if alert_only and not new_entries:
         should_push = False
@@ -436,7 +428,7 @@ def run_monitor(dry_run: bool = False, alert_only: bool = False) -> int:
             title = f"板块轮动{'信号' if new_entries else '日报'}"
             lines = [
                 f"### 板块轮动监控 | {run_ts}",
-                f"数据截止: {data_date} (日K最近交易日)",
+                f"数据截止: {data_date} ({data_note})",
                 "",
                 f"**买入**: {BUY_STRATEGY}",
                 f"**卖出**: {SELL_STRATEGY}",
@@ -477,8 +469,8 @@ def run_monitor(dry_run: bool = False, alert_only: bool = False) -> int:
     elif dry_run:
         print("\n>>> --dry-run 模式，跳过推送")
 
-    # 7. 保存状态
     new_state = {
+        "sector_pool": SECTOR_POOL,
         "date": top5[0]["date"],
         "timestamp": datetime.now().isoformat(),
         "top5_codes": list(current_top5_codes),
@@ -490,7 +482,7 @@ def run_monitor(dry_run: bool = False, alert_only: bool = False) -> int:
     save_state(new_state)
     print(f"\n>>> 状态已保存: {STATE_FILE}")
 
-    return 0 if new_entries else 2  # 0=有信号, 2=无信号
+    return 0 if new_entries else 2
 
 
 def main():
