@@ -24,6 +24,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+except Exception:
+    pass
+
 # ── 配置 ──────────────────────────────────────────────
 
 PROXY = os.environ.get("ROTATION_PROXY", "http://127.0.0.1:7890")
@@ -248,10 +255,22 @@ def save_state(state: dict):
 
 # ── 钉钉推送 ──────────────────────────────────────────
 
+def _rotation_dingtalk_config() -> tuple[str, str]:
+    webhook = (
+        os.getenv("DINGTALK_ROTATION_WEBHOOK")
+        or os.getenv("DINGTALK_WEBHOOK")
+        or ""
+    ).strip()
+    keyword = (os.getenv("DINGTALK_ROTATION_KEYWORD") or "轮动").strip()
+    return webhook, keyword
+
+
 def send_dingtalk(title: str, text: str) -> bool:
     try:
         from tradingagents.notify.dingtalk import send_markdown
-        return send_markdown(title, text)
+
+        webhook, keyword = _rotation_dingtalk_config()
+        return send_markdown(title, text, webhook=webhook or None, keyword=keyword)
     except ImportError:
         print("(tradingagents.notify.dingtalk 不可用，跳过推送)")
         return False
@@ -399,13 +418,13 @@ def run_monitor(dry_run: bool = False, alert_only: bool = False) -> int:
         print(">>> alert-only 模式：无轮动信号，跳过推送")
 
     if should_push and not dry_run:
-        webhook = os.getenv("DINGTALK_WEBHOOK", "").strip()
+        webhook, _ = _rotation_dingtalk_config()
         if not webhook:
             print("\n>>> 钉钉未配置，跳过推送")
             print("    配置方法:")
             print("    1. 钉钉群 → 群设置 → 智能群助手 → 添加机器人 → 自定义")
             print("    2. 安全设置选「自定义关键词」填: 轮动")
-            print("    3. 复制 Webhook 地址，填入 .env 的 DINGTALK_WEBHOOK=")
+            print("    3. 复制 Webhook 地址，填入 .env 的 DINGTALK_ROTATION_WEBHOOK=")
         else:
             title = f"板块轮动{'信号' if new_entries else '日报'}"
             lines = [
@@ -476,13 +495,13 @@ def main():
     args = parser.parse_args()
 
     if args.test_push:
-        webhook = os.getenv("DINGTALK_WEBHOOK", "").strip()
+        webhook, _ = _rotation_dingtalk_config()
         if not webhook:
-            print("DINGTALK_WEBHOOK 未配置")
+            print("DINGTALK_ROTATION_WEBHOOK 未配置")
             print("配置方法:")
             print("  1. 钉钉群 → 群设置 → 智能群助手 → 添加机器人 → 自定义")
             print("  2. 安全设置选「自定义关键词」填: 轮动")
-            print("  3. 复制 Webhook 地址，填入 .env 的 DINGTALK_WEBHOOK=")
+            print("  3. 复制 Webhook 地址，填入 .env 的 DINGTALK_ROTATION_WEBHOOK=")
             sys.exit(1)
         print(">>> 发送测试消息...")
         ok = send_dingtalk("轮动监控测试", "### 轮动监控测试\n\n这是一条测试消息，确认钉钉机器人配置正确。")
