@@ -190,6 +190,16 @@ def check_buy_trigger(
     return None, "未触发", ""
 
 
+def _fill_on_touch(bar: dict, trigger_price: float) -> float:
+    """触及触发价时的成交价：T+1 跳空穿越用开盘价，否则用触发价。
+
+    例：止损 1.468，开盘 1.330 → 按 1.330 成交（不能假设仍在 1.468 止损）。
+    """
+    if bar["open"] <= trigger_price:
+        return bar["open"]
+    return trigger_price
+
+
 def check_sell_trigger(
     bars: list[dict],
     buy_price: float,
@@ -198,45 +208,37 @@ def check_sell_trigger(
     trail_trigger_pct: float = 3.0,
     trail_drop_pct: float = 0.5,
 ) -> tuple[float, str, str]:
-    """检查卖出触发。
+    """检查 T+1 卖出触发（调用方仅传入卖出日 5 分 K）。
 
-    Args:
-        bars: 5 分钟 K 线列表（含买入日及之后）
-        buy_bar_idx: 买入发生所在的 bar 索引
-        stop_loss_pct: 止损幅度 %（-0.5）
-        trail_trigger_pct: 追踪止盈触发涨幅 %（3.0）
-        trail_drop_pct: 追踪止盈回落幅度 %（0.5）
-
-    Returns:
-        (sell_price, sell_reason, sell_time)
+    止损/追踪：low 触及触发价时，若开盘价已穿越触发价则按开盘价成交。
     """
     stop_loss_price = buy_price * (1 + stop_loss_pct / 100)
     trail_trigger_price = buy_price * (1 + trail_trigger_pct / 100)
 
-    max_high_after_trigger = buy_price  # 触发+3%后的最高点
+    max_high_after_trigger = buy_price
     trailing_active = False
 
     for i in range(buy_bar_idx, len(bars)):
         b = bars[i]
 
-        # 1. 止损检查（优先）
+        # 1. 止损（优先）
         if b["low"] <= stop_loss_price:
-            return stop_loss_price, "止损", b["datetime"]
+            return _fill_on_touch(b, stop_loss_price), "止损", b["datetime"]
 
-        # 2. 追踪止盈：先检查是否触发 +3%
+        # 2. 追踪止盈：先触发 +3%，再检查回落（含同根 K 先高后低）
         if not trailing_active:
             if b["high"] >= trail_trigger_price:
                 trailing_active = True
                 max_high_after_trigger = b["high"]
-        else:
-            if b["high"] > max_high_after_trigger:
-                max_high_after_trigger = b["high"]
-            # 检查回落
+        elif b["high"] > max_high_after_trigger:
+            max_high_after_trigger = b["high"]
+
+        if trailing_active:
             trail_sell_price = max_high_after_trigger * (1 - trail_drop_pct / 100)
             if b["low"] <= trail_sell_price:
-                return trail_sell_price, "追踪止盈", b["datetime"]
+                return _fill_on_touch(b, trail_sell_price), "追踪止盈", b["datetime"]
 
-    # 3. 未触发 → 最后一天收盘卖
+    # 3. 未触发 → 卖出日收盘
     last_bar = bars[-1]
     return last_bar["close"], "收盘", last_bar["datetime"]
 
@@ -344,18 +346,10 @@ def run_intraday_backtest(
             })
             continue
 
-        # 4. 买入后监控卖出
-        # 找买入 bar 在 observation_bars 中的位置
-        buy_bar_idx = None
-        for i, b in enumerate(observation_bars):
-            if b["datetime"] == buy_time:
-                buy_bar_idx = i
-                break
-        if buy_bar_idx is None:
-            buy_bar_idx = 0
-
-        # 卖出监控：从买入 bar 到 T+1 收盘
-        sell_bars = observation_bars[buy_bar_idx:]
+        # 4. T+1 卖出（A 股当日买入不可卖，仅监控 next_date 全天）
+        sell_bars = t2_5min
+        if not sell_bars:
+            continue
         sell_price, sell_reason, sell_time = check_sell_trigger(
             sell_bars, buy_price, 0,
             stop_loss_pct, trail_trigger_pct, trail_drop_pct,
@@ -366,9 +360,10 @@ def run_intraday_backtest(
         sell_income = sell_price * (1 - slippage_pct / 100) * (1 - fee_pct / 100)
         return_pct = (sell_income - buy_cost) / buy_cost * 100
 
-        # 持仓天数（含买入日）
+        # 持仓天数：买入日至 T+1 卖出日
         sell_date = sell_time.split(" ")[0]
-        held_days = 1 if sell_date == signal_date else 2
+        buy_date = buy_time.split(" ")[0]
+        held_days = 1 if sell_date == buy_date else 2
 
         trades.append({
             "signal_date": signal_date,

@@ -155,13 +155,13 @@ def bars_after_time(bars: list[dict], target: str, inclusive: bool = False) -> l
     return bars_from_min(bars, time_to_min(target), inclusive=inclusive)
 
 
-def rank_top1(
+def rank_sectors(
     sectors: list[dict],
     etf_daily: dict,
     etf_5min: dict,
     signal_date: str,
     signal_time: str,
-) -> dict | None:
+) -> list[tuple[float, dict]]:
     scores = []
     for sec in sectors:
         etf = sec["etf_code"]
@@ -171,6 +171,8 @@ def rank_top1(
         returns = info["returns"]
         idx_map = {r["date"]: i for i, r in enumerate(returns)}
         bars = etf_5min.get(etf, {}).get(signal_date, [])
+        if signal_date not in idx_map and not bars:
+            continue
         partial_close, partial_vol = _partial_close_vol(bars, signal_time)
 
         if signal_date not in idx_map:
@@ -190,9 +192,20 @@ def rank_top1(
         if score is None:
             continue
         scores.append((score, sec))
+    scores.sort(key=lambda x: x[0], reverse=True)
+    return scores
+
+
+def rank_top1(
+    sectors: list[dict],
+    etf_daily: dict,
+    etf_5min: dict,
+    signal_date: str,
+    signal_time: str,
+) -> dict | None:
+    scores = rank_sectors(sectors, etf_daily, etf_5min, signal_date, signal_time)
     if len(scores) < 2:
         return None
-    scores.sort(key=lambda x: x[0], reverse=True)
     return scores[0][1]
 
 
@@ -233,6 +246,9 @@ def signal_baseline(
     idx_map = {r["date"]: i for i, r in enumerate(returns)}
     if signal_date in idx_map:
         return returns[idx_map[signal_date]]["close"]
+    prior = [r for r in returns if r["date"] < signal_date]
+    if prior:
+        return prior[-1]["close"]
     return None
 
 
@@ -434,24 +450,26 @@ def _issue_signal(
     signal_time: str,
     log,
 ) -> dict | None:
-    top1 = rank_top1(sectors, etf_daily, etf_5min, day, signal_time)
-    if not top1:
+    scores = rank_sectors(sectors, etf_daily, etf_5min, day, signal_time)
+    if len(scores) < 2:
         return None
-    etf = top1["etf_code"]
-    baseline = signal_baseline(etf, day, signal_time, etf_daily, etf_5min)
-    if not baseline or baseline <= 0:
-        return None
-    log(day, signal_time, "信号",
-        sector=top1["name"], etf=etf,
-        baseline=round(baseline, 4), top1_score="v6")
-    return {
-        "sector": top1["name"],
-        "etf": etf,
-        "baseline": baseline,
-        "signal_date": day,
-        "signal_time": signal_time,
-        "obs_bars": [],
-    }
+    for _, top1 in scores:
+        etf = top1["etf_code"]
+        baseline = signal_baseline(etf, day, signal_time, etf_daily, etf_5min)
+        if not baseline or baseline <= 0:
+            continue
+        log(day, signal_time, "信号",
+            sector=top1["name"], etf=etf,
+            baseline=round(baseline, 4), top1_score="v6")
+        return {
+            "sector": top1["name"],
+            "etf": etf,
+            "baseline": baseline,
+            "signal_date": day,
+            "signal_time": signal_time,
+            "obs_bars": [],
+        }
+    return None
 
 
 def _try_buy_same_day(
@@ -605,7 +623,7 @@ def run_one_post_sell(
                 pending = _issue_signal(
                     sectors, etf_daily, etf_5min, day, signal_time, log,
                 )
-                need_flat_signal = False
+                need_flat_signal = pending is None
             holding = None
 
         if holding:
@@ -614,11 +632,18 @@ def run_one_post_sell(
                 sell_date=holding["sell_date"])
             continue
 
+        if pending and day > pending["signal_date"]:
+            log(day, "09:30", "放弃信号",
+                sector=pending["sector"], etf=pending["etf"],
+                reason="信号日未成交")
+            pending = None
+            need_flat_signal = True
+
         if need_flat_signal and not pending:
             pending = _issue_signal(
                 sectors, etf_daily, etf_5min, day, "09:30", log,
             )
-            need_flat_signal = False
+            need_flat_signal = pending is None
 
         if not pending or day != pending["signal_date"]:
             continue
@@ -631,6 +656,8 @@ def run_one_post_sell(
             fee_pct, all_dates, log, close_fallback=True,
             etf_daily=etf_daily,
         )
+        if not holding:
+            need_flat_signal = True
 
     bought = [t for t in trades if t.get("return_pct") is not None]
     rets = [t["return_pct"] for t in bought]
