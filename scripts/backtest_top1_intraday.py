@@ -243,6 +243,61 @@ def check_sell_trigger(
     return last_bar["close"], "收盘", last_bar["datetime"]
 
 
+def check_sell_trigger_trix(
+    buy_day_bars: list[dict],
+    sell_bars: list[dict],
+    buy_price: float,
+    trix_period: int = 5,
+    trix_signal_period: int = 3,
+    trail_trigger_pct: float = 3.0,
+    trail_drop_pct: float = 0.5,
+) -> tuple[float, str, str]:
+    """T+1 卖出：TRIX 死叉止损 + 追踪止盈 + 收盘卖（无固定百分比止损）。
+
+    TRIX 用买入日 5 分 K 预热，仅在卖出日检查死叉；追踪/收盘规则同 check_sell_trigger。
+    """
+    from backtest_top1_minute import calc_trix, calc_trix_signal
+
+    if not sell_bars:
+        return buy_price, "收盘", ""
+
+    all_bars = list(buy_day_bars) + list(sell_bars)
+    warmup_len = len(buy_day_bars)
+    min_warmup = trix_period * 3 + 5
+    closes = [float(b.get("close", 0)) for b in all_bars]
+    trix = calc_trix(closes, trix_period) if len(closes) >= min_warmup else []
+    signal = calc_trix_signal(trix, trix_signal_period) if trix else []
+
+    trail_trigger_price = buy_price * (1 + trail_trigger_pct / 100)
+    max_high_after_trigger = buy_price
+    trailing_active = False
+
+    for j, b in enumerate(sell_bars):
+        i = warmup_len + j
+
+        # 1. TRIX(period, signal) 死叉止损
+        if trix and i > 0 and i < len(trix):
+            if trix[i - 1] >= signal[i - 1] and trix[i] < signal[i]:
+                sell_px = _fill_on_touch(b, closes[i])
+                return sell_px, "TRIX止损", b["datetime"]
+
+        # 2. 追踪止盈
+        if not trailing_active:
+            if b["high"] >= trail_trigger_price:
+                trailing_active = True
+                max_high_after_trigger = b["high"]
+        elif b["high"] > max_high_after_trigger:
+            max_high_after_trigger = b["high"]
+
+        if trailing_active:
+            trail_sell_price = max_high_after_trigger * (1 - trail_drop_pct / 100)
+            if b["low"] <= trail_sell_price:
+                return _fill_on_touch(b, trail_sell_price), "追踪止盈", b["datetime"]
+
+    last_bar = sell_bars[-1]
+    return last_bar["close"], "收盘", last_bar["datetime"]
+
+
 # ── 回测引擎 ──────────────────────────────────────────
 
 def run_intraday_backtest(

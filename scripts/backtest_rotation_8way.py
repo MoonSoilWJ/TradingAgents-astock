@@ -4,7 +4,7 @@
 信号组 1~5: 09:10 / 09:25 / 09:40 / 14:40 / 14:50（平安 79 板块 v6 TOP1）
 信号组 6: 卖出后即时发信号（首日空仓 09:30 发首信号）
 买入: 上涨 1.0% 追涨（不抄底）
-卖出: 追踪触 +3% 回落 0.5%，T+1 收盘卖（无固定止损）
+卖出: 追踪触 +3% 回落 0.5%，T+1 收盘卖；止损 TRIX(5,3) 死叉
 过滤: 前一日涨幅 >7% 则跳过（防追高次日暴跌）
 约束: 单仓位、先卖后买、手续费万分之 3（双边）
 未买入: 信号日当天未触发追涨则放弃（不兜底）
@@ -33,7 +33,11 @@ from backtest_top1 import (  # noqa: E402
     curl_get,
     fetch_sina_kline,
 )
-from backtest_top1_intraday import check_buy_trigger, check_sell_trigger  # noqa: E402
+from backtest_top1_intraday import (  # noqa: E402
+    check_buy_trigger,
+    check_sell_trigger,
+    check_sell_trigger_trix,
+)
 from rotation_v6 import SCORE_WINDOW, score_at_signal  # noqa: E402
 from sector_etf_map import etf_to_sina_symbol, load_pingan_sectors  # noqa: E402
 
@@ -45,7 +49,9 @@ SIGNAL_TIMES = ("09:10", "09:25", "09:40", "14:40", "14:50")
 BUY_UP = 1.0
 BUY_DOWN = 99.0  # 禁用抄底（回测显示抄底单亏损率高）
 BUY_REBOUND = 0.3
-STOP_LOSS = -99.0  # 禁用固定止损（靠追踪止盈+T+1收盘卖）
+TRIX_PERIOD = 5
+TRIX_SIGNAL = 3
+STOP_LOSS = -99.0  # 无 TRIX 时禁用固定止损
 TRAIL_TRIGGER = 3.0
 TRAIL_DROP = 0.5
 FEE_PCT = 0.03  # 万分之 3
@@ -288,6 +294,28 @@ def apply_net_return(buy_price: float, sell_price: float, fee_pct: float) -> flo
     return (sell_income - buy_cost) / buy_cost * 100
 
 
+def _sell_holding(
+    holding: dict,
+    day: str,
+    etf_5min: dict,
+    use_trix: bool = True,
+) -> tuple[float, str, str]:
+    """T+1 卖出：TRIX 止损或仅追踪+收盘。"""
+    sell_bars = etf_5min.get(holding["etf"], {}).get(day, [])
+    if not sell_bars:
+        return holding["buy_price"], "收盘", ""
+    if use_trix:
+        buy_day_bars = etf_5min.get(holding["etf"], {}).get(holding["buy_date"], [])
+        return check_sell_trigger_trix(
+            buy_day_bars, sell_bars, holding["buy_price"],
+            TRIX_PERIOD, TRIX_SIGNAL, TRAIL_TRIGGER, TRAIL_DROP,
+        )
+    return check_sell_trigger(
+        sell_bars, holding["buy_price"], 0,
+        STOP_LOSS, TRAIL_TRIGGER, TRAIL_DROP,
+    )
+
+
 def buy_bars_for_check(
     obs_bars: list[dict],
     day: str,
@@ -340,6 +368,7 @@ def run_one(
     eval_dates: list[str],
     signal_time: str,
     fee_pct: float,
+    use_trix: bool = True,
 ) -> dict:
     holding: dict | None = None
     pending: dict | None = None
@@ -358,12 +387,10 @@ def run_one(
 
         # 先卖
         if holding and day == holding["sell_date"]:
-            sell_bars = etf_5min.get(holding["etf"], {}).get(day, [])
-            if sell_bars:
-                sell_price, sell_reason, sell_time = check_sell_trigger(
-                    sell_bars, holding["buy_price"], 0,
-                    STOP_LOSS, TRAIL_TRIGGER, TRAIL_DROP,
-                )
+            sell_price, sell_reason, sell_time = _sell_holding(
+                holding, day, etf_5min, use_trix=use_trix,
+            )
+            if sell_time or sell_price:
                 sold_at_min = sell_time_min(sell_time)
                 ret = apply_net_return(holding["buy_price"], sell_price, fee_pct)
                 st = sell_time.split(" ")[-1][:5] if sell_time else ""
@@ -444,6 +471,7 @@ def run_one(
         equity *= 1 + r / 100
     return {
         "signal_time": signal_time,
+        "use_trix": use_trix,
         "trades": trades,
         "trade_count": len(bought),
         "cash_blocked_days": cash_blocked_days,
@@ -608,6 +636,7 @@ def run_one_post_sell(
     all_dates: list[str],
     eval_dates: list[str],
     fee_pct: float,
+    use_trix: bool = True,
 ) -> dict:
     """组 6：卖出后发信号；信号日未触发则收盘兜底买入。"""
     holding: dict | None = None
@@ -624,12 +653,10 @@ def run_one_post_sell(
         sold_at_min: int | None = None
 
         if holding and day == holding["sell_date"]:
-            sell_bars = etf_5min.get(holding["etf"], {}).get(day, [])
-            if sell_bars:
-                sell_price, sell_reason, sell_time = check_sell_trigger(
-                    sell_bars, holding["buy_price"], 0,
-                    STOP_LOSS, TRAIL_TRIGGER, TRAIL_DROP,
-                )
+            sell_price, sell_reason, sell_time = _sell_holding(
+                holding, day, etf_5min, use_trix=use_trix,
+            )
+            if sell_time or sell_price:
                 sold_at_min = sell_time_min(sell_time)
                 ret = apply_net_return(holding["buy_price"], sell_price, fee_pct)
                 st = sell_time.split(" ")[-1][:5] if sell_time else ""
@@ -700,6 +727,7 @@ def run_one_post_sell(
         equity *= 1 + r / 100
     return {
         "signal_time": "卖出后发信号",
+        "use_trix": use_trix,
         "trades": trades,
         "trade_count": len(bought),
         "cash_blocked_days": cash_blocked_days,
@@ -716,17 +744,121 @@ def run_all_groups(
     all_dates: list[str],
     eval_dates: list[str],
     fee_pct: float,
+    signal_filter: str | None = None,
+    use_trix: bool = True,
 ) -> list[dict]:
     results = []
-    for signal_time in SIGNAL_TIMES:
+    times = [signal_filter] if signal_filter else list(SIGNAL_TIMES)
+    for signal_time in times:
         results.append(run_one(
             sectors, etf_daily, etf_5min, all_dates, eval_dates,
-            signal_time, fee_pct,
+            signal_time, fee_pct, use_trix=use_trix,
         ))
-    results.append(run_one_post_sell(
-        sectors, etf_daily, etf_5min, all_dates, eval_dates, fee_pct,
-    ))
+    if not signal_filter:
+        results.append(run_one_post_sell(
+            sectors, etf_daily, etf_5min, all_dates, eval_dates, fee_pct,
+            use_trix=use_trix,
+        ))
     return results
+
+
+def split_eval_periods(eval_dates: list[str], parts: int = 3) -> list[dict]:
+    """将回测区间均分为前/中/后段。"""
+    n = len(eval_dates)
+    chunk = n // parts
+    labels = ("前期", "中期", "后期")
+    out = []
+    for i in range(parts):
+        start_i = i * chunk
+        end_i = (i + 1) * chunk if i < parts - 1 else n
+        dates = eval_dates[start_i:end_i]
+        if not dates:
+            continue
+        out.append({
+            "label": labels[i],
+            "start": dates[0],
+            "end": dates[-1],
+            "dates": dates,
+        })
+    return out
+
+
+def summarize_trades(trades: list[dict], date_set: set[str] | None = None) -> dict:
+    """按信号日汇总区间收益。"""
+    picked = [
+        t for t in trades
+        if t.get("return_pct") is not None
+        and (date_set is None or t["signal_date"] in date_set)
+    ]
+    rets = [t["return_pct"] for t in picked]
+    if not rets:
+        return {"trade_count": 0, "equity_pct": 0.0, "win_rate": 0.0, "avg": 0.0}
+    stats = _calc_stats(rets)
+    equity = 1.0
+    for r in rets:
+        equity *= 1 + r / 100
+    return {
+        "trade_count": len(rets),
+        "equity_pct": (equity - 1) * 100,
+        "win_rate": stats.get("win_rate", 0.0),
+        "avg": stats.get("avg", 0.0),
+    }
+
+
+def print_compare_report(
+    no_sl: dict,
+    trix: dict,
+    eval_dates: list[str],
+    signal_time: str,
+):
+    """对比无止损 vs TRIX，按前中后三段展示。"""
+    periods = split_eval_periods(eval_dates)
+    no_label = "无止损(追踪+收盘)"
+    trix_label = f"TRIX({TRIX_PERIOD},{TRIX_SIGNAL})死叉"
+
+    print()
+    print("=" * 88)
+    print(f"  止损对比 | 信号 {signal_time} | 100天前中后三段")
+    print("=" * 88)
+    print(f"  区间: {eval_dates[0]} ~ {eval_dates[-1]} ({len(eval_dates)} 交易日)")
+    print(f"  买入: 涨{BUY_UP}% 不抄底 | 卖出: 追踪+{TRAIL_TRIGGER}%落{TRAIL_DROP}% / T+1收盘")
+    print(f"  过滤: 前日涨>{PREV_DAY_SURGE_LIMIT}%跳过 | 手续费万3双边")
+    print()
+
+    full_no = summarize_trades(no_sl["trades"])
+    full_trix = summarize_trades(trix["trades"])
+    print(f"  {'策略':<22} {'全期':>8} {'笔数':>5} {'胜率':>7} {'均笔':>8}")
+    print("  " + "-" * 58)
+    print(
+        f"  {no_label:<22} {full_no['equity_pct']:+7.2f}% "
+        f"{full_no['trade_count']:5d} {full_no['win_rate']:6.1f}% {full_no['avg']:+7.2f}%"
+    )
+    print(
+        f"  {trix_label:<22} {full_trix['equity_pct']:+7.2f}% "
+        f"{full_trix['trade_count']:5d} {full_trix['win_rate']:6.1f}% {full_trix['avg']:+7.2f}%"
+    )
+    diff = full_trix["equity_pct"] - full_no["equity_pct"]
+    print(f"  {'TRIX - 无止损':<22} {diff:+7.2f}%")
+    print()
+
+    print(f"  {'时段':<8} {'日期范围':<23} {'无止损':>9} {'TRIX':>9} {'差值':>9} {'笔数(无/T)':>10}")
+    print("  " + "-" * 72)
+    for p in periods:
+        ds = set(p["dates"])
+        s_no = summarize_trades(no_sl["trades"], ds)
+        s_trix = summarize_trades(trix["trades"], ds)
+        d = s_trix["equity_pct"] - s_no["equity_pct"]
+        print(
+            f"  {p['label']:<8} {p['start']}~{p['end']:<10} "
+            f"{s_no['equity_pct']:+8.2f}% {s_trix['equity_pct']:+8.2f}% {d:+8.2f}% "
+            f"{s_no['trade_count']:3d}/{s_trix['trade_count']:<3d}"
+        )
+    print("=" * 88)
+
+    from collections import Counter
+    print(f"\n  全期卖出原因:")
+    print(f"    无止损: {dict(Counter(t['sell_reason'] for t in no_sl['trades']))}")
+    print(f"    TRIX:   {dict(Counter(t['sell_reason'] for t in trix['trades']))}")
 
 
 def load_market_data(sectors: list[dict], lookback: int) -> tuple[dict, dict, list[str]]:
@@ -845,10 +977,10 @@ def print_report(results: list[dict], eval_days: int):
     print("  板块轮动 6 组回测对比（平安板块池，未触发则放弃）")
     print("=" * 80)
     print(f"  区间: 最近 {eval_days} 个交易日 | 手续费万3双边 | T+1卖出 | 单仓位 | 先卖后买")
-    sl_display = "无止损" if STOP_LOSS <= -50 else f"止{STOP_LOSS}%"
+    sl_display = f"TRIX({TRIX_PERIOD},{TRIX_SIGNAL})死叉"
     dip_display = "不抄底" if BUY_DOWN > 50 else f"跌{BUY_DOWN}%回弹"
     surge_display = f"前日涨>{PREV_DAY_SURGE_LIMIT}%跳过" if PREV_DAY_SURGE_LIMIT < 50 else ""
-    print(f"  买入: 涨{BUY_UP}% {dip_display} | 卖出: 追踪+{TRAIL_TRIGGER}%落{TRAIL_DROP}% {sl_display}")
+    print(f"  买入: 涨{BUY_UP}% {dip_display} | 卖出: 追踪+{TRAIL_TRIGGER}%落{TRAIL_DROP}% / T+1收盘 | 止损: {sl_display}")
     note = "未触发则放弃"
     if surge_display:
         note += f" | {surge_display}"
@@ -873,19 +1005,59 @@ def print_report(results: list[dict], eval_days: int):
         f"→ 累计 {best['final_equity_pct']:+.2f}% ({best['trade_count']} 笔)"
     )
 
+    if len(results) == 1:
+        r = results[0]
+        trades = r["trades"]
+        if trades:
+            from collections import Counter
+            reasons = Counter(t["sell_reason"] for t in trades)
+            print(f"\n  卖出原因: {dict(reasons)}")
+            print(f"\n  {'信号日':>12} {'板块':12s} {'ETF':>8s} {'买入价':>7s} {'卖出价':>7s} {'卖出因':>8s} {'收益':>7s}")
+            print("  " + "-" * 72)
+            eq = 1.0
+            for t in trades:
+                eq *= (1 + t["return_pct"] / 100)
+                print(
+                    f"  {t['signal_date']:>12} {t['sector']:12s} {t['etf']:>8s} "
+                    f"{t['buy_price']:7.4f} {t['sell_price']:7.4f} {t['sell_reason']:>8s} "
+                    f"{t['return_pct']:+7.2f}% | 累计 {(eq-1)*100:+7.2f}%"
+                )
+
 
 def main():
     parser = argparse.ArgumentParser(description="板块轮动 6 组回测")
     parser.add_argument("--days", type=int, default=30, help="回测交易日数（默认30）")
     parser.add_argument("--fee", type=float, default=FEE_PCT, help="单边手续费(默认0.03=万3)")
+    parser.add_argument("--signal", type=str, default=None, help="仅回测指定信号时点，如 09:40")
+    parser.add_argument("--compare", action="store_true",
+                        help="对比无止损 vs TRIX(5,3)，按前中后三段输出（需配合 --signal）")
+    parser.add_argument("--no-trix", action="store_true", help="禁用 TRIX 止损（仅追踪+收盘）")
     parser.add_argument("--daily", action="store_true", help="输出按天明细到 markdown 文件")
     args = parser.parse_args()
 
+    if args.signal and args.signal not in SIGNAL_TIMES:
+        print(f"ERROR: --signal 须为 {', '.join(SIGNAL_TIMES)} 之一")
+        sys.exit(1)
+    if args.compare and not args.signal:
+        args.signal = "09:40"
+
+    use_trix = not args.no_trix
+    sl_desc = (
+        f"TRIX({TRIX_PERIOD},{TRIX_SIGNAL})死叉"
+        if use_trix else "无止损(追踪+收盘)"
+    )
+
     sectors = load_pingan_sectors()
-    print(f"=== 板块轮动 6 组回测 ===")
+    title = "止损对比回测" if args.compare else "板块轮动 6 组回测"
+    print(f"=== {title} ===")
     print(f"板块池: 平安 {len(sectors)} 个 | 回测 {args.days} 日 | 手续费万{args.fee * 100:.0f}")
-    print(f"信号: {', '.join(SIGNAL_TIMES)} + 卖出后动态 | 未触发则放弃")
+    sig_desc = args.signal if args.signal else f"{', '.join(SIGNAL_TIMES)} + 卖出后动态"
+    print(f"信号: {sig_desc} | 未触发则放弃")
     print(f"选股: 盘中 partial v6；开盘前 T-1 日 v6")
+    if args.compare:
+        print(f"对比: 无止损 vs TRIX({TRIX_PERIOD},{TRIX_SIGNAL})死叉 | 前中后三段")
+    else:
+        print(f"止损: {sl_desc} | 卖出: 追踪+{TRAIL_TRIGGER}%落{TRAIL_DROP}% / T+1收盘")
     print()
 
     etf_daily, etf_5min, all_dates = load_market_data(sectors, args.days)
@@ -899,10 +1071,25 @@ def main():
         sys.exit(1)
     print(f"    日K {len(etf_daily)} ETF, 5分K {len(etf_5min)} ETF, 回测 {eval_dates[0]} ~ {eval_dates[-1]} ({len(eval_dates)}日)")
 
-    results = run_all_groups(
-        sectors, etf_daily, etf_5min, all_dates, eval_dates, args.fee,
-    )
-    print_report(results, len(eval_dates))
+    if args.compare:
+        print(">>> 运行无止损版...")
+        res_no = run_all_groups(
+            sectors, etf_daily, etf_5min, all_dates, eval_dates, args.fee,
+            signal_filter=args.signal, use_trix=False,
+        )[0]
+        print(">>> 运行 TRIX 版...")
+        res_trix = run_all_groups(
+            sectors, etf_daily, etf_5min, all_dates, eval_dates, args.fee,
+            signal_filter=args.signal, use_trix=True,
+        )[0]
+        print_compare_report(res_no, res_trix, eval_dates, args.signal)
+        results = [res_no, res_trix]
+    else:
+        results = run_all_groups(
+            sectors, etf_daily, etf_5min, all_dates, eval_dates, args.fee,
+            signal_filter=args.signal, use_trix=use_trix,
+        )
+        print_report(results, len(eval_dates))
 
     out = Path.home() / ".tradingagents" / "rotation" / f"backtest_6sig_{datetime.now().strftime('%Y%m%d_%H%M')}.json"
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -74,7 +74,15 @@ def compute_daily_data(klines: list[dict]) -> list[dict]:
         else:
             prev = float(klines[i - 1].get("close", 0))
             ret = ((close - prev) / prev * 100) if prev else 0.0
-        result.append({"date": k.get("day", ""), "close": close, "return_pct": ret, "volume": volume})
+        result.append({
+            "date": k.get("day", ""),
+            "open": float(k.get("open", close)),
+            "high": float(k.get("high", close)),
+            "low": float(k.get("low", close)),
+            "close": close,
+            "return_pct": ret,
+            "volume": volume,
+        })
     return result
 
 
