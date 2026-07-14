@@ -216,7 +216,8 @@ def rank_by_today_gain(
         bars = etf_5min.get(code, {}).get(signal_date, [])
         partial_close = price_at_time(bars, signal_time)
         if partial_close is None or partial_close <= 0:
-            partial_close = returns[idx_map[signal_date]]["close"]
+            # 修复未来函数：5分K缺失时用前日收盘价（而非当日收盘价）
+            partial_close = prev_close
         if not partial_close or partial_close <= 0:
             continue
 
