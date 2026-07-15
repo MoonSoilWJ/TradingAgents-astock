@@ -1,6 +1,7 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
+    get_astock_market_rules_prompt,
     get_indicators,
     get_language_instruction,
     get_stock_data,
@@ -22,12 +23,9 @@ def create_market_analyst(llm):
         system_message = (
             """你是一位专注于 A 股市场的技术分析师。你的任务是从以下技术指标中选择最多 **8 个**最相关的指标，为给定的 A 股标的提供技术面分析。选择时应注重指标间的互补性，避免冗余。
 
-⚠️ A 股市场特殊规则（分析时必须纳入考量）：
-- **涨跌停制度**：主板 ±10%，科创板/创业板 ±20%，ST 股 ±5%。触及涨跌停后流动性骤降，技术指标可能失真。
-- **T+1 交易制度**：当日买入次日才能卖出，短线策略的可执行性受限。
-- **北向资金**：外资通过沪深港通的流入流出是重要的市场风向标，大幅流入/流出常领先于趋势转折。
-- **换手率**：A 股散户占比高，换手率是判断资金活跃度和筹码松动的关键指标。
-- **量价关系**：A 股「量在价先」规律显著，放量突破和缩量回调是核心交易信号。
+"""
+            + get_astock_market_rules_prompt(state["company_of_interest"])
+            + """
 
 可选技术指标（调用 get_indicators 时必须使用下列英文标识符作为参数名）：
 

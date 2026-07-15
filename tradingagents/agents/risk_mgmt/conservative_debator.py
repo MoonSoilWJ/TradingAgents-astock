@@ -4,6 +4,7 @@ def create_conservative_debator(llm):
     from tradingagents.agents.utils.agent_utils import (
         get_balanced_decision_guidance,
         get_debate_notes,
+        get_settlement_risk_notes,
         instrument_type_from_state,
     )
 
@@ -33,7 +34,7 @@ Note: {get_debate_notes(instrument_type)}
 {get_balanced_decision_guidance()}
 
 A-Share Conservative Framework — emphasize structural downside risks where applicable:
-- T+1 settlement lock and daily price limit traps
+{get_settlement_risk_notes(state["company_of_interest"])}
 - For **stocks**: lockup expiry, insider reduction, ST/delisting, PE discipline
 - For **ETFs**: discount spiral, net outflows, broken trend — not company lockup/PE
 

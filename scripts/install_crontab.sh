@@ -2,7 +2,7 @@
 # 安装/更新监控定时任务
 #
 # 板块轮动: rotation_monitor.py（09:40/11:00/13:00/14:50，仅 --install-rotation 时写入）
-# T+0 ETF:  t0_monitor.py（震荡期501018跳过 + 09:40~14:55每3分卖出检查 + 14:50 买入）
+# T+0 ETF:  14:45信号/14:50买 + 09:40~11:05每50秒1分K TRIX(5,3)卖出检查
 #
 # 默认仅追加/更新 T+0 任务，保留 crontab 中已有 rotation_monitor 及其他任务。
 #
@@ -27,7 +27,9 @@ ROTATION_TIMES=(
     "50 14"   # 14:50
 )
 
-T0_SELL_CRON="*/3 9-14"   # 每3分钟检查；脚本内 09:40~14:55，仅有卖点才推送
+T0_SELL_WATCH="40 9"        # 09:40 启动 t0_sell_watch.py，窗口内每 50 秒 --sell-check
+T0_SIGNAL_CRON="45 14"      # 14:45 买入信号
+T0_WATCH_CMD="cd ${PROJECT_DIR} && ${PYTHON3} scripts/t0_sell_watch.py"
 
 MODE="t0-only"
 if [[ "${1:-}" == "--all" ]]; then
@@ -46,23 +48,23 @@ EXISTING="$(crontab -l 2>/dev/null || true)"
 case "${MODE}" in
     t0-only)
         echo "保留已有 crontab（含 rotation_monitor），仅更新 t0_monitor.py 条目"
-        FILTERED="$(echo "${EXISTING}" | grep -v "t0_monitor.py" || true)"
+        FILTERED="$(echo "${EXISTING}" | grep -v "t0_monitor.py" | grep -v "t0_sell_watch.py" || true)"
         {
             echo "${FILTERED}"
-            echo "${T0_SELL_CRON} * * 1-5 ${T0_CMD} --sell-check"
-            echo "50 14 * * 1-5 ${T0_CMD} --signal"
+            echo "${T0_SELL_WATCH} * * 1-5 ${T0_WATCH_CMD}"
+            echo "${T0_SIGNAL_CRON} * * 1-5 ${T0_CMD} --signal"
         } | sed '/^$/d' | crontab -
         ;;
     all)
         echo "重置板块轮动 + T+0（移除旧 rotation/t0 条目后重装）"
-        FILTERED="$(echo "${EXISTING}" | grep -v "rotation_monitor.py" | grep -v "t0_monitor.py" || true)"
+        FILTERED="$(echo "${EXISTING}" | grep -v "rotation_monitor.py" | grep -v "t0_monitor.py" | grep -v "t0_sell_watch.py" || true)"
         {
             echo "${FILTERED}"
             for sched in "${ROTATION_TIMES[@]}"; do
                 echo "${sched} * * 1-5 ${ROTATION_CMD}"
             done
-            echo "${T0_SELL_CRON} * * 1-5 ${T0_CMD} --sell-check"
-            echo "50 14 * * 1-5 ${T0_CMD} --signal"
+            echo "${T0_SELL_WATCH} * * 1-5 ${T0_WATCH_CMD}"
+            echo "${T0_SIGNAL_CRON} * * 1-5 ${T0_CMD} --signal"
         } | sed '/^$/d' | crontab -
         ;;
     rotation-only)
@@ -86,6 +88,7 @@ echo "手动测试:"
 echo "  cd ${PROJECT_DIR} && python3 scripts/rotation_monitor.py --dry-run"
 echo "  cd ${PROJECT_DIR} && python3 scripts/t0_monitor.py --dry-run --signal"
 echo "  cd ${PROJECT_DIR} && python3 scripts/t0_monitor.py --dry-run --sell-check"
+echo "  cd ${PROJECT_DIR} && python3 scripts/t0_sell_watch.py"
 echo ""
 echo "仅卸载 T+0 任务:"
-echo "  crontab -l | grep -v t0_monitor.py | crontab -"
+echo "  crontab -l | grep -v t0_monitor.py | grep -v t0_sell_watch.py | crontab -"

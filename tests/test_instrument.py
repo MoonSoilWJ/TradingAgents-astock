@@ -81,6 +81,26 @@ class InstrumentClassificationTests(unittest.TestCase):
         self.assertEqual(settlement_rule("159999", "恒生ETF"), "T0")
         self.assertEqual(settlement_rule("159999", "创业板ETF"), "T1")
 
+    def test_commodity_lof_is_t0(self):
+        for code, name in (
+            ("501018", "南方原油"),
+            ("161129", "原油基金"),
+            ("162411", "原油基金"),
+            ("161125", "标普中国新机会"),
+            ("159985", "豆粕ETF"),
+        ):
+            with self.subTest(code=code):
+                self.assertEqual(classify_astock_instrument(code), "etf")
+                self.assertEqual(settlement_rule(code, name), "T0")
+
+    def test_gold_stock_etf_stays_t1(self):
+        self.assertEqual(settlement_rule("517400", "黄金股票"), "T1")
+
+    def test_build_instrument_context_t0_lof(self):
+        ctx = build_instrument_context("161129", "etf")
+        self.assertIn("T+0", ctx)
+        self.assertIn("161129", ctx)
+
 
 if __name__ == "__main__":
     unittest.main()

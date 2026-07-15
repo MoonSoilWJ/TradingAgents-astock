@@ -11,6 +11,7 @@ from tradingagents.agents.utils.agent_states import (
 from tradingagents.dataflows.instrument import (
     classify_astock_instrument,
     etf_skip_report,
+    settlement_rule,
 )
 
 
@@ -31,6 +32,15 @@ class Propagator:
         if instrument_type == "etf":
             fundamentals_report = etf_skip_report("fundamentals")
             lockup_report = etf_skip_report("lockup")
+
+        official_name = None
+        try:
+            from tradingagents.dataflows.a_stock import lookup_astock_name
+
+            official_name = lookup_astock_name(company_name)
+        except Exception:
+            pass
+        portfolio_settlement = settlement_rule(company_name, official_name)
 
         return {
             "messages": [("human", company_name)],
@@ -79,7 +89,7 @@ class Propagator:
             "portfolio_capital": 0.0,
             "portfolio_max_pct": 30.0,
             "portfolio_price": 0.0,
-            "portfolio_settlement": "T1",
+            "portfolio_settlement": portfolio_settlement,
             "portfolio_sellable": 0,
             "portfolio_lot": 100,
         }

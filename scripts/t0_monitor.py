@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
-"""T+0 ETF 当日涨幅动量监控 — 14:50 信号 / 次日 TRIX(5,3) 死叉卖。
+"""T+0 ETF 当日涨幅动量监控 — 14:45 信号 / 14:50 买入 / 次日 1分K TRIX(5,3) 卖。
 
-策略（与 backtest_t0_today1 优化版 + 震荡跳过一致）：
+策略（与 1 分 K 回测候选组合一致）：
 - 501018 近10日 MA20 穿越≥2 → 震荡期跳过买入
-- 14:50 选 T+0 池当日涨幅最大且 ≥3% 的 ETF → 14:55 买入
-- 次日 09:40 后 5 分钟 TRIX(5,3) 第一个死叉 → 卖出；无死叉则收盘卖
+- 14:45 选 T+0 池当日涨幅最大且 ≥3% 的 ETF → 14:50 买入
+- 次日 09:40~11:05 每 50 秒检查 1 分钟 TRIX(5,3) 死叉 → 卖出；无死叉则 11:05 定时卖
 
 用法:
-    python scripts/t0_monitor.py --signal          # 14:50 发买入信号
-    python scripts/t0_monitor.py --sell-check      # 次日监控 TRIX 死叉
+    python scripts/t0_monitor.py --signal          # 14:45 发买入信号
+    python scripts/t0_monitor.py --sell-check      # 次日 TRIX 卖出检查
+    python scripts/t0_sell_watch.py                # 09:40~11:05 每 50 秒循环检查
     python scripts/t0_monitor.py --dry-run --signal
     python scripts/t0_monitor.py --test-push
 
 定时（install_crontab.sh）:
-    09:40~14:55 每3分钟  --sell-check（仅死叉/收盘卖时推送）
-    14:50                          --signal
+    09:40  t0_sell_watch.py（窗口内每 50 秒 --sell-check）
+    14:45  --signal
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 
 from backtest_top1 import fetch_sina_kline  # noqa: E402
 from backtest_top1_minute import calc_trix, calc_trix_signal  # noqa: E402
-from backtest_t0_etf import fetch_5min_kline, normalize_5min_bars, price_at_time  # noqa: E402
+from backtest_t0_etf import normalize_5min_bars, price_at_time  # noqa: E402
 from backtest_t0_today1 import (  # noqa: E402
     MIN_GAIN,
     TRIX_MIN_SELL,
@@ -64,21 +65,42 @@ SINA_INTERVAL = 0.25
 STATE_DIR = Path.home() / ".tradingagents" / "rotation"
 STATE_FILE = STATE_DIR / "t0_monitor_state.json"
 
-SIGNAL_TIME = "14:50"
-BUY_TIME = "14:55"
+SIGNAL_TIME = "14:45"
+BUY_TIME = "14:50"
+TRIX_SIGNAL_PERIOD = 3
+SELL_CUTOFF = "11:05"
 FEE_NOTE = "手续费: 万3双边"
 REGIME_RULE = f"501018近10日MA20穿越≥{CHOPPY_MA_CROSS}=震荡跳过"
-BUY_RULE = f"14:50 选当日涨幅≥{MIN_GAIN:.0f}% TOP1 → {BUY_TIME} 买入"
-SELL_RULE = f"次日 5分K TRIX({TRIX_PERIOD},3) 死叉(≥{TRIX_MIN_SELL}) / 无死叉收盘卖"
+BUY_RULE = f"{SIGNAL_TIME} 选当日涨幅≥{MIN_GAIN:.0f}% TOP1 → {BUY_TIME} 买入"
+SELL_RULE = (
+    f"次日 1分K TRIX({TRIX_PERIOD},{TRIX_SIGNAL_PERIOD}) 死叉"
+    f"(≥{TRIX_MIN_SELL}, ≤{SELL_CUTOFF}) / 无死叉 {SELL_CUTOFF} 定时卖"
+)
+
+SELL_CHECK_START = "09:40"   # 与 TRIX_MIN_SELL 一致
+SELL_CHECK_END = SELL_CUTOFF
 
 
-SELL_CHECK_START = "09:40"   # 与 TRIX_MIN_SELL 一致，此前不检查不推送
-SELL_CHECK_END = "14:55"
-CLOSE_SELL_AFTER = "14:00"
+def fetch_1min_kline(sina_symbol: str, datalen: int = 1970) -> dict[str, list[dict]]:
+    """新浪 jsonp 1 分 K，按交易日分组。"""
+    import requests
+
+    url = "https://quotes.sina.cn/cn/api/jsonp_v2.php/=/CN_MarketDataService.getKLineData"
+    params = {"symbol": sina_symbol, "scale": "1", "ma": "no", "datalen": str(datalen)}
+    try:
+        r = requests.get(url, params=params, timeout=15)
+        payload = r.text.split("=(")[1].split(");")[0]
+        klines = json.loads(payload)
+        if not klines:
+            return {}
+        return normalize_5min_bars(klines)
+    except Exception as e:
+        print(f"ERROR: 1分K获取失败 {sina_symbol}: {e}")
+        return {}
 
 
 def is_sell_check_window(now: datetime | None = None) -> bool:
-    """卖出检查有效时段（交易日 09:40~14:55）。"""
+    """卖出检查有效时段（交易日 09:40~11:05）。"""
     now = now or datetime.now()
     if not is_trading_day(now.date()):
         return False
@@ -188,7 +210,7 @@ def trix_death_cross_hit(
     warmup_len = len(bars_for_trix(bars_yesterday))
     closes = [float(b["close"]) for b in all_bars]
     trix = calc_trix(closes, TRIX_PERIOD)
-    signal = calc_trix_signal(trix, max(TRIX_PERIOD // 2, 3))
+    signal = calc_trix_signal(trix, TRIX_SIGNAL_PERIOD)
     min_sell_min = time_to_min(TRIX_MIN_SELL)
     search_start = max(warmup_len, min_warmup)
 
@@ -392,17 +414,19 @@ def run_sell_check(dry_run: bool = False) -> int:
     regime = fetch_regime()
 
     print(f">>> 监控 {pos['name']} ({etf}) 买入@{buy_price:.4f} ({buy_date})")
-    m5 = fetch_5min_kline(sym, datalen=200)
+    by_day = fetch_1min_kline(sym)
     time.sleep(SINA_INTERVAL)
-    if not m5:
-        print("ERROR: 无法获取 5 分 K")
+    if not by_day:
+        print("ERROR: 无法获取 1 分 K")
         return 1
 
-    by_day = normalize_5min_bars(m5)
     bars_buy_day = by_day.get(buy_date, [])
     bars_today = by_day.get(today, [])
     if not bars_today:
-        print("ERROR: 当日 5 分 K 为空")
+        if time_to_min(now_hm) < time_to_min(SELL_CUTOFF):
+            print(f"WARN: 当日 1 分 K 尚未就绪（{etf}），下轮重试")
+            return 0
+        print("ERROR: 当日 1 分 K 为空且已过卖出截止")
         return 1
 
     hit, sell_price, sell_time, ret_str = trix_death_cross_hit(
@@ -418,7 +442,8 @@ def run_sell_check(dry_run: bool = False) -> int:
         f"### T+0 ETF 卖出检查 | {run_ts}",
         "",
         *strategy_header_lines(),
-        f"**检查时点**: {now_hm} | TRIX({TRIX_PERIOD},3) 死叉有效窗口 ≥{TRIX_MIN_SELL}",
+        f"**检查时点**: {now_hm} | 1分K TRIX({TRIX_PERIOD},{TRIX_SIGNAL_PERIOD}) "
+        f"有效窗口 {TRIX_MIN_SELL}~{SELL_CUTOFF}",
         "",
         *format_regime_block(regime),
         f"**持仓**: {pos['name']} ({etf}) | 类型 {pos.get('type', '')}",
@@ -432,7 +457,7 @@ def run_sell_check(dry_run: bool = False) -> int:
         title = f"T0 ⚠️ TRIX死叉卖出{pos['name']}"
         body = [
             *header,
-            f"## ⚠️ TRIX({TRIX_PERIOD},3) 死叉 — 请立即卖出",
+            f"## ⚠️ 1分K TRIX({TRIX_PERIOD},{TRIX_SIGNAL_PERIOD}) 死叉 — 请立即卖出",
             "",
             f"- 死叉时点: **{sell_time}**",
             f"- 卖出参考价: **{sell_price:.4f}**",
@@ -462,26 +487,32 @@ def run_sell_check(dry_run: bool = False) -> int:
         }
         save_state(state)
     else:
-        if time_to_min(now_hm) >= time_to_min(CLOSE_SELL_AFTER):
-            print(f"无 TRIX 死叉，临近收盘 @ {cur:.4f} 浮盈 {float_ret:+.2f}%")
-            title = f"T0轮动 收盘卖{pos['name']}"
+        if time_to_min(now_hm) >= time_to_min(SELL_CUTOFF):
+            cutoff_price = price_at_time(bars_today, SELL_CUTOFF) or cur
+            cutoff_ret = (cutoff_price - buy_price) / buy_price * 100 if cutoff_price else float_ret
+            print(f"无 TRIX 死叉，{SELL_CUTOFF} 定时卖 @ {cutoff_price:.4f} 收益 {cutoff_ret:+.2f}%")
+            title = f"T0轮动 {SELL_CUTOFF}定时卖{pos['name']}"
             text = "\n".join([
                 *header,
-                "**收盘卖出提醒**",
+                f"**{SELL_CUTOFF} 定时卖出提醒**",
                 "",
-                f"- 截至 {now_hm} 未触发 TRIX({TRIX_PERIOD},3) 死叉（有效窗口 ≥{TRIX_MIN_SELL}）",
-                f"- **建议收盘卖出**",
-                f"- 预估收益: **{float_ret:+.2f}%**（{FEE_NOTE}）",
+                f"- 截至 {now_hm} 未触发 1分K TRIX({TRIX_PERIOD},{TRIX_SIGNAL_PERIOD}) 死叉",
+                f"- **{SELL_CUTOFF} 定时卖出**",
+                f"- 卖出参考价: **{cutoff_price:.4f}**",
+                f"- 预估收益: **{cutoff_ret:+.2f}%**（{FEE_NOTE}）",
             ])
             pos["sold"] = True
             pos["sell_date"] = today
-            pos["sell_reason"] = "close_reminder"
+            pos["sell_price"] = cutoff_price
+            pos["sell_reason"] = "time_sell"
             pos["alert_pushed"] = True
             state["position"] = pos
             state["last_sell_alert"] = {
                 "timestamp": datetime.now().isoformat(),
-                "type": "close_reminder",
+                "type": "time_sell",
                 "etf": etf,
+                "sell_price": cutoff_price,
+                "return_pct": f"{cutoff_ret:+.2f}%",
             }
             save_state(state)
         else:
@@ -505,7 +536,7 @@ def run_sell_check(dry_run: bool = False) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="T+0 ETF 动量监控")
-    parser.add_argument("--signal", action="store_true", help="14:50 买入信号")
+    parser.add_argument("--signal", action="store_true", help="14:45 买入信号")
     parser.add_argument("--sell-check", action="store_true", help="次日 TRIX 卖出检查")
     parser.add_argument("--dry-run", action="store_true", help="仅打印不推送")
     parser.add_argument("--test-push", action="store_true", help="测试钉钉推送")

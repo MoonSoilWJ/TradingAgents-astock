@@ -9,10 +9,13 @@ from tradingagents.dataflows.utils import safe_ticker_component
 InstrumentType = Literal["stock", "etf"]
 SettlementRule = Literal["T0", "T1"]
 
-# Bond, gold, and cross-border (QDII / Stock Connect) ETFs are typically T+0 on A-shares.
+# Bond, gold, cross-border, and commodity ETFs/LOFs are typically T+0 on A-shares.
 _T0_ETF_PREFIXES: tuple[str, ...] = ("511", "518", "513")
 
-# Name keywords for T+0 ETFs that share prefixes with T+1 products (e.g. 159xxx).
+# On-exchange LOF prefixes (Shanghai 501xxx, Shenzhen 161/162xxx).
+_LOF_PREFIXES: tuple[str, ...] = ("501", "161", "162")
+
+# Name keywords for T+0 ETFs/LOFs that share prefixes with T+1 products (e.g. 159xxx).
 _T0_ETF_NAME_KEYWORDS: tuple[str, ...] = (
     "纳指",
     "纳斯达克",
@@ -25,6 +28,19 @@ _T0_ETF_NAME_KEYWORDS: tuple[str, ...] = (
     "中概",
     "标普",
     "S&P",
+    "原油",
+    "黄金ETF",
+    "黄金基金",
+    "上海金",
+    "豆粕",
+    "商品",
+    "油气",
+    "能源",
+    "可转债",
+    "白银",
+    "稀土",
+    "南方原油",
+    "原油基金",
 )
 
 # Belt-and-suspenders for well-known T+0 codes (incl. SZ 159xxx cross-border).
@@ -45,6 +61,18 @@ _T0_ETF_CODES: frozenset[str] = frozenset(
         "513600",
         "518880",
         "518800",
+        # Commodity / cross-border LOFs (scripts/t0_etf_list.py)
+        "501018",
+        "161125",
+        "161129",
+        "162411",
+        "162719",
+        "159985",
+        "159981",
+        "159812",
+        "159518",
+        "159554",
+        "562990",
     }
 )
 
@@ -108,10 +136,12 @@ ETF_SKIPPED_ANALYSTS: frozenset[str] = frozenset({"fundamentals", "lockup"})
 
 
 def is_on_exchange_etf_code(code: str) -> bool:
-    """Return True if ``code`` is a 6-digit on-exchange A-share ETF."""
+    """Return True if ``code`` is a 6-digit on-exchange A-share ETF or LOF."""
     if len(code) != 6 or not code.isdigit():
         return False
     if code in _KNOWN_ETF_CODES:
+        return True
+    if code.startswith(_LOF_PREFIXES):
         return True
     # SZ 159xxx (colloquial 15xxx); SH 51xxxx / 56xxxx / 588·589 STAR ETFs
     if code.startswith("159") or code.startswith("51") or code.startswith("56"):
@@ -136,11 +166,11 @@ def normalize_astock_code(ticker: str) -> str:
 
 
 def is_t0_etf_code(code: str, name: str | None = None) -> bool:
-    """Return True when an on-exchange ETF settles T+0 (same-day sell allowed)."""
-    if not is_on_exchange_etf_code(code):
-        return False
+    """Return True when an on-exchange ETF/LOF settles T+0 (same-day sell allowed)."""
     if code in _T0_ETF_CODES:
         return True
+    if not is_on_exchange_etf_code(code):
+        return False
     if code.startswith(_T0_ETF_PREFIXES):
         return True
     if name:
@@ -153,17 +183,19 @@ def is_t0_etf_code(code: str, name: str | None = None) -> bool:
 def settlement_rule(ticker: str, name: str | None = None) -> SettlementRule:
     """Return ``T0`` or ``T1`` for A-share stocks and on-exchange ETFs.
 
-    Stocks are always T+1. ETFs default to T+1 unless they are bond/gold/cross-border
-    products (513/511/518 prefixes), a known T+0 code, or the name mentions
-    纳指 / 港股通 / 恒生 and similar cross-border indices.
+    Stocks are always T+1. ETFs/LOFs default to T+1 unless they are bond/gold/cross-border/
+    commodity products (513/511/518 prefixes, 501/161/162 LOFs), a known T+0 code, or the
+    name mentions 纳指 / 港股通 / 原油 / 黄金 and similar T+0 categories.
     """
     try:
         code = normalize_astock_code(ticker)
     except ValueError:
         return "T1"
+    if is_t0_etf_code(code, name):
+        return "T0"
     if not is_on_exchange_etf_code(code):
         return "T1"
-    return "T0" if is_t0_etf_code(code, name) else "T1"
+    return "T1"
 
 
 def classify_astock_instrument(ticker: str) -> InstrumentType:

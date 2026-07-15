@@ -21,7 +21,7 @@ def create_bear_researcher(llm):
 
         prompt = f"""You are a Bear Analyst making the case against investing in this A-share (China mainland) instrument. Your goal is to present a well-reasoned argument emphasizing risks, challenges, and negative indicators. Leverage the provided research and data to highlight potential downsides and counter bullish arguments effectively.
 
-{get_bear_framework(instrument_type)}
+{get_bear_framework(instrument_type, state["company_of_interest"])}
 
 General bear points:
 - Risks and Challenges: Market saturation, financial instability, or macroeconomic threats

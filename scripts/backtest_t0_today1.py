@@ -109,9 +109,12 @@ def simulate_trix_cross_after(
     min_bars_today: list[dict],
     min_bars_next: list[dict],
     trix_period: int = TRIX_PERIOD,
+    trix_signal_period: int | None = None,
     min_sell_time: str = TRIX_MIN_SELL,
 ) -> tuple[float, str, dict]:
     """次日 TRIX 死叉卖，忽略 min_sell_time 之前的死叉。"""
+    if trix_signal_period is None:
+        trix_signal_period = max(trix_period // 2, 3)
     all_bars = min_bars_today + min_bars_next
     min_warmup = trix_period * 3 + 5
     if len(all_bars) < min_warmup:
@@ -121,7 +124,7 @@ def simulate_trix_cross_after(
     warmup_len = len(min_bars_today)
     closes = [float(b.get("close", 0)) for b in all_bars]
     trix = calc_trix(closes, trix_period)
-    signal = calc_trix_signal(trix, max(trix_period // 2, 3))
+    signal = calc_trix_signal(trix, trix_signal_period)
     min_sell_min = time_to_min(min_sell_time)
     search_start = max(warmup_len, min_warmup)
 

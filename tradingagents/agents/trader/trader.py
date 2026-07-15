@@ -11,6 +11,7 @@ from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
     get_debate_notes,
     get_language_instruction,
+    get_settlement_constraint_prompt,
     instrument_type_from_state,
 )
 from tradingagents.agents.utils.structured import (
@@ -50,7 +51,7 @@ def create_trader(llm):
                     "You are a trading agent specialising in A-share (China mainland) instruments. "
                     "Translate the Research Manager's investment plan into a concrete, executable "
                     "transaction proposal. You must factor in A-stock trading constraints:\n"
-                    "- T+1 settlement: shares bought today cannot be sold until the next trading day\n"
+                    f"{get_settlement_constraint_prompt(company_name)}\n"
                     "- Daily price limits: main board ±10%, STAR/ChiNext ±20%, ST stocks ±5%\n"
                     "- Minimum lot: 100 shares (main board) or 200 shares (STAR/ChiNext)\n"
                     "- Trading hours: 09:30-11:30, 13:00-15:00 Beijing time\n"

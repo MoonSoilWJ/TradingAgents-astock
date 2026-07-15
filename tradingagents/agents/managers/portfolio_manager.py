@@ -17,6 +17,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_debate_notes,
     get_language_instruction,
     get_pm_rating_alignment_guidance,
+    get_settlement_constraint_prompt,
     instrument_type_from_state,
 )
 from tradingagents.agents.utils.structured import (
@@ -59,7 +60,7 @@ Note: {get_debate_notes(instrument_type)}
 ---
 
 **A-Stock Trading Constraints** (must factor into your decision):
-- T+1 settlement: shares bought today cannot be sold until the next trading day
+{get_settlement_constraint_prompt(state["company_of_interest"])}
 - Daily price limits: main board ±10%, STAR/ChiNext ±20%, ST stocks ±5%
 - Minimum lot size: 100 shares (1 手) for main board; 200 shares for STAR/ChiNext
 - Trading hours: 09:30-11:30, 13:00-15:00 (Beijing time)

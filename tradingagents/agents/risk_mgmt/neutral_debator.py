@@ -4,6 +4,7 @@ def create_neutral_debator(llm):
     from tradingagents.agents.utils.agent_utils import (
         get_balanced_decision_guidance,
         get_debate_notes,
+        get_settlement_risk_notes,
         instrument_type_from_state,
     )
 
@@ -33,7 +34,7 @@ Note: {get_debate_notes(instrument_type)}
 {get_balanced_decision_guidance()}
 
 A-Share Neutral Framework — balancing considerations:
-- T+1 as double-edged sword; size positions for survivable overnight gaps
+{get_settlement_risk_notes(state["company_of_interest"])}
 - Distinguish policy signal quality; use fund flow as confirmation not sole thesis
 - For stocks: valuation bands and lockup timing; for ETFs: trend + flows + premium-discount
 - Position sizing over extreme directional calls when evidence is mixed

@@ -107,6 +107,8 @@ def simulate_exit(
     buy_time: str,
     next_bars: list[dict],
     sell_cutoff: str | None = None,
+    trix_period: int = TRIX_PERIOD,
+    trix_signal_period: int | None = None,
 ) -> tuple[float | None, str]:
     """返回 (sell_price, sell_reason)。"""
     if sell_mode == "same_close":
@@ -155,7 +157,8 @@ def simulate_exit(
         buy_price,
         bars_for_trix(day_bars),
         bars_for_trix(window),
-        trix_period=TRIX_PERIOD,
+        trix_period=trix_period,
+        trix_signal_period=trix_signal_period,
         min_sell_time=min_sell,
     )
     sp = detail.get("sell_price")
@@ -224,6 +227,8 @@ def run_combo(
     picks: dict,
     etf_5min: dict,
     fee_pct: float,
+    trix_period: int = TRIX_PERIOD,
+    trix_signal_period: int | None = None,
 ) -> dict | None:
     rets: list[float] = []
     trades: list[dict] = []
@@ -252,6 +257,7 @@ def run_combo(
 
         sell_price, sell_reason = simulate_exit(
             sell_mode, buy_price, day_bars, buy_time, next_bars, sell_cutoff,
+            trix_period=trix_period, trix_signal_period=trix_signal_period,
         )
         if sell_price is None or sell_price <= 0:
             continue

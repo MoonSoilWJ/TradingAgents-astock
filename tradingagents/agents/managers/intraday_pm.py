@@ -6,6 +6,7 @@ from tradingagents.agents.schemas import IntradayDecision, render_intraday_decis
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
     get_language_instruction,
+    get_settlement_constraint_prompt,
     instrument_type_from_state,
 )
 from tradingagents.agents.utils.structured import (
@@ -60,7 +61,7 @@ def create_intraday_portfolio_manager(llm):
 {_portfolio_context_block(state)}
 
 **A-Share Constraints**
-- Settlement: {state.get("portfolio_settlement", "T1")} (T+1: today's buys cannot be sold today)
+- {get_settlement_constraint_prompt(state["company_of_interest"])}
 - Price limits and lot size must be respected
 - If no change is needed, action=hold and quantity_shares=0
 
