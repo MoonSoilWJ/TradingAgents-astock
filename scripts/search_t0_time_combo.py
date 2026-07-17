@@ -70,11 +70,11 @@ DEFAULT_SELL_CUTOFFS = [
 ]
 
 BASELINE = {
-    "signal": "14:50",
-    "buy": "14:55",
-    "sell_mode": "trix_0940",
-    "sell_cutoff": None,
-    "label": "当前实盘(14:50/14:55/TRIX≥09:40)",
+    "signal": "14:45",
+    "buy": "14:50",
+    "sell_mode": "trix0940_cut",
+    "sell_cutoff": "11:05",
+    "label": "当前实盘(14:45/14:50/5分TRIX(5,3)≥09:40≤11:05)",
 }
 
 MIN_TRADES = 10

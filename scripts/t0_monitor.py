@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""T+0 ETF 当日涨幅动量监控 — 14:45 信号 / 14:50 买入 / 次日 1分K TRIX(5,3) 卖。
+"""T+0 ETF 当日涨幅动量监控 — 14:45 信号 / 14:50 买入 / 次日 5分K TRIX(5,3) 卖。
 
-策略（与 1 分 K 回测候选组合一致）：
+策略（9 日 1 分 K 回测验证，无未来函数；5 分 TRIX(5,3) 累计 +36.31% 最优）：
 - 501018 近10日 MA20 穿越≥2 → 震荡期跳过买入
 - 14:45 选 T+0 池当日涨幅最大且 ≥3% 的 ETF → 14:50 买入
-- 次日 09:40~11:05 每 50 秒检查 1 分钟 TRIX(5,3) 死叉 → 卖出；无死叉则 11:05 定时卖
+- 次日 09:40~11:05 每 50 秒检查 5 分钟 TRIX(5,3) 死叉 → 卖出；无死叉则 11:05 定时卖
 
 用法:
     python scripts/t0_monitor.py --signal          # 14:45 发买入信号
@@ -12,6 +12,11 @@
     python scripts/t0_sell_watch.py                # 09:40~11:05 每 50 秒循环检查
     python scripts/t0_monitor.py --dry-run --signal
     python scripts/t0_monitor.py --test-push
+    python scripts/t0_monitor.py --trail-log          # 查看 1 分 K 追踪 shadow 日志
+    python scripts/t0_monitor.py --trail-log --days 3
+
+Shadow 日志（实盘卖出仍仅 TRIX/定时，追踪只记录不执行）:
+    ~/.tradingagents/rotation/t0_trail_shadow.jsonl
 
 定时（install_crontab.sh）:
     09:40  t0_sell_watch.py（窗口内每 50 秒 --sell-check）
@@ -41,7 +46,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 
 from backtest_top1 import fetch_sina_kline  # noqa: E402
 from backtest_top1_minute import calc_trix, calc_trix_signal  # noqa: E402
-from backtest_t0_etf import normalize_5min_bars, price_at_time  # noqa: E402
+from backtest_t0_etf import fetch_5min_kline, normalize_5min_bars, price_at_time  # noqa: E402
 from backtest_t0_today1 import (  # noqa: E402
     MIN_GAIN,
     TRIX_MIN_SELL,
@@ -64,16 +69,24 @@ except ImportError:
 SINA_INTERVAL = 0.25
 STATE_DIR = Path.home() / ".tradingagents" / "rotation"
 STATE_FILE = STATE_DIR / "t0_monitor_state.json"
+TRAIL_SHADOW_LOG = STATE_DIR / "t0_trail_shadow.jsonl"
+
+# 1 分 K 追踪 shadow（与 backtest_t0_hybrid_1min 一致；仅日志，不改实盘卖点）
+TRAIL_DROP_PCT = 0.5
+TRAIL_SHADOW_VERSION = "trail_shadow_1m_0.5pct_20260716"
 
 SIGNAL_TIME = "14:45"
 BUY_TIME = "14:50"
 TRIX_SIGNAL_PERIOD = 3
+SELL_BAR_LABEL = "5分K"
 SELL_CUTOFF = "11:05"
+# 与 backtest_t0_sell_trix_compare.py 最优方案一致；卖点逻辑与 simulate_trix_cross_after 对齐
+STRATEGY_VERSION = "t0_1445_1450_5m_trix53_20260715"
 FEE_NOTE = "手续费: 万3双边"
 REGIME_RULE = f"501018近10日MA20穿越≥{CHOPPY_MA_CROSS}=震荡跳过"
 BUY_RULE = f"{SIGNAL_TIME} 选当日涨幅≥{MIN_GAIN:.0f}% TOP1 → {BUY_TIME} 买入"
 SELL_RULE = (
-    f"次日 1分K TRIX({TRIX_PERIOD},{TRIX_SIGNAL_PERIOD}) 死叉"
+    f"次日 {SELL_BAR_LABEL} TRIX({TRIX_PERIOD},{TRIX_SIGNAL_PERIOD}) 死叉"
     f"(≥{TRIX_MIN_SELL}, ≤{SELL_CUTOFF}) / 无死叉 {SELL_CUTOFF} 定时卖"
 )
 
@@ -81,22 +94,23 @@ SELL_CHECK_START = "09:40"   # 与 TRIX_MIN_SELL 一致
 SELL_CHECK_END = SELL_CUTOFF
 
 
-def fetch_1min_kline(sina_symbol: str, datalen: int = 1970) -> dict[str, list[dict]]:
-    """新浪 jsonp 1 分 K，按交易日分组。"""
-    import requests
-
-    url = "https://quotes.sina.cn/cn/api/jsonp_v2.php/=/CN_MarketDataService.getKLineData"
-    params = {"symbol": sina_symbol, "scale": "1", "ma": "no", "datalen": str(datalen)}
+def fetch_sell_kline(sina_symbol: str, datalen: int = 2500) -> dict[str, list[dict]]:
+    """新浪 5 分 K，按交易日分组（与回测 trix0940_cut 卖点一致）。"""
     try:
-        r = requests.get(url, params=params, timeout=15)
-        payload = r.text.split("=(")[1].split(");")[0]
-        klines = json.loads(payload)
+        klines = fetch_5min_kline(sina_symbol, datalen=datalen)
         if not klines:
             return {}
         return normalize_5min_bars(klines)
     except Exception as e:
-        print(f"ERROR: 1分K获取失败 {sina_symbol}: {e}")
+        print(f"ERROR: {SELL_BAR_LABEL}获取失败 {sina_symbol}: {e}")
         return {}
+
+
+def is_signal_window(now: datetime | None = None) -> bool:
+    """正式信号窗口：14:45~14:55（与 crontab 14:45 及 14:50 买入一致）。"""
+    now = now or datetime.now()
+    hm = now.hour * 60 + now.minute
+    return time_to_min(SIGNAL_TIME) <= hm <= time_to_min(BUY_TIME) + 5
 
 
 def is_sell_check_window(now: datetime | None = None) -> bool:
@@ -119,6 +133,14 @@ def load_state() -> dict:
 
 def save_state(state: dict) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    state.setdefault("strategy", {})
+    state["strategy"].update({
+        "version": STRATEGY_VERSION,
+        "signal": SIGNAL_TIME,
+        "buy": BUY_TIME,
+        "sell": f"{SELL_BAR_LABEL} TRIX({TRIX_PERIOD},{TRIX_SIGNAL_PERIOD})",
+        "sell_window": f"{TRIX_MIN_SELL}~{SELL_CUTOFF}",
+    })
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -168,8 +190,11 @@ def rank_t0_by_today_gain(quotes: dict[str, dict]) -> list[dict]:
         gain = q.get("change_pct")
         if gain is None:
             gain = (price - last_close) / last_close * 100
+        live_name = (q.get("name") or "").strip()
         rows.append({
             **etf,
+            "name": live_name or etf["name"],
+            "etf_name": live_name or etf["name"],
             "price": price,
             "last_close": last_close,
             "today_gain": round(float(gain), 2),
@@ -184,6 +209,186 @@ def pick_signal_candidate(ranked: list[dict]) -> dict | None:
         if row["today_gain"] >= MIN_GAIN:
             return row
     return None
+
+
+def fetch_1min_today(sina_symbol: str) -> list[dict]:
+    """拉当日 1 分 K（新浪，用于 shadow 峰值追踪）。"""
+    try:
+        from backtest_t0_1min import fetch_1min_kline_sina  # noqa: E402
+
+        by_day = fetch_1min_kline_sina(sina_symbol)
+        return by_day.get(date.today().isoformat(), [])
+    except Exception as e:
+        print(f"WARN: 1分K shadow 拉取失败 {sina_symbol}: {e}")
+        return []
+
+
+def _bar_time_1m(bar: dict) -> str:
+    if " " in bar.get("day", ""):
+        return bar["day"].split(" ")[1][:5]
+    return bar.get("time", "00:00")[:5]
+
+
+def peak_from_1min(bars_1m: list[dict], buy_price: float, since: str = TRIX_MIN_SELL) -> float:
+    """09:40 起 1 分 K 最高价作为 running peak。"""
+    since_m = time_to_min(since)
+    peak = buy_price
+    for b in bars_1m:
+        if time_to_min(_bar_time_1m(b)) < since_m:
+            continue
+        peak = max(peak, float(b.get("high", 0) or 0))
+    return peak
+
+
+def trail_shadow_would_sell(
+    buy_price: float,
+    peak: float,
+    cur_price: float,
+    trail_drop_pct: float = TRAIL_DROP_PCT,
+) -> tuple[bool, float]:
+    """1 分 K 回测同逻辑：peak>买入价 且 现价≤peak×(1-drop%)。"""
+    if peak <= buy_price or cur_price <= 0:
+        return False, 0.0
+    trigger = peak * (1 - trail_drop_pct / 100)
+    if cur_price <= trigger:
+        return True, trigger
+    return False, trigger
+
+
+def append_trail_shadow_log(entry: dict) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    entry.setdefault("shadow_version", TRAIL_SHADOW_VERSION)
+    with TRAIL_SHADOW_LOG.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def run_trail_shadow_check(
+    pos: dict,
+    sym: str,
+    buy_price: float,
+    bars_buy_day: list[dict],
+    bars_today: list[dict],
+    now_hm: str,
+    cur_price: float,
+) -> dict:
+    """记录 1 分 K 追踪 vs TRIX 对比（不触发实盘卖出）。"""
+    bars_1m = fetch_1min_today(sym)
+    time.sleep(SINA_INTERVAL)
+    peak_1m = peak_from_1min(bars_1m, buy_price) if bars_1m else buy_price
+    if cur_price > 0:
+        peak_1m = max(peak_1m, cur_price)
+
+    trail_hit, trail_trigger = trail_shadow_would_sell(buy_price, peak_1m, cur_price)
+    trix_hit, trix_price, trix_time, trix_ret = trix_death_cross_hit(
+        buy_price, bars_buy_day, bars_today, now_hm,
+    )
+
+    float_pct = (cur_price - buy_price) / buy_price * 100 if cur_price and buy_price else 0.0
+    trix_ret_num = None
+    if trix_hit and trix_price:
+        trix_ret_num = (trix_price - buy_price) / buy_price * 100
+
+    hybrid_first = None
+    if trail_hit and trix_hit:
+        hybrid_first = "trail"  # 同检查点两者皆真时，实盘 hybrid 会优先追踪
+    elif trail_hit:
+        hybrid_first = "trail"
+    elif trix_hit:
+        hybrid_first = "trix"
+
+    entry = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "check_time": now_hm,
+        "etf": pos.get("etf"),
+        "name": pos.get("name"),
+        "buy_date": pos.get("buy_date"),
+        "buy_price": round(buy_price, 4),
+        "price": round(cur_price, 4) if cur_price else None,
+        "float_pct": round(float_pct, 3),
+        "peak_1m": round(peak_1m, 4),
+        "trail_drop_pct": TRAIL_DROP_PCT,
+        "trail_trigger": round(trail_trigger, 4),
+        "trail_would_sell": trail_hit,
+        "trix_would_sell": trix_hit,
+        "trix_sell_time": trix_time if trix_hit else None,
+        "trix_sell_price": round(trix_price, 4) if trix_hit else None,
+        "trix_return_pct": round(trix_ret_num, 3) if trix_ret_num is not None else None,
+        "hybrid_first": hybrid_first,
+        "live_action": "trix_only",  # 实盘仍仅 TRIX/定时
+        "bars_1m": len(bars_1m),
+    }
+    append_trail_shadow_log(entry)
+
+    if trail_hit and not trix_hit:
+        print(
+            f"  [shadow] 1分追踪 Would SELL @ {trail_trigger:.4f} "
+            f"(peak {peak_1m:.4f}, 现 {cur_price:.4f}) — 实盘仍等 TRIX"
+        )
+    elif trail_hit and trix_hit:
+        print(
+            f"  [shadow] 追踪+TRIX 同时触发 | 追踪@{trail_trigger:.4f} TRIX@{trix_price:.4f} {trix_ret}"
+        )
+    else:
+        print(
+            f"  [shadow] peak_1m={peak_1m:.4f} trail触发价={trail_trigger:.4f} "
+            f"TRIX={'死叉' if trix_hit else '否'}"
+        )
+    return entry
+
+
+def print_trail_shadow_log(days: int = 7) -> int:
+    """打印最近 shadow 日志摘要。"""
+    if not TRAIL_SHADOW_LOG.exists():
+        print(f"暂无 shadow 日志: {TRAIL_SHADOW_LOG}")
+        return 0
+
+    lines = TRAIL_SHADOW_LOG.read_text(encoding="utf-8").strip().splitlines()
+    entries = []
+    for line in lines:
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+
+    if not entries:
+        print("日志为空")
+        return 0
+
+    cutoff = date.today().toordinal() - days + 1
+    recent = [
+        e for e in entries
+        if datetime.fromisoformat(e["ts"]).date().toordinal() >= cutoff
+    ]
+    if not recent:
+        recent = entries[-50:]
+
+    print(f"=== T+0 1分K追踪 Shadow 日志 ===")
+    print(f"文件: {TRAIL_SHADOW_LOG}")
+    print(f"版本: {TRAIL_SHADOW_VERSION} | 回落 {TRAIL_DROP_PCT}% | 显示近 {days} 天 ({len(recent)} 条)\n")
+    print(f"  {'时间':>16} {'ETF':>8} {'现价':>7} {'peak':>7} {'浮盈':>7} {'追踪':>4} {'TRIX':>4} {'hybrid':>6}")
+    print("  " + "-" * 72)
+    for e in recent[-40:]:
+        ts = e.get("ts", "")[5:16].replace("T", " ")
+        print(
+            f"  {ts:>16} {e.get('etf', ''):>8} "
+            f"{e.get('price') or 0:7.4f} {e.get('peak_1m') or 0:7.4f} "
+            f"{e.get('float_pct') or 0:+6.2f}% "
+            f"{'Y' if e.get('trail_would_sell') else 'N':>4} "
+            f"{'Y' if e.get('trix_would_sell') else 'N':>4} "
+            f"{e.get('hybrid_first') or '-':>6}"
+        )
+
+    # 按 sell day 汇总（每个 buy_date+etf 取最后一次检查）
+    by_key: dict[str, dict] = {}
+    for e in recent:
+        key = f"{e.get('buy_date')}_{e.get('etf')}"
+        by_key[key] = e
+    summaries = list(by_key.values())
+    trail_only = sum(1 for e in summaries if e.get("trail_would_sell") and not e.get("trix_would_sell"))
+    both = sum(1 for e in summaries if e.get("trail_would_sell") and e.get("trix_would_sell"))
+    print(f"\n  汇总({len(summaries)} 个持仓日): 仅追踪会先卖 {trail_only} | 两者同时 {both}")
+    print(f"  实盘卖点未改，仍为 TRIX/11:05 定时")
+    return 0
 
 
 def trix_death_cross_hit(
@@ -339,7 +544,10 @@ def run_signal(dry_run: bool = False) -> int:
             print(f"  {i}. {r['name']:14s} {r['code']} {r['today_gain']:+.2f}%{tag}")
 
         title = f"T0轮动 买入{top['name']}"
-        if not (pos and not pos.get("sold")):
+        in_window = is_signal_window()
+        if not in_window:
+            print(f"WARN: 当前未到正式信号窗口（{SIGNAL_TIME}~{BUY_TIME}），仅记录候选，不写入持仓")
+        if in_window and not (pos and not pos.get("sold")):
             state["position"] = {
                 "etf": top["code"],
                 "name": top["name"],
@@ -352,6 +560,7 @@ def run_signal(dry_run: bool = False) -> int:
         state["last_signal"] = {
             "timestamp": datetime.now().isoformat(),
             "skipped": False,
+            "pending_buy": not in_window,
             "etf": top["code"],
             "name": top["name"],
             "today_gain": top["today_gain"],
@@ -414,35 +623,39 @@ def run_sell_check(dry_run: bool = False) -> int:
     regime = fetch_regime()
 
     print(f">>> 监控 {pos['name']} ({etf}) 买入@{buy_price:.4f} ({buy_date})")
-    by_day = fetch_1min_kline(sym)
+    by_day = fetch_sell_kline(sym)
     time.sleep(SINA_INTERVAL)
     if not by_day:
-        print("ERROR: 无法获取 1 分 K")
+        print(f"ERROR: 无法获取 {SELL_BAR_LABEL}")
         return 1
 
     bars_buy_day = by_day.get(buy_date, [])
     bars_today = by_day.get(today, [])
     if not bars_today:
         if time_to_min(now_hm) < time_to_min(SELL_CUTOFF):
-            print(f"WARN: 当日 1 分 K 尚未就绪（{etf}），下轮重试")
+            print(f"WARN: 当日 {SELL_BAR_LABEL} 尚未就绪（{etf}），下轮重试")
             return 0
-        print("ERROR: 当日 1 分 K 为空且已过卖出截止")
+        print(f"ERROR: 当日 {SELL_BAR_LABEL} 为空且已过卖出截止")
         return 1
-
-    hit, sell_price, sell_time, ret_str = trix_death_cross_hit(
-        buy_price, bars_buy_day, bars_today, now_hm,
-    )
 
     q = fetch_tencent_quotes([etf]).get(etf, {})
     cur = q.get("price", 0)
     float_ret = (cur - buy_price) / buy_price * 100 if cur and buy_price else 0
+
+    run_trail_shadow_check(
+        pos, sym, buy_price, bars_buy_day, bars_today, now_hm, float(cur or 0),
+    )
+
+    hit, sell_price, sell_time, ret_str = trix_death_cross_hit(
+        buy_price, bars_buy_day, bars_today, now_hm,
+    )
 
     run_ts = datetime.now().strftime("%Y-%m-%d %H:%M")
     header = [
         f"### T+0 ETF 卖出检查 | {run_ts}",
         "",
         *strategy_header_lines(),
-        f"**检查时点**: {now_hm} | 1分K TRIX({TRIX_PERIOD},{TRIX_SIGNAL_PERIOD}) "
+        f"**检查时点**: {now_hm} | {SELL_BAR_LABEL} TRIX({TRIX_PERIOD},{TRIX_SIGNAL_PERIOD}) "
         f"有效窗口 {TRIX_MIN_SELL}~{SELL_CUTOFF}",
         "",
         *format_regime_block(regime),
@@ -457,7 +670,7 @@ def run_sell_check(dry_run: bool = False) -> int:
         title = f"T0 ⚠️ TRIX死叉卖出{pos['name']}"
         body = [
             *header,
-            f"## ⚠️ 1分K TRIX({TRIX_PERIOD},{TRIX_SIGNAL_PERIOD}) 死叉 — 请立即卖出",
+            f"## ⚠️ {SELL_BAR_LABEL} TRIX({TRIX_PERIOD},{TRIX_SIGNAL_PERIOD}) 死叉 — 请立即卖出",
             "",
             f"- 死叉时点: **{sell_time}**",
             f"- 卖出参考价: **{sell_price:.4f}**",
@@ -485,6 +698,17 @@ def run_sell_check(dry_run: bool = False) -> int:
             "sell_price": sell_price,
             "return_pct": ret_str,
         }
+        append_trail_shadow_log({
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "event": "live_sell",
+            "sell_reason": "trix_death_cross",
+            "etf": etf,
+            "buy_date": buy_date,
+            "buy_price": buy_price,
+            "sell_price": sell_price,
+            "return_pct": ret_str,
+            "note": "实盘 TRIX 卖出（shadow 未介入）",
+        })
         save_state(state)
     else:
         if time_to_min(now_hm) >= time_to_min(SELL_CUTOFF):
@@ -496,7 +720,7 @@ def run_sell_check(dry_run: bool = False) -> int:
                 *header,
                 f"**{SELL_CUTOFF} 定时卖出提醒**",
                 "",
-                f"- 截至 {now_hm} 未触发 1分K TRIX({TRIX_PERIOD},{TRIX_SIGNAL_PERIOD}) 死叉",
+                f"- 截至 {now_hm} 未触发 {SELL_BAR_LABEL} TRIX({TRIX_PERIOD},{TRIX_SIGNAL_PERIOD}) 死叉",
                 f"- **{SELL_CUTOFF} 定时卖出**",
                 f"- 卖出参考价: **{cutoff_price:.4f}**",
                 f"- 预估收益: **{cutoff_ret:+.2f}%**（{FEE_NOTE}）",
@@ -514,6 +738,17 @@ def run_sell_check(dry_run: bool = False) -> int:
                 "sell_price": cutoff_price,
                 "return_pct": f"{cutoff_ret:+.2f}%",
             }
+            append_trail_shadow_log({
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "event": "live_sell",
+                "sell_reason": "time_sell",
+                "etf": etf,
+                "buy_date": buy_date,
+                "buy_price": buy_price,
+                "sell_price": cutoff_price,
+                "return_pct": f"{cutoff_ret:+.2f}%",
+                "note": "实盘 11:05 定时卖出（shadow 未介入）",
+            })
             save_state(state)
         else:
             print(f"截至 {now_hm} 未触发 TRIX 死叉，继续持仓（不推送）")
@@ -540,7 +775,12 @@ def main() -> None:
     parser.add_argument("--sell-check", action="store_true", help="次日 TRIX 卖出检查")
     parser.add_argument("--dry-run", action="store_true", help="仅打印不推送")
     parser.add_argument("--test-push", action="store_true", help="测试钉钉推送")
+    parser.add_argument("--trail-log", action="store_true", help="查看 1 分 K 追踪 shadow 日志")
+    parser.add_argument("--days", type=int, default=7, help="--trail-log 显示最近 N 天")
     args = parser.parse_args()
+
+    if args.trail_log:
+        sys.exit(print_trail_shadow_log(days=args.days))
 
     if args.test_push:
         regime = fetch_regime()
@@ -557,11 +797,11 @@ def main() -> None:
         print("成功" if ok else "失败")
         sys.exit(0 if ok else 1)
 
-    if args.signal and args.sell_check:
-        print("ERROR: --signal 与 --sell-check 不能同时使用")
+    if sum([args.signal, args.sell_check, args.trail_log]) > 1:
+        print("ERROR: --signal / --sell-check / --trail-log 只能选一个")
         sys.exit(1)
     if not args.signal and not args.sell_check:
-        print("ERROR: 请指定 --signal 或 --sell-check")
+        print("ERROR: 请指定 --signal 或 --sell-check（或 --trail-log 查看日志）")
         sys.exit(1)
 
     code = run_signal(dry_run=args.dry_run) if args.signal else run_sell_check(dry_run=args.dry_run)

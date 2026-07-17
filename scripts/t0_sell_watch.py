@@ -2,6 +2,10 @@
 """T+0 卖出监控循环 — 09:40~11:05 每 50 秒跑一次 --sell-check。
 
 由 crontab 在 09:40 触发一次，本脚本在窗口内循环直至 11:05 后做一次收尾检查。
+
+每次 --sell-check 会并行写入 1 分 K 追踪 shadow 日志（不改实盘卖点）：
+  ~/.tradingagents/rotation/t0_trail_shadow.jsonl
+查看: python scripts/t0_monitor.py --trail-log
 """
 
 from __future__ import annotations

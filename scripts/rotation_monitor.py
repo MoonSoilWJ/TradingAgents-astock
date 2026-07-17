@@ -4,7 +4,7 @@
 板块池: 平安证券 79 个（行业 + 概念），数据 scripts/pingan_sector_etf.json
 
 操作流程：
-1. 信号时点（09:40/11:00/13:00/14:50）跑 v6 排名，推送 TOP1 ETF
+1. 信号时点（09:30/15:00）跑 v6 排名，推送 TOP1 ETF
 2. 买入 TOP1 ETF：上涨 1.0% 或 下跌 2% 再回弹 0.3%
 3. 次日卖出：追踪触 +3% 回落 0.5% 止盈，或 T+1 收盘卖（无固定止损）
 
@@ -19,7 +19,7 @@ v6 选股（与 backtest_rotation_8way 一致，见 rotation_v6.py）：
 
 定时运行（crontab）:
     bash scripts/install_crontab.sh
-    # 09:25 / 11:00 / 13:00 / 14:50 各跑一次
+    # 09:30 / 15:00 各跑一次
 """
 
 import argparse
@@ -144,6 +144,7 @@ def fetch_tencent_quotes(codes: list[str]) -> dict[str, dict]:
         try:
             vol_lots = float(vals[6]) if vals[6] else 0.0
             result[code] = {
+                "name": vals[1].strip() if vals[1] else "",
                 "price": float(vals[3]) if vals[3] else 0.0,
                 "last_close": float(vals[4]) if vals[4] else 0.0,
                 "open": float(vals[5]) if vals[5] else 0.0,
