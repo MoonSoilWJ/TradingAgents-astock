@@ -96,14 +96,30 @@ def detect_regime(daily_klines: list[dict], as_of_date: str | None = None) -> di
     }
 
 
-def format_regime_block(regime: dict | None) -> list[str]:
-    if not regime:
-        return ["**市场环境**: 数据不足，按中性处理"]
+def regime_action_line(regime: dict, *, hybrid: bool = False) -> str:
+    """Hybrid 实盘：震荡/趋势不跳过，只切换选池；纯 T+0 模式震荡日跳过买入。"""
     mode = regime["mode"]
-    action = "⛔ 震荡期跳过买入" if regime["skip_choppy"] else "✅ 可正常交易"
+    if hybrid:
+        if mode == "中性":
+            return "中性 → **原T0池**，继续交易"
+        if mode == "震荡":
+            return "震荡 → **优质池**，继续交易（Hybrid 不跳过）"
+        if mode == "趋势":
+            return "趋势 → **优质池**，继续交易"
+        return "✅ 可正常交易"
+    if regime.get("skip_choppy"):
+        return "⛔ 震荡期跳过买入"
+    return "✅ 可正常交易"
+
+
+def format_regime_block(regime: dict | None, *, hybrid: bool = False) -> list[str]:
+    if not regime:
+        suffix = "（Hybrid：中性→原T0池）" if hybrid else ""
+        return [f"**市场环境**: 数据不足，按中性处理{suffix}"]
+    action = regime_action_line(regime, hybrid=hybrid)
     return [
         "**市场环境**（南方原油 501018）",
-        f"- 状态: **{mode}** | {action}",
+        f"- 状态: **{regime['mode']}** | {action}",
         f"- 收盘: {regime['close']:.4f} | MA20: {regime['ma20']:.4f} | 距MA20: {regime['dist_ma20']:.2f}%",
         f"- 近10日MA20穿越: **{regime['ma_crosses']}次**（≥{CHOPPY_MA_CROSS}=震荡）",
         f"- ADX(14): {regime['adx']:.1f}",

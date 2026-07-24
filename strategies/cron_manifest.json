@@ -45,6 +45,14 @@
       "log": "min_cache.log"
     },
     {
+      "id": "min_cache_allmarket",
+      "name": "全市场分钟 K 缓存",
+      "cron": "35 15 * * 1-5",
+      "script": "scripts/cache_min_data.py --all-market --workers 8",
+      "strategy_id": "min_cache",
+      "log": "min_cache_allmarket.log"
+    },
+    {
       "id": "t0_walk_forward",
       "name": "T+0 Walk-Forward 复核",
       "cron": "0 09 1-7 * 1",

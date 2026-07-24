@@ -3,7 +3,7 @@
 #
 # 板块轮动: rotation_monitor.py（09:30/15:00，仅 --install-rotation 时写入）
 # T+0 ETF:  14:45信号/14:50买 + 09:40~11:05每50秒5分K TRIX(5,3)卖出检查
-# 分钟K缓存: cache_min_data.py（15:10，1分K≈9天 + 5分K≈105天 增量落盘）
+# 分钟K缓存: cache_min_data.py（15:10 小池子 + 15:35 全市场）
 # Walk-Forward: 每月首个工作日 9:00 复核参数（仅「可考虑切换」时钉钉推送）
 #
 # 默认仅追加/更新 T+0 任务，保留 crontab 中已有 rotation_monitor 及其他任务。
@@ -30,9 +30,11 @@ ROTATION_TIMES=(
 
 T0_SELL_WATCH="40 9"        # 09:40 启动 t0_sell_watch.py，窗口内每 50 秒 --sell-check
 T0_SIGNAL_CRON="45 14"      # 14:45 买入信号
-T0_CACHE_CRON="10 15"       # 15:10 缓存 1分K/5分K
+T0_CACHE_CRON="10 15"       # 15:10 小池子 1分K/5分K
+T0_CACHE_ALLMARKET_CRON="35 15"  # 15:35 全市场 ~1733 只
 T0_WATCH_CMD="cd ${PROJECT_DIR} && ${PYTHON3} scripts/t0_sell_watch.py"
 CACHE_CMD="cd ${PROJECT_DIR} && ${PYTHON3} scripts/cache_min_data.py >> ${HOME}/.tradingagents/rotation/min_cache.log 2>&1"
+CACHE_ALLMARKET_CMD="cd ${PROJECT_DIR} && ${PYTHON3} scripts/cache_min_data.py --all-market --workers 8 >> ${HOME}/.tradingagents/rotation/min_cache_allmarket.log 2>&1"
 WF_CMD="cd ${PROJECT_DIR} && ${PYTHON3} scripts/t0_walk_forward.py >> ${HOME}/.tradingagents/rotation/walk_forward.log 2>&1"
 WF_CRON="0 9 1-7 * 1"   # 每月 1~7 日中的周一 9:00（首个工作日近似）
 
@@ -61,6 +63,7 @@ case "${MODE}" in
             echo "${T0_SELL_WATCH} * * 1-5 ${T0_WATCH_CMD}"
             echo "${T0_SIGNAL_CRON} * * 1-5 ${T0_CMD} --signal"
             echo "${T0_CACHE_CRON} * * 1-5 ${CACHE_CMD}"
+            echo "${T0_CACHE_ALLMARKET_CRON} * * 1-5 ${CACHE_ALLMARKET_CMD}"
         } | sed '/^$/d' | crontab -
         ;;
     all)
@@ -74,6 +77,7 @@ case "${MODE}" in
             echo "${T0_SELL_WATCH} * * 1-5 ${T0_WATCH_CMD}"
             echo "${T0_SIGNAL_CRON} * * 1-5 ${T0_CMD} --signal"
             echo "${T0_CACHE_CRON} * * 1-5 ${CACHE_CMD}"
+            echo "${T0_CACHE_ALLMARKET_CRON} * * 1-5 ${CACHE_ALLMARKET_CMD}"
         } | sed '/^$/d' | crontab -
         ;;
     rotation-only)
@@ -108,6 +112,7 @@ echo "  cd ${PROJECT_DIR} && python3 scripts/t0_monitor.py --dry-run --sell-chec
 echo "  cd ${PROJECT_DIR} && python3 scripts/t0_sell_watch.py"
 echo "  cd ${PROJECT_DIR} && python3 scripts/t0_walk_forward.py --test-push"
 echo "  cd ${PROJECT_DIR} && python3 scripts/cache_min_data.py --dry-run"
+echo "  cd ${PROJECT_DIR} && python3 scripts/cache_min_data.py --all-market --dry-run"
 echo ""
 echo "仅卸载 T+0 任务:"
 echo "  crontab -l | grep -v t0_monitor.py | grep -v t0_sell_watch.py | grep -v cache_min_data.py | crontab -"

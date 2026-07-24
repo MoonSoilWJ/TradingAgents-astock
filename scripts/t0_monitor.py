@@ -627,7 +627,7 @@ def run_signal(dry_run: bool = False) -> int:
     ]
     if pool_tag:
         lines.append(f"**选池分支**: {pool_tag}")
-    lines.extend(["", *format_regime_block(regime)])
+    lines.extend(["", *format_regime_block(regime, hybrid=(pick_mode == "hybrid"))])
 
     if pos and not pos.get("sold"):
         lines.extend([
@@ -841,14 +841,17 @@ def run_sell_check(dry_run: bool = False) -> int:
     )
 
     run_ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    from quality_pool import has_quality_rules  # noqa: PLC0415
+
+    hybrid_live = has_quality_rules()
     header = [
         f"### T+0 ETF 卖出检查 | {run_ts}",
         "",
-        *strategy_header_lines(),
+        *strategy_header_lines(hybrid=hybrid_live),
         f"**检查时点**: {now_hm} | {SELL_BAR_LABEL} TRIX({TRIX_PERIOD},{TRIX_SIGNAL_PERIOD}) "
         f"有效窗口 {TRIX_MIN_SELL}~{SELL_CUTOFF}",
         "",
-        *format_regime_block(regime),
+        *format_regime_block(regime, hybrid=hybrid_live),
         f"**持仓**: {pos['name']} ({etf}) | 类型 {pos.get('type', '')}",
         f"- 买入: {buy_date} @ {buy_price:.4f}（信号日涨幅 {pos.get('today_gain', '—')}%）",
         f"- 现价: {cur:.4f} | 浮盈 **{float_ret:+.2f}%**",
@@ -1005,13 +1008,16 @@ def main() -> None:
 
     if args.test_push:
         regime = fetch_regime()
+        from quality_pool import has_quality_rules  # noqa: PLC0415
+
+        hybrid_live = has_quality_rules()
         ok = send_dingtalk(
             "T0轮动测试",
             "\n".join([
                 "### T0轮动监控测试",
                 "",
-                *strategy_header_lines(),
-                *format_regime_block(regime),
+                *strategy_header_lines(hybrid=hybrid_live),
+                *format_regime_block(regime, hybrid=hybrid_live),
                 "这是一条测试消息，确认 T+0 ETF 推送配置正确。",
             ]),
         )
