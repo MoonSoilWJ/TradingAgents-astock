@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 # (code, name, sina_symbol)
 CROSS_BORDER_ETFS: list[tuple[str, str, str]] = [
     # === 港股系列 ===
@@ -185,3 +187,85 @@ def get_all_t0_etfs() -> list[dict]:
                 "type_name": type_name,
             })
     return result
+
+
+def sina_symbol_for(code: str) -> str:
+    if code.startswith(("5", "6")):
+        return f"sh{code}"
+    return f"sz{code}"
+
+
+def filter_t0_settlement(etf_list: list[dict], *, live_names: dict[str, str] | None = None) -> list[dict]:
+    """仅保留 settlement_rule 判定为 T+0 的标的（可用实时名称覆盖）。"""
+    from tradingagents.dataflows.instrument import settlement_rule  # noqa: PLC0415
+
+    out: list[dict] = []
+    for info in etf_list:
+        code = info["code"]
+        name = (live_names or {}).get(code) or info.get("name") or info.get("etf_name")
+        if settlement_rule(code, name) == "T0":
+            row = dict(info)
+            if live_names and code in live_names:
+                row["name"] = live_names[code]
+                row["etf_name"] = live_names[code]
+            out.append(row)
+    return out
+
+
+def get_t0_only_etfs() -> list[dict]:
+    """原 T+0 池经交割规则过滤（剔除误收录的 T+1）。"""
+    return filter_t0_settlement(get_all_t0_etfs())
+
+
+def get_quality_etfs(path: Path | None = None) -> list[dict]:
+    """扫描全集（原 T+0 + 额外标的）；缺失时回退原 T+0 池。"""
+    from quality_pool import DEFAULT_POOL_PATH, get_scan_universe, has_quality_rules  # noqa: PLC0415
+
+    if has_quality_rules(path or DEFAULT_POOL_PATH):
+        uni = get_scan_universe(path)
+        if uni:
+            return uni
+    return get_all_t0_etfs()
+
+
+def get_all_market_etf_lof() -> list[dict]:
+    """全市场场内 ETF/LOF（mootdx 名单，含 T+0 与 T+1）。"""
+    from tradingagents.dataflows.instrument import is_on_exchange_etf_code  # noqa: PLC0415
+    from tradingagents.dataflows.a_stock import lookup_astock_name  # noqa: PLC0415
+
+    try:
+        from tradingagents.dataflows.a_stock import _build_name_code_map  # noqa: PLC0415
+
+        _, code_to_name = _build_name_code_map()
+    except Exception:
+        code_to_name = {}
+
+    result: list[dict] = []
+    for code, name in sorted(code_to_name.items()):
+        if not is_on_exchange_etf_code(code):
+            continue
+        clean = name.strip()
+        result.append({
+            "code": code,
+            "name": clean,
+            "etf_code": code,
+            "etf_name": clean,
+            "etf_raw": code,
+            "sina_symbol": sina_symbol_for(code),
+            "type_name": "全市场",
+        })
+    return result
+
+
+def pool_stats(etf_list: list[dict], *, live_names: dict[str, str] | None = None) -> dict:
+    from tradingagents.dataflows.instrument import settlement_rule  # noqa: PLC0415
+
+    t0 = t1 = 0
+    for info in etf_list:
+        code = info["code"]
+        name = (live_names or {}).get(code) or info.get("name")
+        if settlement_rule(code, name) == "T0":
+            t0 += 1
+        else:
+            t1 += 1
+    return {"total": len(etf_list), "t0": t0, "t1": t1}

@@ -100,6 +100,25 @@ def buy_bar_idx(bars: list[dict], buy_time: str) -> int:
     return idx
 
 
+def _timing_from_bar(bar: dict) -> dict[str, str]:
+    dt = bar.get("datetime") or ""
+    if " " in dt:
+        day, tm = dt.split(" ", 1)
+        return {"sell_date": day[:10], "sell_time": tm[:5]}
+    day = str(bar.get("day", ""))[:10]
+    tm = str(bar.get("time", "00:00:00"))[:5]
+    return {"sell_date": day, "sell_time": tm}
+
+
+def _timing_from_clock(raw: str, fallback_date: str) -> dict[str, str]:
+    if not raw:
+        return {"sell_date": fallback_date, "sell_time": ""}
+    if " " in raw:
+        day, tm = raw.split(" ", 1)
+        return {"sell_date": day[:10], "sell_time": tm[:5]}
+    return {"sell_date": fallback_date, "sell_time": raw[:5]}
+
+
 def simulate_exit(
     sell_mode: str,
     buy_price: float,
@@ -109,48 +128,54 @@ def simulate_exit(
     sell_cutoff: str | None = None,
     trix_period: int = TRIX_PERIOD,
     trix_signal_period: int | None = None,
-) -> tuple[float | None, str]:
-    """返回 (sell_price, sell_reason)。"""
+) -> tuple[float | None, str, dict[str, str]]:
+    """返回 (sell_price, sell_reason, {sell_date, sell_time})。"""
+    empty_timing: dict[str, str] = {"sell_date": "", "sell_time": ""}
     if sell_mode == "same_close":
         if not day_bars:
-            return None, ""
-        return float(day_bars[-1]["close"]), "same_close"
+            return None, "", empty_timing
+        return float(day_bars[-1]["close"]), "same_close", _timing_from_bar(day_bars[-1])
 
     if sell_mode == "same_trail":
         if not day_bars:
-            return None, ""
+            return None, "", empty_timing
         idx = buy_bar_idx(day_bars, buy_time)
-        sp, reason, _ = check_sell_trigger(
+        sp, reason, clock = check_sell_trigger(
             day_bars, buy_price, idx, stop_loss_pct=-1.5,
             trail_trigger_pct=2.0, trail_drop_pct=0.5,
         )
-        return sp, reason
+        fallback = str(day_bars[0].get("day", ""))[:10]
+        return sp, reason, _timing_from_clock(clock, fallback)
 
     if not next_bars:
-        return None, ""
+        return None, "", empty_timing
 
     window = bars_until(next_bars, sell_cutoff) if sell_cutoff else next_bars
     if not window:
-        return None, ""
+        return None, "", empty_timing
+
+    fallback_date = str(window[0].get("day", ""))[:10]
+    if not fallback_date and " " in str(window[0].get("datetime", "")):
+        fallback_date = str(window[0]["datetime"]).split(" ", 1)[0][:10]
 
     if sell_mode == "time":
-        return float(window[-1]["close"]), "time_sell"
+        return float(window[-1]["close"]), "time_sell", _timing_from_bar(window[-1])
 
     if sell_mode == "trail":
-        sp, reason, _ = check_sell_trigger(
+        sp, reason, clock = check_sell_trigger(
             window, buy_price, 0, stop_loss_pct=-1.5,
             trail_trigger_pct=2.0, trail_drop_pct=0.5,
         )
-        return sp, reason
+        return sp, reason, _timing_from_clock(clock, fallback_date)
 
     if sell_mode == "fixed":
         tp, sl = buy_price * 1.03, buy_price * 0.985
         for b in window:
             if float(b["low"]) <= sl:
-                return sl, "stop_loss"
+                return sl, "stop_loss", _timing_from_bar(b)
             if float(b["high"]) >= tp:
-                return tp, "take_profit"
-        return float(window[-1]["close"]), "close"
+                return tp, "take_profit", _timing_from_bar(b)
+        return float(window[-1]["close"]), "close", _timing_from_bar(window[-1])
 
     min_sell = TRIX_MIN_SELL if sell_mode in ("trix_0940", "trix0940_cut") else "09:30"
     _, reason, detail = simulate_trix_cross_after(
@@ -165,7 +190,12 @@ def simulate_exit(
     if sp is None:
         sp = float(window[-1]["close"])
         reason = "close"
-    return float(sp), reason
+        timing = _timing_from_bar(window[-1])
+    else:
+        timing = _timing_from_clock(detail.get("sell_time", ""), detail.get("sell_date", fallback_date))
+        if not timing["sell_date"]:
+            timing["sell_date"] = fallback_date
+    return float(sp), reason, timing
 
 
 def sell_mode_label(sell_mode: str, sell_cutoff: str | None) -> str:
@@ -242,6 +272,7 @@ def run_combo(
         if not buy_price or buy_price <= 0:
             continue
 
+        next_day = ""
         if sell_mode in ("same_close", "same_trail"):
             next_bars: list[dict] = []
         else:
@@ -255,7 +286,7 @@ def run_combo(
             if not next_bars:
                 continue
 
-        sell_price, sell_reason = simulate_exit(
+        sell_price, sell_reason, timing = simulate_exit(
             sell_mode, buy_price, day_bars, buy_time, next_bars, sell_cutoff,
             trix_period=trix_period, trix_signal_period=trix_signal_period,
         )
@@ -263,12 +294,17 @@ def run_combo(
             continue
         ret = apply_net_return(buy_price, sell_price, fee_pct)
         rets.append(ret)
+        sell_date = timing.get("sell_date") or (next_day if next_day else day)
         trades.append({
             "signal_date": day,
+            "signal_time": signal_time,
             "etf": code,
             "name": name,
             "today_gain": round(gain, 2),
+            "buy_time": buy_time,
             "buy_price": round(buy_price, 4),
+            "sell_date": sell_date,
+            "sell_time": timing.get("sell_time", ""),
             "sell_price": round(sell_price, 4),
             "sell_reason": sell_reason,
             "return_pct": ret,

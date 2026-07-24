@@ -56,8 +56,14 @@ from backtest_t0_today1 import (  # noqa: E402
     bar_clock,
 )
 from rotation_monitor import fetch_tencent_quotes, send_dingtalk  # noqa: E402
-from t0_etf_list import get_all_t0_etfs  # noqa: E402
+from t0_etf_list import get_all_t0_etfs, get_quality_etfs  # noqa: E402
 from t0_regime import CHOPPY_MA_CROSS, REGIME_PROXY, detect_regime, format_regime_block  # noqa: E402
+
+try:
+    from tradingagents.dataflows.instrument import settlement_rule
+except ImportError:
+    def settlement_rule(code: str, name: str | None = None) -> str:  # type: ignore[misc]
+        return "T0"
 
 try:
     from tradingagents.intraday.calendar import is_trading_day
@@ -70,6 +76,7 @@ SINA_INTERVAL = 0.25
 STATE_DIR = Path.home() / ".tradingagents" / "rotation"
 STATE_FILE = STATE_DIR / "t0_monitor_state.json"
 TRAIL_SHADOW_LOG = STATE_DIR / "t0_trail_shadow.jsonl"
+TRADE_JOURNAL = STATE_DIR / "t0_trade_journal.jsonl"
 
 # 1 分 K 追踪 shadow（与 backtest_t0_hybrid_1min 一致；仅日志，不改实盘卖点）
 TRAIL_DROP_PCT = 0.5
@@ -81,10 +88,14 @@ TRIX_SIGNAL_PERIOD = 3
 SELL_BAR_LABEL = "5分K"
 SELL_CUTOFF = "11:05"
 # 与 backtest_t0_sell_trix_compare.py 最优方案一致；卖点逻辑与 simulate_trix_cross_after 对齐
-STRATEGY_VERSION = "t0_1445_1450_5m_trix53_20260715"
+STRATEGY_VERSION = "t0_hybrid_quality_orig_20260722"
 FEE_NOTE = "手续费: 万3双边"
-REGIME_RULE = f"501018近10日MA20穿越≥{CHOPPY_MA_CROSS}=震荡跳过"
-BUY_RULE = f"{SIGNAL_TIME} 选当日涨幅≥{MIN_GAIN:.0f}% TOP1 → {BUY_TIME} 买入"
+REGIME_RULE = (
+    f"501018近10日MA20穿越≥{CHOPPY_MA_CROSS}=震荡；"
+    f"震荡/趋势→优质池仍交易，中性→原T0池"
+)
+BUY_RULE = f"{SIGNAL_TIME} 混合池涨幅≥{MIN_GAIN:.0f}% TOP1 → {BUY_TIME} 买入"
+HYBRID_POOL_RULE = "趋势/震荡→优质池(regime品类过滤)；中性→原T0池"
 SELL_RULE = (
     f"次日 {SELL_BAR_LABEL} TRIX({TRIX_PERIOD},{TRIX_SIGNAL_PERIOD}) 死叉"
     f"(≥{TRIX_MIN_SELL}, ≤{SELL_CUTOFF}) / 无死叉 {SELL_CUTOFF} 定时卖"
@@ -153,14 +164,16 @@ def fetch_regime() -> dict | None:
     return detect_regime(klines, date.today().isoformat())
 
 
-def strategy_header_lines() -> list[str]:
-    return [
+def strategy_header_lines(*, hybrid: bool = False) -> list[str]:
+    lines = [
         f"**买入**: {BUY_RULE}",
         f"**卖出**: {SELL_RULE}",
         f"**过滤**: {REGIME_RULE}",
-        f"**{FEE_NOTE}**",
-        "",
     ]
+    if hybrid:
+        lines.append(f"**选池**: {HYBRID_POOL_RULE}")
+    lines.extend([f"**{FEE_NOTE}**", ""])
+    return lines
 
 
 def format_top5_lines(ranked: list[dict], highlight_code: str | None = None) -> list[str]:
@@ -171,14 +184,33 @@ def format_top5_lines(ranked: list[dict], highlight_code: str | None = None) -> 
             tag = " ← TOP1"
         elif i == 1 and not highlight_code:
             tag = " ← 最高"
-        lines.append(f"{i}. {r['name']} {r['code']} {r['today_gain']:+.2f}%{tag}")
+        settle = settlement_rule(r["code"], r.get("name"))
+        st = "T+0" if settle == "T0" else "T+1"
+        lines.append(f"{i}. {r['name']} {r['code']} {r['today_gain']:+.2f}% [{st}]{tag}")
     return lines
 
 
-def rank_t0_by_today_gain(quotes: dict[str, dict]) -> list[dict]:
+def scan_etf_universe() -> tuple[list[dict], str]:
+    """返回 (扫描名单, 选股模式)。
+
+    hybrid: 趋势/震荡→优质池，中性→原 T+0 池（需 quality_pool.json）
+    quality: 仅 v2 规则过滤（旧模式，保留兼容）
+    t0_only: 原 T+0 池 + 仅 T+0 交割
+    """
+    from quality_pool import get_scan_universe, has_quality_rules  # noqa: PLC0415
+
+    if has_quality_rules():
+        uni = get_scan_universe()
+        if uni:
+            return uni, "hybrid"
+    return get_all_t0_etfs(), "t0_only"
+
+
+def rank_t0_by_today_gain(quotes: dict[str, dict], etf_list: list[dict] | None = None) -> list[dict]:
     """按腾讯实时涨跌幅排名（≈ 14:50 相对昨收当日涨幅）。"""
+    universe = etf_list if etf_list is not None else get_all_t0_etfs()
     rows: list[dict] = []
-    for etf in get_all_t0_etfs():
+    for etf in universe:
         code = etf["code"]
         q = quotes.get(code)
         if not q:
@@ -204,11 +236,76 @@ def rank_t0_by_today_gain(quotes: dict[str, dict]) -> list[dict]:
     return rows
 
 
-def pick_signal_candidate(ranked: list[dict]) -> dict | None:
+def pick_signal_candidate(ranked: list[dict], *, t0_only: bool = True) -> dict | None:
     for row in ranked:
-        if row["today_gain"] >= MIN_GAIN:
-            return row
+        if row["today_gain"] < MIN_GAIN:
+            continue
+        if t0_only and settlement_rule(row["code"], row.get("name")) != "T0":
+            continue
+        return row
     return None
+
+
+def price_1min_at_or_before(bars_1m: list[dict], hm: str) -> tuple[float | None, str]:
+    """取 ≤ hm 的最后一根 1 分 K 收盘价。"""
+    if not bars_1m:
+        return None, ""
+    target = time_to_min(hm[:5])
+    best_px: float | None = None
+    best_tm = -1
+    for b in bars_1m:
+        t = _bar_time_1m(b)
+        bt = time_to_min(t)
+        if bt > target:
+            continue
+        if bt >= best_tm:
+            best_tm = bt
+            best_px = float(b["close"])
+    if best_px is None:
+        return None, ""
+    return best_px, f"{best_tm // 60:02d}:{best_tm % 60:02d}"
+
+
+def resolve_exec_prices(
+    sina_symbol: str,
+    bars_5m_today: list[dict],
+    hm: str,
+    live_price: float = 0,
+) -> dict:
+    """成交价优先 1 分 K，其次实时价，最后 5 分 K close（与 realistic 回测一致）。"""
+    bars_1m = fetch_1min_today(sina_symbol)
+    px_1m, tm_1m = price_1min_at_or_before(bars_1m, hm)
+    px_5m = price_at_time(bars_5m_today, hm[:5]) if bars_5m_today else None
+    px_live = float(live_price) if live_price and live_price > 0 else None
+    primary = px_1m or px_live or px_5m or 0.0
+    return {
+        "primary": primary,
+        "px_1m": px_1m,
+        "tm_1m": tm_1m,
+        "px_5m": px_5m,
+        "px_live": px_live,
+        "source": "1min" if px_1m else ("live" if px_live else "5min"),
+    }
+
+
+def format_exec_price_lines(prices: dict, buy_price: float) -> list[str]:
+    """钉钉正文：主成交价 + 分来源对照。"""
+    primary = prices["primary"]
+    ret = (primary - buy_price) / buy_price * 100 if primary and buy_price else 0.0
+    lines = [
+        f"- 卖出参考价: **{primary:.4f}**（来源: {prices['source']}）",
+        f"- 预估收益: **{ret:+.2f}%**（{FEE_NOTE}）",
+    ]
+    refs = []
+    if prices.get("px_1m"):
+        refs.append(f"1分K {prices['tm_1m']}={prices['px_1m']:.4f}")
+    if prices.get("px_5m"):
+        refs.append(f"5分K close={prices['px_5m']:.4f}")
+    if prices.get("px_live"):
+        refs.append(f"实时={prices['px_live']:.4f}")
+    if refs:
+        lines.append(f"- 价格对照: {' | '.join(refs)}")
+    return lines, ret
 
 
 def fetch_1min_today(sina_symbol: str) -> list[dict]:
@@ -260,6 +357,43 @@ def append_trail_shadow_log(entry: dict) -> None:
     entry.setdefault("shadow_version", TRAIL_SHADOW_VERSION)
     with TRAIL_SHADOW_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def append_trade_journal(entry: dict) -> None:
+    """追加 T+0 实盘交易流水（供 Web 表格展示）。"""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    entry.setdefault("strategy_version", STRATEGY_VERSION)
+    with TRADE_JOURNAL.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def log_trade_closed(
+    pos: dict,
+    *,
+    sell_date: str,
+    sell_time: str,
+    sell_reason: str,
+    sell_price: float,
+    return_pct: float,
+    float_pct: float | None = None,
+) -> None:
+    append_trade_journal({
+        "event": "trade_closed",
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "etf": pos.get("etf"),
+        "name": pos.get("name"),
+        "type": pos.get("type", ""),
+        "buy_date": pos.get("buy_date"),
+        "buy_time": BUY_TIME,
+        "buy_price": pos.get("buy_price"),
+        "signal_gain_pct": pos.get("today_gain"),
+        "sell_date": sell_date,
+        "sell_time": sell_time,
+        "sell_reason": sell_reason,
+        "sell_price": round(sell_price, 4),
+        "float_pct": round(float_pct if float_pct is not None else return_pct, 3),
+        "return_pct": round(return_pct, 3),
+    })
 
 
 def run_trail_shadow_check(
@@ -447,20 +581,40 @@ def run_signal(dry_run: bool = False) -> int:
     else:
         print("    环境: 数据不足")
 
-    etf_list = get_all_t0_etfs()
+    etf_list, pick_mode = scan_etf_universe()
     codes = [e["code"] for e in etf_list]
-    print(f">>> 拉取 {len(codes)} 只 T+0 ETF 实时行情...")
+    pool_label = {"hybrid": "混合(原T0+优质)", "quality": "优质池", "t0_only": "T+0 ETF"}.get(
+        pick_mode, "T+0 ETF",
+    )
+    print(f">>> 拉取 {len(codes)} 只 {pool_label} 实时行情...")
     quotes = fetch_tencent_quotes(codes)
     if not quotes:
         print("ERROR: 无法获取实时行情")
         return 1
 
-    ranked = rank_t0_by_today_gain(quotes)
+    ranked = rank_t0_by_today_gain(quotes, etf_list)
     if len(ranked) < 2:
         print("ERROR: 有效 ETF 不足")
         return 1
 
-    top = pick_signal_candidate(ranked)
+    pool_tag = ""
+    if pick_mode == "hybrid":
+        from quality_pool import load_quality_pool, pick_hybrid_from_ranked  # noqa: PLC0415
+
+        top, ranked_view, pool_tag = pick_hybrid_from_ranked(
+            ranked, regime,
+            orig_pool=get_all_t0_etfs(),
+            quality_pool=load_quality_pool(),
+        )
+    elif pick_mode == "t0_only":
+        top = pick_signal_candidate(ranked, t0_only=True)
+        ranked_view = ranked
+    else:
+        from quality_pool import pick_from_ranked_live  # noqa: PLC0415
+
+        top = pick_from_ranked_live(ranked, regime, use_regime_filter=True, t0_only=False)
+        ranked_view = ranked
+
     state = load_state()
     pos = state.get("position")
 
@@ -468,11 +622,12 @@ def run_signal(dry_run: bool = False) -> int:
     lines = [
         f"### T+0 ETF 买入信号 | {run_ts}",
         "",
-        *strategy_header_lines(),
-        f"**扫描**: {len(ranked)} 只有效行情 / {len(codes)} 只 T+0 ETF",
-        "",
-        *format_regime_block(regime),
+        *strategy_header_lines(hybrid=(pick_mode == "hybrid")),
+        f"**扫描**: {len(ranked)} 只有效行情 / {len(codes)} 只 {pool_label}",
     ]
+    if pool_tag:
+        lines.append(f"**选池分支**: {pool_tag}")
+    lines.extend(["", *format_regime_block(regime)])
 
     if pos and not pos.get("sold"):
         lines.extend([
@@ -482,7 +637,12 @@ def run_signal(dry_run: bool = False) -> int:
         ])
         print(f"⚠️  仍有持仓: {pos.get('name')} ({pos.get('etf')})")
 
-    skip_choppy = bool(regime and regime.get("skip_choppy"))
+    if pick_mode == "hybrid":
+        from quality_pool import hybrid_should_skip_choppy  # noqa: PLC0415
+
+        skip_choppy = hybrid_should_skip_choppy(regime, hybrid=True)
+    else:
+        skip_choppy = bool(regime and regime.get("skip_choppy"))
 
     if skip_choppy:
         best = ranked[0]
@@ -496,7 +656,7 @@ def run_signal(dry_run: bool = False) -> int:
             f"- {hypo['name']} ({hypo['code']}) 当日 {hypo['today_gain']:+.2f}%",
             f"- 现价 {hypo['price']:.4f}（昨收 {hypo['last_close']:.4f}）",
             "",
-            *format_top5_lines(ranked, hypo["code"]),
+            *format_top5_lines(ranked_view, hypo["code"]),
         ])
         title = "T0轮动 震荡跳过"
         state["last_signal"] = {
@@ -509,15 +669,31 @@ def run_signal(dry_run: bool = False) -> int:
         }
         save_state(state)
     elif not top:
-        best = ranked[0]
-        msg = f"今日无有效信号（最高 {best['name']} {best['today_gain']:+.2f}% < {MIN_GAIN:.0f}%）"
+        best = ranked_view[0] if ranked_view else ranked[0]
+        if pick_mode == "hybrid":
+            msg = f"今日无混合信号（{pool_tag or '混合池'} 最高 {best['name']} {best['today_gain']:+.2f}% < {MIN_GAIN:.0f}%）"
+            reason_line = "**信号**: 无（涨幅或 regime 品类过滤未通过）"
+        else:
+            t0_ranked = [r for r in ranked if settlement_rule(r["code"], r.get("name")) == "T0"]
+            hypo = t0_ranked[0] if t0_ranked else best
+            if t0_ranked and hypo["today_gain"] < MIN_GAIN:
+                msg = f"今日无 T+0 信号（T0最高 {hypo['name']} {hypo['today_gain']:+.2f}% < {MIN_GAIN:.0f}%）"
+            elif not t0_ranked:
+                msg = f"今日 T+0 池无有效标的（涨幅最高 {best['name']} 为 T+1）"
+            else:
+                msg = f"今日无有效信号（最高 {best['name']} {best['today_gain']:+.2f}% < {MIN_GAIN:.0f}%）"
+            reason_line = "**信号**: 无（涨幅过滤 / T+0 交割过滤未通过）"
         print(msg)
         lines.extend([
-            "**信号**: 无（涨幅过滤未通过）",
-            f"- 最高: {best['name']} {best['code']} {best['today_gain']:+.2f}%",
-            "",
-            *format_top5_lines(ranked),
+            reason_line,
+            f"- 分支最高: {best['name']} {best['code']} {best['today_gain']:+.2f}%",
         ])
+        if pick_mode != "hybrid":
+            t0_ranked = [r for r in ranked if settlement_rule(r["code"], r.get("name")) == "T0"]
+            if t0_ranked:
+                hypo = t0_ranked[0]
+                lines.append(f"- T+0最高: {hypo['name']} {hypo['code']} {hypo['today_gain']:+.2f}%")
+        lines.extend(["", *format_top5_lines(ranked_view)])
         title = "T0轮动 无买入信号"
         state["last_signal"] = {
             "timestamp": datetime.now().isoformat(),
@@ -528,18 +704,27 @@ def run_signal(dry_run: bool = False) -> int:
         }
         save_state(state)
     else:
-        print(f"TOP1: {top['name']} ({top['code']}) 当日{top['today_gain']:+.2f}%")
+        settle = settlement_rule(top["code"], top.get("name"))
+        st_label = "T+0" if settle == "T0" else "T+1"
+        print(f"TOP1: {top['name']} ({top['code']}) 当日{top['today_gain']:+.2f}% [{st_label}]")
+        if pool_tag:
+            print(f"      选池: {pool_tag}")
         print(f"      现价 {top['price']:.4f} → 建议 {BUY_TIME} 买入")
         lines.extend([
             f"**信号**: 买入 **{top['name']}** ({top['code']})",
+            f"- 交割: **{st_label}**",
             f"- 当日涨幅: **{top['today_gain']:+.2f}%**",
             f"- 现价: {top['price']:.4f}（昨收 {top['last_close']:.4f}）",
             f"- 操作: **{BUY_TIME} 买入**",
             f"- 类型: {top.get('type_name', '')}",
-            "",
-            *format_top5_lines(ranked, top["code"]),
         ])
-        for i, r in enumerate(ranked[:5], 1):
+        if pool_tag:
+            lines.append(f"- 选池: {pool_tag}")
+        lines.extend([
+            "",
+            *format_top5_lines(ranked_view, top["code"]),
+        ])
+        for i, r in enumerate(ranked_view[:5], 1):
             tag = " ← TOP1" if r["code"] == top["code"] else ""
             print(f"  {i}. {r['name']:14s} {r['code']} {r['today_gain']:+.2f}%{tag}")
 
@@ -566,6 +751,8 @@ def run_signal(dry_run: bool = False) -> int:
             "today_gain": top["today_gain"],
             "price": top["price"],
             "regime": regime,
+            "pool_tag": pool_tag,
+            "pick_mode": pick_mode,
         }
         save_state(state)
 
@@ -609,7 +796,10 @@ def run_sell_check(dry_run: bool = False) -> int:
 
     etf = pos["etf"]
     buy_price = float(pos["buy_price"])
-    etf_info = next((e for e in get_all_t0_etfs() if e["code"] == etf), None)
+    etf_list, _ = scan_etf_universe()
+    etf_info = next((e for e in etf_list if e["code"] == etf), None)
+    if not etf_info:
+        etf_info = next((e for e in get_all_t0_etfs() if e["code"] == etf), None)
     if not etf_info:
         print(f"ERROR: 未知 ETF {etf}")
         return 1
@@ -646,7 +836,7 @@ def run_sell_check(dry_run: bool = False) -> int:
         pos, sym, buy_price, bars_buy_day, bars_today, now_hm, float(cur or 0),
     )
 
-    hit, sell_price, sell_time, ret_str = trix_death_cross_hit(
+    hit, _, sell_time, _ = trix_death_cross_hit(
         buy_price, bars_buy_day, bars_today, now_hm,
     )
 
@@ -666,15 +856,19 @@ def run_sell_check(dry_run: bool = False) -> int:
     ]
 
     if hit:
-        print(f"TRIX 死叉触发 @ {sell_time} 价 {sell_price:.4f} 收益 {ret_str}")
+        sell_hm = sell_time.split(" ")[-1][:5] if " " in sell_time else sell_time[:5]
+        prices = resolve_exec_prices(sym, bars_today, sell_hm, cur)
+        sell_price = prices["primary"]
+        price_lines, ret_num = format_exec_price_lines(prices, buy_price)
+        ret_str = f"{ret_num:+.2f}%"
+        print(f"TRIX 死叉触发 @ {sell_time} 价 {sell_price:.4f} ({prices['source']}) 收益 {ret_str}")
         title = f"T0 ⚠️ TRIX死叉卖出{pos['name']}"
         body = [
             *header,
             f"## ⚠️ {SELL_BAR_LABEL} TRIX({TRIX_PERIOD},{TRIX_SIGNAL_PERIOD}) 死叉 — 请立即卖出",
             "",
-            f"- 死叉时点: **{sell_time}**",
-            f"- 卖出参考价: **{sell_price:.4f}**",
-            f"- 预估收益: **{ret_str}**（{FEE_NOTE}）",
+            f"- 死叉时点: **{sell_time}**（5分K信号）",
+            *price_lines,
         ]
         if sell_time and sell_time != now_hm:
             body.append(f"- 检测时间: {now_hm}（死叉发生于 {sell_time}）")
@@ -703,18 +897,34 @@ def run_sell_check(dry_run: bool = False) -> int:
             "event": "live_sell",
             "sell_reason": "trix_death_cross",
             "etf": etf,
+            "name": pos.get("name"),
+            "type": pos.get("type", ""),
             "buy_date": buy_date,
             "buy_price": buy_price,
             "sell_price": sell_price,
             "return_pct": ret_str,
             "note": "实盘 TRIX 卖出（shadow 未介入）",
         })
+        ret_num = (sell_price - buy_price) / buy_price * 100 if sell_price and buy_price else 0.0
+        log_trade_closed(
+            pos,
+            sell_date=today,
+            sell_time=sell_time or now_hm,
+            sell_reason="trix_death_cross",
+            sell_price=sell_price,
+            return_pct=ret_num,
+            float_pct=float_ret,
+        )
         save_state(state)
     else:
         if time_to_min(now_hm) >= time_to_min(SELL_CUTOFF):
-            cutoff_price = price_at_time(bars_today, SELL_CUTOFF) or cur
-            cutoff_ret = (cutoff_price - buy_price) / buy_price * 100 if cutoff_price else float_ret
-            print(f"无 TRIX 死叉，{SELL_CUTOFF} 定时卖 @ {cutoff_price:.4f} 收益 {cutoff_ret:+.2f}%")
+            prices = resolve_exec_prices(sym, bars_today, SELL_CUTOFF, cur)
+            cutoff_price = prices["primary"]
+            price_lines, cutoff_ret = format_exec_price_lines(prices, buy_price)
+            print(
+                f"无 TRIX 死叉，{SELL_CUTOFF} 定时卖 @ {cutoff_price:.4f} "
+                f"({prices['source']}) 收益 {cutoff_ret:+.2f}%"
+            )
             title = f"T0轮动 {SELL_CUTOFF}定时卖{pos['name']}"
             text = "\n".join([
                 *header,
@@ -722,12 +932,12 @@ def run_sell_check(dry_run: bool = False) -> int:
                 "",
                 f"- 截至 {now_hm} 未触发 {SELL_BAR_LABEL} TRIX({TRIX_PERIOD},{TRIX_SIGNAL_PERIOD}) 死叉",
                 f"- **{SELL_CUTOFF} 定时卖出**",
-                f"- 卖出参考价: **{cutoff_price:.4f}**",
-                f"- 预估收益: **{cutoff_ret:+.2f}%**（{FEE_NOTE}）",
+                *price_lines,
             ])
             pos["sold"] = True
             pos["sell_date"] = today
             pos["sell_price"] = cutoff_price
+            pos["sell_time"] = now_hm
             pos["sell_reason"] = "time_sell"
             pos["alert_pushed"] = True
             state["position"] = pos
@@ -743,12 +953,23 @@ def run_sell_check(dry_run: bool = False) -> int:
                 "event": "live_sell",
                 "sell_reason": "time_sell",
                 "etf": etf,
+                "name": pos.get("name"),
+                "type": pos.get("type", ""),
                 "buy_date": buy_date,
                 "buy_price": buy_price,
                 "sell_price": cutoff_price,
                 "return_pct": f"{cutoff_ret:+.2f}%",
                 "note": "实盘 11:05 定时卖出（shadow 未介入）",
             })
+            log_trade_closed(
+                pos,
+                sell_date=today,
+                sell_time=now_hm,
+                sell_reason="time_sell",
+                sell_price=cutoff_price,
+                return_pct=cutoff_ret,
+                float_pct=float_ret,
+            )
             save_state(state)
         else:
             print(f"截至 {now_hm} 未触发 TRIX 死叉，继续持仓（不推送）")

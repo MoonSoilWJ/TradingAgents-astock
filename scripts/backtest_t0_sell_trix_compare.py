@@ -84,7 +84,7 @@ def run_variant(
         if not next_bars:
             continue
 
-        sell_price, sell_reason = simulate_exit(
+        sell_price, sell_reason, _ = simulate_exit(
             SELL_MODE, buy_price, day_bars, BUY_TIME, next_bars, SELL_CUTOFF,
             trix_period=trix_period, trix_signal_period=trix_signal,
         )

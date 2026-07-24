@@ -1,0 +1,56 @@
+{
+  "jobs": [
+    {
+      "id": "rotation_am",
+      "name": "板块轮动监控",
+      "cron": "30 09 * * 1-5",
+      "script": "scripts/rotation_monitor.py",
+      "strategy_id": "rotation_v6"
+    },
+    {
+      "id": "rotation_pm",
+      "name": "板块轮动监控",
+      "cron": "0 15 * * 1-5",
+      "script": "scripts/rotation_monitor.py",
+      "strategy_id": "rotation_v6"
+    },
+    {
+      "id": "t0_sell_watch",
+      "name": "T+0 卖出检查",
+      "cron": "40 09 * * 1-5",
+      "script": "scripts/t0_sell_watch.py",
+      "strategy_id": "t0_baseline_trix"
+    },
+    {
+      "id": "t0_quality_pool",
+      "name": "T+0 优质池滚动刷新",
+      "cron": "20 09 * * 1-5",
+      "script": "scripts/quality_pool.py --lookback 30",
+      "strategy_id": "t0_baseline_trix",
+      "log": "quality_pool.log"
+    },
+    {
+      "id": "t0_signal",
+      "name": "T+0 买入信号",
+      "cron": "45 14 * * 1-5",
+      "script": "scripts/t0_monitor.py --signal",
+      "strategy_id": "t0_baseline_trix"
+    },
+    {
+      "id": "min_cache",
+      "name": "分钟 K 缓存",
+      "cron": "10 15 * * 1-5",
+      "script": "scripts/cache_min_data.py",
+      "strategy_id": "min_cache",
+      "log": "min_cache.log"
+    },
+    {
+      "id": "t0_walk_forward",
+      "name": "T+0 Walk-Forward 复核",
+      "cron": "0 09 1-7 * 1",
+      "script": "scripts/t0_walk_forward.py",
+      "strategy_id": "t0_wf_time",
+      "log": "walk_forward.log"
+    }
+  ]
+}

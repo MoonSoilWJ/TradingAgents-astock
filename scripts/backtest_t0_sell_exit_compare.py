@@ -226,7 +226,7 @@ def simulate_baseline_trix(
     return simulate_exit(
         "trix0940_cut", buy_price, today_bars, BUY_TIME, next_bars, SELL_CUTOFF,
         trix_period=TRIX_PERIOD, trix_signal_period=3,
-    )
+    )[:2]
 
 
 SELL_SIMULATORS = {

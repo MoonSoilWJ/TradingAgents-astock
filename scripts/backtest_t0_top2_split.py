@@ -147,7 +147,7 @@ def _leg_return(
     next_bars = etf_5min.get(code, {}).get(next_day, [])
     if not next_bars:
         return None
-    sell_price, sell_reason = simulate_exit(
+    sell_price, sell_reason, _ = simulate_exit(
         SELL_MODE, buy_price, day_bars, buy_time, next_bars, SELL_CUTOFF,
     )
     if sell_price is None or sell_price <= 0:

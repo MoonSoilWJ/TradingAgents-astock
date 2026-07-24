@@ -1,0 +1,124 @@
+{
+  "version": 2,
+  "updated": "2026-07-22 16:39",
+  "lookback_days": 30,
+  "train_end": "2026-07-21",
+  "scan_mode": "original_t0_plus_extra",
+  "selection_rules": {
+    "source": "100d trade post-mortem 2026-02~07",
+    "exclude_categories": [],
+    "blacklist_codes": [
+      "161626"
+    ],
+    "min_amount_cny": 5000000,
+    "train_include": "n>=2 compound>0 OR single trade>=5%",
+    "train_exclude": "n>=2 compound<-3.0%",
+    "pick_by_regime": {
+      "趋势": [
+        "T1主题LOF",
+        "其他",
+        "商品能源",
+        "海外其他",
+        "港股",
+        "美股"
+      ],
+      "中性": [
+        "T1主题LOF",
+        "其他",
+        "商品能源",
+        "港股"
+      ]
+    }
+  },
+  "core_codes": [
+    "501018",
+    "161129",
+    "159981",
+    "162411",
+    "162719",
+    "159509",
+    "518880",
+    "159518"
+  ],
+  "extra_codes": [
+    {
+      "code": "517400",
+      "name": "黄金股票",
+      "category": "商品能源"
+    }
+  ],
+  "meta": {
+    "signal_days": 100,
+    "mode": "rolling_latest"
+  },
+  "hybrid_mode": {
+    "enabled": true,
+    "rule": "趋势/震荡→滚动优质池(震荡仍交易)；中性→原T0池",
+    "lookback_days": 30
+  },
+  "etfs": [
+    {
+      "code": "501018",
+      "name": "南方原油",
+      "sina_symbol": "sh501018",
+      "settlement": "T0",
+      "category": "商品能源"
+    },
+    {
+      "code": "161129",
+      "name": "原油基金",
+      "sina_symbol": "sz161129",
+      "settlement": "T0",
+      "category": "商品能源"
+    },
+    {
+      "code": "159981",
+      "name": "能源化工",
+      "sina_symbol": "sz159981",
+      "settlement": "T0",
+      "category": "商品能源"
+    },
+    {
+      "code": "162411",
+      "name": "华宝油气",
+      "sina_symbol": "sz162411",
+      "settlement": "T0",
+      "category": "商品能源"
+    },
+    {
+      "code": "162719",
+      "name": "石油LOF",
+      "sina_symbol": "sz162719",
+      "settlement": "T0",
+      "category": "商品能源"
+    },
+    {
+      "code": "159509",
+      "name": "纳指科技",
+      "sina_symbol": "sz159509",
+      "settlement": "T0",
+      "category": "美股"
+    },
+    {
+      "code": "518880",
+      "name": "黄金ETF",
+      "sina_symbol": "sh518880",
+      "settlement": "T0",
+      "category": "商品能源"
+    },
+    {
+      "code": "159518",
+      "name": "标普油气",
+      "sina_symbol": "sz159518",
+      "settlement": "T0",
+      "category": "商品能源"
+    },
+    {
+      "code": "517400",
+      "name": "黄金股票",
+      "sina_symbol": "sh517400",
+      "settlement": "T1",
+      "category": "商品能源"
+    }
+  ]
+}

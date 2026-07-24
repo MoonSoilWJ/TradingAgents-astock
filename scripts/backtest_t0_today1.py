@@ -133,15 +133,30 @@ def simulate_trix_cross_after(
             continue
         if trix[i - 1] >= signal[i - 1] and trix[i] < signal[i]:
             sell_price = closes[i]
+            bar = all_bars[i]
+            sell_date = str(bar.get("day", ""))[:10]
+            if not sell_date and " " in str(bar.get("datetime", "")):
+                sell_date = str(bar["datetime"]).split(" ", 1)[0]
             return (sell_price - buy_cost) / buy_cost * 100, "trix_death_cross", {
                 "sell_price": sell_price,
-                "bar": all_bars[i].get("day", ""),
+                "bar": bar.get("day", ""),
+                "sell_date": sell_date,
+                "sell_time": bar_clock(bar),
                 "trix": trix[i],
                 "signal": signal[i],
             }
 
     last_close = closes[-1] if closes else buy_cost
-    return (last_close - buy_cost) / buy_cost * 100, "close", {"reason": "no_death_cross", "sell_price": last_close}
+    last_bar = all_bars[-1] if all_bars else {}
+    sell_date = str(last_bar.get("day", ""))[:10]
+    if not sell_date and " " in str(last_bar.get("datetime", "")):
+        sell_date = str(last_bar["datetime"]).split(" ", 1)[0]
+    return (last_close - buy_cost) / buy_cost * 100, "close", {
+        "reason": "no_death_cross",
+        "sell_price": last_close,
+        "sell_date": sell_date,
+        "sell_time": bar_clock(last_bar) if last_bar else "",
+    }
 
 
 def bars_for_trix(bars: list[dict]) -> list[dict]:

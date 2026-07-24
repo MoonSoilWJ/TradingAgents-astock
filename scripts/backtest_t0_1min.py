@@ -4,6 +4,9 @@
 对比「网格搜索最优组合」与「当前实盘基线」(14:50/14:55/TRIX≥09:40)，
 或 `--compare` 对比实盘基线与候选策略 (14:45/14:50/TRIX≥09:40≤11:05)。
 
+更贴近实盘的成交价（1 分 K 买卖 + 原生 5 分 TRIX 信号）请用:
+    python scripts/backtest_t0_hybrid_1min.py --realistic --trades --ndays 9 --source sina
+
 用法:
     python scripts/backtest_t0_1min.py
     python scripts/backtest_t0_1min.py --ndays 5 --top 15
@@ -164,19 +167,34 @@ def load_1min_data(
     etf_list: list[dict],
     ndays: int = 5,
     source: str = "auto",
+    *,
+    use_cache: bool = True,
+    write_cache: bool = True,
+    fetch_limit: int | None = None,
+    cache_suffix: str = "",
+    min_write_count: int = 50,
 ) -> tuple[dict, dict, list[str], list[dict], str]:
-    """拉 T+0 池 1 分 K + 日 K（昨收/震荡识别）。"""
+    """拉 ETF/LOF 1 分 K + 日 K（昨收/震荡识别）。
+
+    use_cache=False 跳过读缓存；write_cache=True 拉取成功后仍写入（供下次加速）。
+    cache_suffix 如 '_allmarket' 区分全市场池文件。
+    """
+    if fetch_limit is not None and fetch_limit > 0:
+        etf_list = etf_list[:fetch_limit]
+
     cache_dir = Path.home() / ".tradingagents" / "cache" / "t0_1min"
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_tag = datetime.now().strftime("%Y%m%d")
-    cache_file = cache_dir / f"pool_{cache_tag}_src{source}_ndays{ndays}.json"
+    cache_file = cache_dir / f"pool_{cache_tag}_src{source}_ndays{ndays}{cache_suffix}.json"
 
-    if cache_file.exists():
+    if use_cache and cache_file.exists():
         cached = json.loads(cache_file.read_text(encoding="utf-8"))
-        cov = len(cached.get("etf_1min", {})) / max(len(etf_list), 1)
-        if cov >= MIN_ETF_COVERAGE:
+        cached_n = len(cached.get("etf_1min", {}))
+        cov = cached_n / max(len(etf_list), 1)
+        min_need = min_write_count if len(etf_list) > 200 else max(min_write_count, int(len(etf_list) * MIN_ETF_COVERAGE))
+        if cached_n >= min_need or cov >= MIN_ETF_COVERAGE:
             ds = cached.get("data_source", "cached")
-            print(f">>> 使用缓存 1 分 K: {cache_file.name} ({len(cached['etf_1min'])} ETF, {ds})")
+            print(f">>> 使用缓存 1 分 K: {cache_file.name} ({cached_n} ETF, {ds})")
             return (
                 cached["etf_daily"],
                 cached["etf_1min"],
@@ -184,36 +202,68 @@ def load_1min_data(
                 cached.get("proxy_klines", []),
                 ds,
             )
-        print(f">>> 忽略不完整缓存 ({len(cached.get('etf_1min', {}))}/{len(etf_list)} ETF)，重新拉取...")
+        print(f">>> 忽略不完整缓存 ({cached_n}/{len(etf_list)} ETF)，重新拉取...")
 
     etf_1min: dict[str, dict[str, list[dict]]] = {}
     etf_daily: dict = {}
     em_ok = sina_ok = 0
 
-    print(f">>> 拉取 {len(etf_list)} 只 T+0 ETF 1 分 K (source={source}, ndays={ndays})...")
-    for i, info in enumerate(etf_list):
+    def _fetch_one(info: dict) -> tuple[str, dict | None, dict | None, str]:
         code = info["code"]
         sym = info["sina_symbol"]
         bars: dict[str, list[dict]] = {}
-
+        hit = ""
         if source in ("auto", "em"):
             bars = fetch_1min_kline_em(code, ndays)
             if bars:
-                em_ok += 1
+                hit = "em"
         if not bars and source in ("auto", "sina"):
             bars = fetch_1min_kline_sina(sym)
             if bars:
-                sina_ok += 1
-        if bars:
-            etf_1min[code] = bars
-
+                hit = "sina"
+        daily_dict = None
         daily = fetch_sina_kline(sym, datalen=max(ndays + 40, 60))
         if daily and len(daily) > 3:
-            etf_daily[code] = {"returns": compute_daily_data(daily)}
+            daily_dict = {"returns": compute_daily_data(daily)}
+        return code, bars or None, daily_dict, hit
 
-        if (i + 1) % 20 == 0:
-            print(f"    进度 {i + 1}/{len(etf_list)} | 1分K={len(etf_1min)} 日K={len(etf_daily)}")
-        time.sleep(SINA_INTERVAL if source == "sina" or (source == "auto" and not bars) else EM_INTERVAL)
+    use_parallel = len(etf_list) > 80 and source == "sina" and not use_cache
+    if use_parallel:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        workers = min(16, max(4, len(etf_list) // 150))
+        print(f">>> 并行拉取 {len(etf_list)} 只 ETF/LOF 1 分 K (workers={workers}, source=sina)...")
+        done = 0
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = [pool.submit(_fetch_one, info) for info in etf_list]
+            for fut in as_completed(futs):
+                code, bars, daily_dict, hit = fut.result()
+                if bars:
+                    etf_1min[code] = bars
+                    if hit == "em":
+                        em_ok += 1
+                    elif hit == "sina":
+                        sina_ok += 1
+                if daily_dict:
+                    etf_daily[code] = daily_dict
+                done += 1
+                if done % 200 == 0 or done == len(etf_list):
+                    print(f"    进度 {done}/{len(etf_list)} | 1分K={len(etf_1min)} 日K={len(etf_daily)}")
+    else:
+        print(f">>> 拉取 {len(etf_list)} 只 ETF/LOF 1 分 K (source={source}, ndays={ndays})...")
+        for i, info in enumerate(etf_list):
+            code, bars, daily_dict, hit = _fetch_one(info)
+            if bars:
+                etf_1min[code] = bars
+                if hit == "em":
+                    em_ok += 1
+                elif hit == "sina":
+                    sina_ok += 1
+            if daily_dict:
+                etf_daily[code] = daily_dict
+            if (i + 1) % 20 == 0:
+                print(f"    进度 {i + 1}/{len(etf_list)} | 1分K={len(etf_1min)} 日K={len(etf_daily)}")
+            time.sleep(SINA_INTERVAL if source == "sina" or (source == "auto" and not bars) else EM_INTERVAL)
 
     all_dates = sorted({d for bars in etf_1min.values() for d in bars})
     m1_dates = set(all_dates)
@@ -237,18 +287,22 @@ def load_1min_data(
         f"覆盖 {m1_only[0] if m1_only else '?'} ~ {m1_only[-1] if m1_only else '?'}"
     )
     cov = len(etf_1min) / max(len(etf_list), 1)
-    if cov >= MIN_ETF_COVERAGE:
+    if write_cache and len(etf_1min) >= min_write_count:
         payload = {
             "etf_daily": etf_daily,
             "etf_1min": etf_1min,
             "all_dates": all_dates,
             "proxy_klines": proxy_klines,
             "data_source": data_source,
+            "universe_count": len(etf_list),
+            "cache_suffix": cache_suffix,
         }
         cache_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        print(f"    已缓存: {cache_file}")
+        print(f"    已缓存: {cache_file} ({len(etf_1min)} 只)")
+    elif not write_cache:
+        print("    未写缓存 (--no-write-cache)")
     else:
-        print(f"    覆盖率 {cov:.0%} 不足，跳过缓存（东财可能限流，可 --source sina 重试）")
+        print(f"    有效 {len(etf_1min)} 只 < min_write_count={min_write_count}，跳过缓存")
     return etf_daily, etf_1min, all_dates, proxy_klines, data_source
 
 
@@ -281,15 +335,21 @@ def print_trade_detail(result: dict, title: str):
         )
     trades = result.get("trades") or []
     if trades:
-        print(f"\n  {'信号日':>12} {'ETF':>8} {'当日涨':>7} {'买入':>8} {'卖出':>8} {'原因':>14} {'收益':>8}")
-        print("  " + "-" * 78)
+        print(
+            f"\n  {'信号日':>12} {'信号':>5} {'买入':>5} {'卖出日':>12} {'卖出':>5} "
+            f"{'ETF':>8} {'涨幅':>6} {'买价':>7} {'卖价':>7} {'原因':>14} {'收益':>7} {'累计':>7}"
+        )
+        print("  " + "-" * 108)
         eq = 1.0
         for t in trades:
             eq *= 1 + t["return_pct"] / 100
             print(
-                f"  {t['signal_date']:>12} {t['etf']:>8} {t['today_gain']:+6.1f}% "
-                f"{t['buy_price']:8.4f} {t['sell_price']:8.4f} {t['sell_reason']:>14} "
-                f"{t['return_pct']:+7.2f}% | 累计 {(eq - 1) * 100:+7.2f}%"
+                f"  {t['signal_date']:>12} {t.get('signal_time', result.get('signal', '')):>5} "
+                f"{t.get('buy_time', result.get('buy', '')):>5} "
+                f"{t.get('sell_date', ''):>12} {t.get('sell_time', ''):>5} "
+                f"{t['etf']:>8} {t['today_gain']:+5.1f}% "
+                f"{t['buy_price']:7.4f} {t['sell_price']:7.4f} {t['sell_reason']:>14} "
+                f"{t['return_pct']:+6.2f}% {(eq - 1) * 100:+6.2f}%"
             )
     print("=" * 90)
 

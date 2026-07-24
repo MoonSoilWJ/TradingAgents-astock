@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "strategies": [
+    {
+      "id": "rotation_v6",
+      "name": "板块轮动 v6",
+      "category": "rotation",
+      "status": "live",
+      "script": "scripts/rotation_monitor.py",
+      "schedule": "09:30, 15:00 工作日",
+      "version": "v6_score_vol",
+      "rules": {
+        "pick": "3日涨幅 × 量价因子，ETF 优先排名 TOP1",
+        "buy": "上涨 1.0% 追涨（不抄底）",
+        "sell": "追踪触 +3% 回落 0.5% 止盈 / T+1 收盘卖"
+      },
+      "state_files": ["monitor_state.json"],
+      "artifact_patterns": ["backtest_6sig_*.json", "validation_*.json"],
+      "conclusion": "v6 公式定版，ETF 收盘涨率 52.6%，平安 79 板块池",
+      "tags": ["cron", "rotation", "etf"]
+    },
+    {
+      "id": "t0_baseline_trix",
+      "name": "T+0 涨幅 TOP1 + TRIX 卖",
+      "category": "t0",
+      "status": "live",
+      "script": "scripts/t0_monitor.py",
+      "schedule": "14:45 信号 / 09:40~11:05 卖出检查",
+      "version": "t0_hybrid_quality_orig_20260722",
+      "rules": {
+        "pick": "hybrid-A: 趋势/震荡→优质池(lb=30)；中性→原T0池 Top1",
+        "buy": "14:50",
+        "sell": "次日 5分 TRIX(5,3) 09:40~11:05 / 11:05 定时",
+        "filter": "震荡期优质池仍交易；中性/趋势用原池时仍跳过震荡"
+      },
+      "state_files": ["t0_monitor_state.json"],
+      "logs": ["t0_trade_journal.jsonl", "t0_trail_shadow.jsonl"],
+      "artifact_patterns": ["t0_walk_forward_*.json", "backtest_t0_*.json"],
+      "related": ["t0_wf_time", "t0_vol_ratio"],
+      "conclusion": "WF 样本外 +41% vs 定时卖候选 +32%，保持基线",
+      "tags": ["cron", "t0", "trix"]
+    },
+    {
+      "id": "t0_trail_shadow",
+      "name": "T+0 1分K 追踪 Shadow",
+      "category": "t0",
+      "status": "shadow",
+      "script": "scripts/t0_monitor.py",
+      "schedule": "随卖出检查记录",
+      "rules": {
+        "note": "1分K 追踪回落 0.5%，仅日志不执行"
+      },
+      "logs": ["t0_trail_shadow.jsonl"],
+      "conclusion": "旁路对比 TRIX 卖点 vs 追踪卖点，不改实盘决策",
+      "tags": ["shadow", "t0"]
+    },
+    {
+      "id": "t0_wf_time",
+      "name": "T+0 买卖时间 Walk-Forward",
+      "category": "t0",
+      "status": "candidate",
+      "script": "scripts/t0_walk_forward.py",
+      "schedule": "每月首个工作日 09:00",
+      "rules": {
+        "train": "60 日训练窗网格搜索",
+        "validate": "20 日样本外验证",
+        "threshold": "样本外领先≥3pp 才建议换参"
+      },
+      "state_files": ["t0_walk_forward_state.json"],
+      "artifact_patterns": ["t0_walk_forward_*.json"],
+      "logs": ["walk_forward.log"],
+      "related": ["t0_baseline_trix"],
+      "conclusion": "2026-07-20 复核：保持基线（样本外候选落后 9.19pp）",
+      "tags": ["walk_forward", "monthly"]
+    },
+    {
+      "id": "t0_vol_ratio",
+      "name": "量比替代固定买卖时间",
+      "category": "t0",
+      "status": "rejected",
+      "script": "scripts/search_t0_vol_combo.py",
+      "rules": {
+        "buy": "vol_ratio ≥ buy_vol 首次触发",
+        "sell": "exhaust / spike / below"
+      },
+      "artifact_patterns": ["t0_vol_search_*.json", "t0_vol_analyze_*.json"],
+      "related": ["t0_baseline_trix", "t0_vol_wf"],
+      "conclusion": "100日5分K基线 +146% >> 量比 LB5 +69%；近10日1分过拟合",
+      "tags": ["research", "vol_ratio"]
+    },
+    {
+      "id": "t0_vol_wf",
+      "name": "量比策略 Walk-Forward",
+      "category": "t0",
+      "status": "rejected",
+      "script": "scripts/t0_vol_walk_forward.py",
+      "artifact_patterns": ["t0_vol_walk_forward_*.json"],
+      "state_files": ["t0_vol_walk_forward_state.json"],
+      "related": ["t0_vol_ratio", "t0_baseline_trix"],
+      "conclusion": "训练窗量比优，样本外仍落后基线，不切换",
+      "tags": ["walk_forward", "vol_ratio"]
+    },
+    {
+      "id": "min_cache",
+      "name": "分钟 K 线缓存",
+      "category": "data",
+      "status": "live",
+      "script": "scripts/cache_min_data.py",
+      "schedule": "15:10 工作日",
+      "rules": {
+        "1min": "新浪/AkShare ≈9 天",
+        "5min": "新浪 ≈105 天"
+      },
+      "logs": ["min_cache.log"],
+      "conclusion": "为 1 分 K 精确回测与后续每日对比提供数据",
+      "tags": ["cron", "data"]
+    },
+    {
+      "id": "rotation_8way",
+      "name": "轮动 8 路信号对比",
+      "category": "rotation",
+      "status": "research",
+      "script": "scripts/backtest_rotation_8way.py",
+      "artifact_patterns": ["backtest_6sig_*.json"],
+      "conclusion": "历史参数搜索归档，非实盘",
+      "tags": ["backtest"]
+    },
+    {
+      "id": "t0_hybrid_1min",
+      "name": "T+0 TRIX+追踪混合卖点",
+      "category": "t0",
+      "status": "research",
+      "script": "scripts/backtest_t0_hybrid_1min.py",
+      "artifact_patterns": ["backtest_t0_hybrid_1min_*.json"],
+      "conclusion": "混合卖点未优于纯 TRIX 基线",
+      "tags": ["backtest", "1min"]
+    },
+    {
+      "id": "t0_grid",
+      "name": "T+0 网格交易",
+      "category": "t0",
+      "status": "research",
+      "script": "scripts/backtest_t0_grid.py",
+      "artifact_patterns": ["backtest_t0_grid_*.json"],
+      "conclusion": "网格步长搜索，未上线",
+      "tags": ["backtest", "grid"]
+    }
+  ]
+}

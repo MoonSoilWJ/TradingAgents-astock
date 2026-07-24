@@ -169,7 +169,7 @@ def run_backtest(
         if not next_bars:
             continue
 
-        sell_price, sell_reason = simulate_exit(
+        sell_price, sell_reason, _ = simulate_exit(
             "trix0940_cut",
             buy_price,
             day_bars,

@@ -223,7 +223,7 @@ def run_strategy(
             continue
 
         if mode == "trix":
-            sell_price, sell_reason = simulate_exit(
+            sell_price, sell_reason, _ = simulate_exit(
                 "trix0940_cut", buy_price, day_bars, BUY_TIME, next_bars, SELL_CUTOFF,
                 trix_period=TRIX_PERIOD, trix_signal_period=TRIX_SIGNAL_PERIOD,
             )
