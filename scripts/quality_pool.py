@@ -239,11 +239,12 @@ def pick_top1_from_pool(
     skip_choppy: bool = True,
     use_regime_filter: bool = True,
     t0_only: bool = False,
+    signal_time: str = SIGNAL_TIME,
 ) -> tuple[str, float, str] | None:
     reg = regime_on_date(proxy_klines, day)
     if skip_choppy and reg and reg.get("skip_choppy"):
         return None
-    scores = rank_by_today_gain(pool, etf_daily, etf_5min, day, SIGNAL_TIME)
+    scores = rank_by_today_gain(pool, etf_daily, etf_5min, day, signal_time)
     rows = [
         (g, e["code"], e.get("name") or e.get("etf_name") or e["code"])
         for g, e in scores
@@ -493,12 +494,14 @@ def pick_orig_top1(
     etf_daily: dict,
     etf_5min: dict,
     proxy_klines: list[dict],
+    *,
+    signal_time: str = SIGNAL_TIME,
 ) -> tuple[str, float, str] | None:
     """原 T+0 池 Top1（震荡跳过；不过滤 T+1，与混合回测一致）。"""
     reg = regime_on_date(proxy_klines, day)
     if reg and reg.get("skip_choppy"):
         return None
-    scores = rank_by_today_gain(pool, etf_daily, etf_5min, day, SIGNAL_TIME)
+    scores = rank_by_today_gain(pool, etf_daily, etf_5min, day, signal_time)
     cands = [(g, e) for g, e in scores if passes_gain_filter(g)]
     if not cands:
         return None
@@ -561,6 +564,7 @@ def build_picks_hybrid(
     warmup: int = 0,
     static_quality: list[dict] | None = None,
     scheme: str = DEFAULT_HYBRID_SCHEME,
+    signal_times: list[str] | None = None,
 ) -> dict:
     """混合选池回测。
 
@@ -568,26 +572,30 @@ def build_picks_hybrid(
     B: 趋势/中性→原 T+0 池；震荡→滚动优质池（震荡仍交易）
     """
     static_quality = static_quality if static_quality is not None else load_quality_pool()
+    sigs = signal_times or [SIGNAL_TIME]
     picks: dict = {}
-    for i, day in enumerate(eval_dates):
-        if i < warmup:
-            picks[(SIGNAL_TIME, day)] = None
-            continue
-        reg = regime_on_date(proxy_klines, day)
-        if regime_uses_quality_pool(reg, scheme=scheme):
-            pool = _quality_pool_for_day(
-                day, eval_dates, etf_daily, etf_5min, all_dates, proxy_klines,
-                lookback=lookback, static_quality=static_quality, orig_pool=orig_pool,
-            )
-            picks[(SIGNAL_TIME, day)] = pick_top1_from_pool(
-                pool, day, etf_daily, etf_5min, proxy_klines,
-                skip_choppy=(reg or {}).get("mode") != "震荡",
-                use_regime_filter=True,
-            )
-        else:
-            picks[(SIGNAL_TIME, day)] = pick_orig_top1(
-                orig_pool, day, etf_daily, etf_5min, proxy_klines,
-            )
+    for sig in sigs:
+        for i, day in enumerate(eval_dates):
+            if i < warmup:
+                picks[(sig, day)] = None
+                continue
+            reg = regime_on_date(proxy_klines, day)
+            if regime_uses_quality_pool(reg, scheme=scheme):
+                pool = _quality_pool_for_day(
+                    day, eval_dates, etf_daily, etf_5min, all_dates, proxy_klines,
+                    lookback=lookback, static_quality=static_quality, orig_pool=orig_pool,
+                )
+                picks[(sig, day)] = pick_top1_from_pool(
+                    pool, day, etf_daily, etf_5min, proxy_klines,
+                    skip_choppy=(reg or {}).get("mode") != "震荡",
+                    use_regime_filter=True,
+                    signal_time=sig,
+                )
+            else:
+                picks[(sig, day)] = pick_orig_top1(
+                    orig_pool, day, etf_daily, etf_5min, proxy_klines,
+                    signal_time=sig,
+                )
     return picks
 
 
