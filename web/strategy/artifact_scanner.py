@@ -42,6 +42,24 @@ def _parse_json_summary(path: Path, data: dict) -> tuple[str, dict[str, Any]]:
         summary = rec.get("label") or rec.get("detail", "")[:80]
         return summary, metrics
 
+    if name.startswith("t0_idle_walk_forward_"):
+        recs = data.get("recommendations") or {}
+        bl = data.get("baseline", {}).get("validate", {})
+        bl_ret = bl.get("final_equity_pct")
+        leg2 = recs.get("leg2") or {}
+        metrics = {
+            "baseline_val_pct": bl_ret,
+            "leg2_shadow": leg2.get("shadow"),
+            "leg2_label": leg2.get("label"),
+        }
+        parts = []
+        for key in ("leg1", "leg2", "dual"):
+            r = recs.get(key) or {}
+            if r.get("label"):
+                parts.append(r["label"])
+        summary = " | ".join(parts) if parts else name
+        return summary, metrics
+
     if name.startswith("t0_vol_search_") or name.startswith("t0_vol_analyze_"):
         top = (data.get("top_results") or [{}])[0]
         baseline = data.get("baseline") or {}
@@ -80,6 +98,12 @@ def _parse_json_summary(path: Path, data: dict) -> tuple[str, dict[str, Any]]:
 
 
 def _match_strategy(name: str) -> str | None:
+    if name.startswith("t0_idle_walk_forward_"):
+        return "t0_idle_shadow"
+    if fnmatch.fnmatch(name, "backtest_t0_idle_*.json") or fnmatch.fnmatch(
+        name, "backtest_t0_freq_compare_*.json"
+    ):
+        return "t0_idle_shadow"
     for strat in load_registry().get("strategies", []):
         for pattern in strat.get("artifact_patterns") or []:
             if fnmatch.fnmatch(name, pattern):

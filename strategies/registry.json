@@ -41,6 +41,32 @@
       "tags": ["cron", "t0", "trix"]
     },
     {
+      "id": "t0_idle_shadow",
+      "name": "T+0 闲置双段 Shadow",
+      "category": "t0",
+      "status": "shadow",
+      "script": "scripts/t0_idle_shadow.py",
+      "schedule": "11:05/11:25 选股; 13:05~13:30 段1; 14:05~14:15 段2 TRIX",
+      "version": "idle_triple_shadow_v6_allt0_20260727",
+      "rules": {
+        "pool": "全市场 T+0",
+        "pick": "v6 TOP1 涨幅≥2%",
+        "leg1": "11:25→13:05买→13:30定时卖",
+        "leg2": "11:05→14:05买→14:15 TRIX(5,3)卖",
+        "note": "仅写 t0_idle_shadow.jsonl，14:50 基线仍由 t0_monitor 实盘"
+      },
+      "logs": ["t0_idle_shadow.jsonl", "t0_idle_shadow.log"],
+      "state_files": ["t0_idle_shadow_state.json"],
+      "artifact_patterns": [
+        "backtest_t0_idle_*.json",
+        "backtest_t0_freq_compare_*.json",
+        "t0_idle_walk_forward_*.json"
+      ],
+      "related": ["t0_baseline_trix"],
+      "conclusion": "WF 样本外：段2 可 Shadow(+17pp vs 基线)，段1 未过(+1.8pp)；双段待段1 复核",
+      "tags": ["shadow", "t0", "idle", "v6"]
+    },
+    {
       "id": "t0_trail_shadow",
       "name": "T+0 1分K 追踪 Shadow",
       "category": "t0",

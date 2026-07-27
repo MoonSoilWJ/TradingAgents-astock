@@ -14,6 +14,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 from web.strategy.artifact_scanner import log_files, min_cache_stats
 from web.strategy.registry_loader import get_strategy, load_cron_manifest
 from web.strategy.state_reader import rotation_state, t0_state, walk_forward_state
+from web.strategy.idle_shadow_table import render_idle_shadow_card
 from web.strategy.t0_table import render_t0_trade_table
 from web.strategy.theme import fmt_dt, inject_css
 
@@ -26,6 +27,10 @@ st.caption("T+0 交易流水 · 定时任务 · 健康状态")
 t0 = t0_state()
 st.subheader("T+0 交易流水")
 render_t0_trade_table(state_data=t0.get("data"), days=60)
+
+st.divider()
+
+render_idle_shadow_card(days=30)
 
 st.divider()
 

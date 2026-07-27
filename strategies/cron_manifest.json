@@ -59,6 +59,54 @@
       "script": "scripts/t0_walk_forward.py",
       "strategy_id": "t0_wf_time",
       "log": "walk_forward.log"
+    },
+    {
+      "id": "idle_leg2_pick",
+      "name": "闲置 Shadow 段2选股",
+      "cron": "5 11 * * 1-5",
+      "script": "scripts/t0_idle_shadow.py --leg2-pick",
+      "strategy_id": "t0_idle_shadow",
+      "log": "t0_idle_shadow.log"
+    },
+    {
+      "id": "idle_leg1_pick",
+      "name": "闲置 Shadow 段1选股",
+      "cron": "25 11 * * 1-5",
+      "script": "scripts/t0_idle_shadow.py --leg1-pick",
+      "strategy_id": "t0_idle_shadow",
+      "log": "t0_idle_shadow.log"
+    },
+    {
+      "id": "idle_leg1_buy",
+      "name": "闲置 Shadow 段1买入",
+      "cron": "5 13 * * 1-5",
+      "script": "scripts/t0_idle_shadow.py --leg1-buy",
+      "strategy_id": "t0_idle_shadow",
+      "log": "t0_idle_shadow.log"
+    },
+    {
+      "id": "idle_leg1_sell",
+      "name": "闲置 Shadow 段1卖出",
+      "cron": "30 13 * * 1-5",
+      "script": "scripts/t0_idle_shadow.py --leg1-sell",
+      "strategy_id": "t0_idle_shadow",
+      "log": "t0_idle_shadow.log"
+    },
+    {
+      "id": "idle_leg2_buy",
+      "name": "闲置 Shadow 段2买入",
+      "cron": "5 14 * * 1-5",
+      "script": "scripts/t0_idle_shadow.py --leg2-buy",
+      "strategy_id": "t0_idle_shadow",
+      "log": "t0_idle_shadow.log"
+    },
+    {
+      "id": "idle_leg2_sell",
+      "name": "闲置 Shadow 段2卖出",
+      "cron": "15 14 * * 1-5",
+      "script": "scripts/t0_idle_shadow.py --leg2-sell",
+      "strategy_id": "t0_idle_shadow",
+      "log": "t0_idle_shadow.log"
     }
   ]
 }

@@ -15,6 +15,7 @@ from web.strategy.artifact_scanner import min_cache_stats, scan_artifacts
 from web.strategy.paths import STATUS_LABELS, STATUS_ORDER
 from web.strategy.registry_loader import count_by_status, get_strategies, load_registry
 from web.strategy.state_reader import rotation_state, t0_state, walk_forward_state
+from web.strategy.idle_shadow_table import render_idle_shadow_card
 from web.strategy.t0_journal import load_t0_trades, trades_to_table_rows
 from web.strategy.t0_table import TABLE_COLUMNS
 from web.strategy.theme import fmt_dt, inject_css, render_strategy_card
@@ -60,9 +61,13 @@ if recent_t0:
         hide_index=True,
         column_config=TABLE_COLUMNS,
     )
-    st.caption("完整流水与 shadow 明细见侧边栏 **实盘监控**")
+    st.caption("完整流水与 trail shadow 明细见侧边栏 **实盘监控**")
 else:
     st.info("暂无 T+0 成交记录")
+
+st.divider()
+st.subheader("🌤️ T+0 闲置双段 Shadow")
+render_idle_shadow_card(days=14, compact=True)
 
 st.divider()
 
