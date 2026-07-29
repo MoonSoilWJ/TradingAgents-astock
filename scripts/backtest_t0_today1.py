@@ -44,6 +44,9 @@ from t0_regime import REGIME_PROXY, detect_regime  # noqa: E402
 SINA_INTERVAL = 0.25
 SIGNAL_TIME = "14:50"
 BUY_TIME = "14:55"
+# --confirm-time 默认值哨兵：用于区分"用户未传"与"用户显式传了14:40"，
+# 以便 --aligned 时能把确认时刻覆盖为 14:41（取到14:40这根已完成bar的实时价）。
+_CONFIRM_DEFAULT = "14:40"
 TRIX_PERIOD = 5
 TRIX_MIN_SELL = "09:40"   # 忽略早盘 TRIX 死叉（归因：09:40 前 0 胜率）
 MIN_GAIN = 3.0            # 全局最低当日涨幅 %
@@ -312,9 +315,17 @@ def run_backtest(
     proxy_klines: list[dict] | None = None,
     sell_cutoff: str | None = None,
     confirm_time: str | None = None,
+    signal_time: str | None = None,
+    buy_time: str | None = None,
 ) -> dict:
     trades: list[dict] = []
     skipped: list[dict] = []
+
+    # 允许调用方显式覆盖信号/买入时刻，避免改动模块级常量（见 run_backtest_aligned）
+    if signal_time is None:
+        signal_time = SIGNAL_TIME
+    if buy_time is None:
+        buy_time = BUY_TIME
 
     for day in eval_dates:
         if skip_choppy:
@@ -326,7 +337,7 @@ def run_backtest(
                     if ranked:
                         top_gain = ranked[0][0]
                 else:
-                    ranked = rank_by_today_gain(etf_list, etf_daily, etf_5min, day, SIGNAL_TIME)
+                    ranked = rank_by_today_gain(etf_list, etf_daily, etf_5min, day, signal_time)
                     if ranked:
                         top_gain = ranked[0][0]
                 skipped.append({
@@ -344,7 +355,7 @@ def run_backtest(
         if daily_proxy:
             scores = rank_by_today_gain_daily(etf_list, etf_daily, day)
         else:
-            scores = rank_by_today_gain(etf_list, etf_daily, etf_5min, day, SIGNAL_TIME)
+            scores = rank_by_today_gain(etf_list, etf_daily, etf_5min, day, signal_time)
         if len(scores) < 2:
             continue
 
@@ -388,9 +399,9 @@ def run_backtest(
             sell_time = sell_day
         else:
             day_bars = etf_5min.get(code, {}).get(day, [])
-            buy_price = price_at_time(day_bars, BUY_TIME)
+            buy_price = price_at_time(day_bars, buy_time)
             if buy_price is None or buy_price <= 0:
-                buy_price = price_at_time(day_bars, SIGNAL_TIME)
+                buy_price = price_at_time(day_bars, signal_time)
             if buy_price is None or buy_price <= 0:
                 continue
 
@@ -424,7 +435,7 @@ def run_backtest(
             "rank": rank,
             "today_gain": round(gain, 2),
             "buy_price": round(buy_price, 4),
-            "buy_time": "close" if daily_proxy else BUY_TIME,
+            "buy_time": "close" if daily_proxy else buy_time,
             "sell_price": round(sell_price, 4),
             "sell_time": sell_time,
             "sell_reason": sell_reason,
@@ -448,7 +459,42 @@ def run_backtest(
         "skip_choppy": skip_choppy,
         "sell_cutoff": sell_cutoff,
         "confirm_time": confirm_time,
+        "signal_time": signal_time,
+        "buy_time": buy_time,
     }
+
+
+# 实盘对齐口径：price_at_time 只取"已完成bar"，信号/买入当刻拿到的价会滞后一个bar
+# （14:50 信号实际只拿到 14:45 bar，系统性看不到尾盘最后5分钟脉冲，如豆粕）。
+# 把查询时刻后移（信号14:51/买入14:56→取到14:50/14:55这根已完成bar的实时价；
+# 确认14:41→取到14:40的实时价），与 t0_monitor 实时报价口径对齐，消掉5分K滞后偏差。
+ALIGNED_SIGNAL_TIME = "14:51"
+ALIGNED_BUY_TIME = "14:56"
+ALIGNED_CONFIRM_TIME = "14:41"
+
+
+def run_backtest_aligned(
+    etf_list: list[dict],
+    etf_daily: dict,
+    etf_5min: dict,
+    all_dates: list[str],
+    eval_dates: list[str],
+    fee_pct: float,
+    **kw,
+) -> dict:
+    """实盘对齐口径回测：信号/买入/确认各后移一个bar，消除5分K滞后偏差。
+
+    其余参数同 run_backtest；signal_time/buy_time/confirm_time 默认用对齐值，
+    未被显式传入时自动套用（其余 kw 透传）。
+    """
+    kw.setdefault("signal_time", ALIGNED_SIGNAL_TIME)
+    kw.setdefault("buy_time", ALIGNED_BUY_TIME)
+    kw.setdefault("confirm_time", ALIGNED_CONFIRM_TIME)
+    kw.setdefault("use_filter", True)
+    kw.setdefault("daily_proxy", False)
+    return run_backtest(
+        etf_list, etf_daily, etf_5min, all_dates, eval_dates, fee_pct, **kw
+    )
 
 
 def load_market_data(
@@ -509,12 +555,14 @@ def print_report(result: dict, eval_days: int, start: str, end: str):
     print(f"  {title}")
     print("=" * 80)
     print(f"  区间: {start} ~ {end} ({eval_days} 交易日) | 手续费万3双边 | 单仓位")
+    s_t = result.get("signal_time", SIGNAL_TIME)
+    b_t = result.get("buy_time", BUY_TIME)
     if daily_proxy:
-        print(f"  选股: 14:50≈当日收盘相对昨收涨幅最大")
-        print(f"  买入: 信号日收盘价（近似14:55）")
+        print(f"  选股: {s_t}≈当日收盘相对昨收涨幅最大")
+        print(f"  买入: 信号日收盘价（近似{b_t}）")
         print(f"  卖出: 次日 (高+低)/2")
     else:
-        print(f"  选股: 14:50 相对昨收当日涨幅最大 | 买入: {BUY_TIME} 直买")
+        print(f"  选股: {s_t} 相对昨收当日涨幅最大 | 买入: {b_t} 直买")
     if use_filter:
         print(f"  过滤: 当日涨幅 ≥{MIN_GAIN}%")
         if skip_choppy:
@@ -585,8 +633,16 @@ def main():
     parser.add_argument("--no-filter", action="store_true", help="关闭优化过滤（对比原版）")
     parser.add_argument("--sell-cutoff", type=str, default="",
                         help="卖出截止时间(如 11:05)，超过截止无死叉则强平，对齐实盘")
-    parser.add_argument("--confirm-time", type=str, default="",
-                        help="双时点确认(如 14:45): 该时刻涨幅也须≥MIN_GAIN，防尾盘脉冲")
+    parser.add_argument("--confirm-time", type=str, default=_CONFIRM_DEFAULT,
+                        help="双时点确认(默认14:40): 该时刻涨幅也须≥MIN_GAIN，防尾盘脉冲;"
+                             " 传空字符串 --confirm-time '' 可关闭")
+    parser.add_argument("--signal-time", type=str, default="",
+                        help="信号时刻(覆盖默认14:50)，用于选股涨幅排名")
+    parser.add_argument("--buy-time", type=str, default="",
+                        help="买入时刻(覆盖默认14:55)，用于定价")
+    parser.add_argument("--aligned", action="store_true",
+                        help="实盘对齐口径: 信号/买入/确认各后移一个bar(14:51/14:56/14:41)"
+                             "，消除5分K滞后偏差，与 t0_monitor 实时报价对齐")
     args = parser.parse_args()
 
     use_filter = not args.no_filter
@@ -597,6 +653,17 @@ def main():
         skip_choppy = True
     else:
         skip_choppy = daily_proxy  # 日K降级默认对齐实盘
+
+    # 解析信号/买入/确认时刻（--aligned 后移一个bar 对齐实时报价）
+    confirm_explicit = args.confirm_time != _CONFIRM_DEFAULT
+    signal_time = args.signal_time or None
+    buy_time = args.buy_time or None
+    if args.aligned:
+        signal_time = signal_time or ALIGNED_SIGNAL_TIME
+        buy_time = buy_time or ALIGNED_BUY_TIME
+        confirm_time = ALIGNED_CONFIRM_TIME if not confirm_explicit else (args.confirm_time or None)
+    else:
+        confirm_time = args.confirm_time or None
 
     etf_list = get_all_t0_etfs()
     mode = "日K降级" if daily_proxy else ("优化版" if use_filter else "原版")
@@ -609,7 +676,9 @@ def main():
     if daily_proxy:
         print("定价: 信号日收盘买入 | 次日(高+低)/2卖出")
     else:
-        print(f"信号 {SIGNAL_TIME} | 买入 {BUY_TIME}")
+        aligned_tag = " (实盘对齐)" if args.aligned else ""
+        print(f"信号 {signal_time or SIGNAL_TIME} | 买入 {buy_time or BUY_TIME}{aligned_tag}"
+              f" | 双时点确认 {confirm_time or '关闭'}")
     if skip_choppy:
         print("震荡期跳过: 开启")
     print(f"手续费万{args.fee * 100:.0f}")
@@ -641,7 +710,9 @@ def main():
         skip_choppy=skip_choppy,
         proxy_klines=proxy_klines,
         sell_cutoff=args.sell_cutoff or None,
-        confirm_time=args.confirm_time or None,
+        confirm_time=confirm_time,
+        signal_time=signal_time,
+        buy_time=buy_time,
     )
     print_report(result, len(eval_dates), eval_dates[0], eval_dates[-1])
 
@@ -652,6 +723,8 @@ def main():
         tag += "_cutoff" + args.sell_cutoff.replace(":", "")
     if args.confirm_time:
         tag += "_cf" + args.confirm_time.replace(":", "")
+    if args.aligned:
+        tag += "_aligned"
     out = Path.home() / ".tradingagents" / "rotation" / f"backtest_t0_today1_{tag}_{datetime.now().strftime('%Y%m%d_%H%M')}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     payload = {

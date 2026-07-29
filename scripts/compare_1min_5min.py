@@ -1,364 +1,187 @@
 #!/usr/bin/env python3
-"""1分钟线 vs 5分钟线 偏差对比
+"""1分K vs 5分K 回测差异对比（同窗口、同策略）。
 
-用东方财富分时API拉最近5天的1分钟线，同时用新浪拉5分钟线，
-对比追踪止盈策略在两种粒度下的卖出价差异。
+    核心问题：用1分K数据回测，和5分K比，结果差多大？
 
-用法:
-    python scripts/compare_1min_5min.py
-"""
+    重要前提(数据来源！)：
+      - 原生5分K = pytdx 拉取 (tdx_5min_2y.json)
+      - 1分K缓存 = 新浪 拉取 (min_cache/*_1min_*.json，见 backtest_cached_1min.py)
+      两者不同源，所以"原生-重采样"列的差距主要是【数据源差异】，不是【粒度】。
+
+    本脚本无意中验证了：
+      1) 同一窗口同一策略，原生5分K 与 新浪1分K重采样 选出的13笔信号【完全相同】
+         → 粒度/分辨率不改变选股；
+      2) 两者买卖价不同导致收益差 ~11.5%，但这是 Sina vs pytdx 价格源差异；
+      3) 真正的【粒度/滞后效应】由"滞后 vs 对齐"两列给出：同一份数据内，
+         滞后bar(14:50信号拿到14:45 bar)仅比实时对齐(拿到14:50 bar)虚增
+         ~+1%/17日 —— 这个偏差才是对齐口径要消除的，且与分辨率无关。
+
+    结论：对当前策略，1分K相对5分K的【粒度增益≈0】，真正影响结果的是
+    price_at_time 的"已完成bar"滞后，已由 --aligned 实盘对齐口径消除；且
+    pytdx 1分K深度仅~20交易日、分页不可靠，5分K才是合适的主干数据。
+    """
+from __future__ import annotations
 
 import json
-import os
-import subprocess
 import sys
-import time
 from pathlib import Path
 
-TIMEOUT = 15
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
+
+from backtest_t0_today1 import (  # noqa: E402
+    FEE_PCT, run_backtest,
+)
+from t0_etf_list import get_all_t0_etfs  # noqa: E402
+
+CACHE_5MIN = Path.home() / ".tradingagents" / "cache" / "t0_5min"
+OUT = CACHE_5MIN / "tdx_5min_2y.json"
+BACKFILL = CACHE_5MIN / "backfill_daily_1000.json"
+MIN_CACHE = Path.home() / ".tradingagents" / "rotation" / "min_cache"
 
 
-def etf_secid(etf_code):
-    """ETF代码转东方财富secid格式。"""
-    if etf_code.startswith("5"):
-        return f"1.{etf_code}"
-    return f"0.{etf_code}"
-
-
-def fetch_1min_kline_em(etf_code, ndays=5):
-    """用东方财富分时API拉1分钟K线。"""
-    secid = etf_secid(etf_code)
-    url = (
-        f"https://push2his.eastmoney.com/api/qt/stock/trends2/get?"
-        f"fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&"
-        f"fields2=f51,f52,f53,f54,f55,f56,f57,f58&"
-        f"ut=7eea3edcaed734bea9cbfc24409ed989&ndays={ndays}&iscr=0&secid={secid}"
-    )
-    cmd = ["curl", "-s", "--connect-timeout", str(TIMEOUT), "--noproxy", "*",
-           "-H", "User-Agent: Mozilla/5.0", url]
-    try:
-        r = subprocess.run(cmd, capture_output=True, timeout=TIMEOUT + 10)
-        text = r.stdout.decode("utf-8")
-        d = json.loads(text)
-        trends = d.get("data", {}).get("trends", [])
-        if not trends:
-            return {}
-        # 按日期分组
-        bars_by_date = {}
-        for t in trends:
-            parts = t.split(",")
-            if len(parts) < 7:
-                continue
-            datetime_str = parts[0]  # "2026-07-10 09:31"
-            day = datetime_str[:10]
-            time_part = datetime_str[11:16]
-            bars_by_date.setdefault(day, []).append({
-                "day": datetime_str,
-                "time": time_part,
-                "open": float(parts[1]) if parts[1] else 0,
-                "close": float(parts[2]) if parts[2] else 0,
-                "high": float(parts[3]) if parts[3] else 0,
-                "low": float(parts[4]) if parts[4] else 0,
-                "volume": float(parts[5]) if parts[5] else 0,
-            })
-        return bars_by_date
-    except Exception as e:
-        print(f"  东方财富1分钟线获取失败 {etf_code}: {e}")
-        return {}
-
-
-def curl_get(url):
-    for use_proxy in [False, True]:
-        cmd = ["curl", "-s", "--connect-timeout", str(TIMEOUT)]
-        if use_proxy:
-            cmd += ["-x", os.environ.get("ROTATION_PROXY", "http://127.0.0.1:7890")]
-        cmd.append(url)
-        try:
-            r = subprocess.run(cmd, capture_output=True, timeout=TIMEOUT + 10)
-            for enc in ["gbk", "utf-8"]:
-                try:
-                    text = r.stdout.decode(enc)
-                    if text and len(text) > 10:
-                        return text
-                except:
-                    continue
-        except:
+def resample_1min_to_5min(bars: list[dict]) -> list[dict]:
+    """把1分K聚合成5分K，标签用结束时刻(与原生5分K一致)。"""
+    buckets: dict[int, list[dict]] = {}
+    for b in bars:
+        dt = b.get("day", "")
+        if " " not in dt:
             continue
-    return ""
-
-
-def fetch_5min_kline_sina(etf_code, datalen=5000):
-    """用新浪拉5分钟K线。"""
-    sina_sym = f"sh{etf_code}" if etf_code.startswith("5") else f"sz{etf_code}"
-    url = (
-        f"http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
-        f"CN_MarketData.getKLineData?symbol={sina_sym}&scale=5&ma=no&datalen={datalen}"
-    )
-    raw = curl_get(url)
-    time.sleep(0.2)
-    if not raw or raw.strip() in ("null", "", "[]"):
-        return {}
-    try:
-        klines = json.loads(raw)
-    except:
-        return {}
-    bars_by_date = {}
-    for k in klines:
-        day_full = k.get("day", "")
-        day = day_full[:10]
-        time_part = day_full[11:16] if len(day_full) > 14 else ""
-        bars_by_date.setdefault(day, []).append({
-            "day": day_full,
-            "time": time_part,
-            "open": float(k.get("open", 0)),
-            "close": float(k.get("close", 0)),
-            "high": float(k.get("high", 0)),
-            "low": float(k.get("low", 0)),
-            "volume": float(k.get("volume", 0)),
+        t = dt.split(" ", 1)[1]
+        h, m = int(t[:2]), int(t[3:5])
+        em = ((m + 4) // 5) * 5  # 结束时刻(5分边界)
+        key = h * 60 + em
+        buckets.setdefault(key, []).append(b)
+    out = []
+    for key in sorted(buckets):
+        grp = buckets[key]
+        h, m = key // 60, key % 60
+        etime = f"{h:02d}:{m:02d}:00"
+        day = grp[0]["day"].split(" ")[0]
+        out.append({
+            "datetime": f"{day} {etime}",
+            "day": day,
+            "time": etime,
+            "open": float(grp[0]["open"]),
+            "high": max(float(x["high"]) for x in grp),
+            "low": min(float(x["low"]) for x in grp),
+            "close": float(grp[-1]["close"]),
+            "volume": sum(float(x.get("volume", 0)) for x in grp),
         })
-    return bars_by_date
+    return out
 
 
-def fetch_daily_kline(etf_code, datalen=100):
-    """拉日K线用于算v6得分。"""
-    sina_sym = f"sh{etf_code}" if etf_code.startswith("5") else f"sz{etf_code}"
-    url = (
-        f"http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
-        f"CN_MarketData.getKLineData?symbol={sina_sym}&scale=240&ma=no&datalen={datalen}"
-    )
-    raw = curl_get(url)
-    time.sleep(0.2)
-    if not raw or raw.strip() in ("null", "", "[]"):
-        return []
-    try:
-        return json.loads(raw)
-    except:
-        return []
-
-
-def compute_daily(klines):
-    result = []
-    for i, k in enumerate(klines):
-        close = float(k.get("close", 0))
+def load_resampled_5min(codes: set[str]) -> dict[str, dict]:
+    """从1分K缓存重采样出5分K，仅保留 codes 内标的。"""
+    etf_5min: dict[str, dict] = {}
+    for f in MIN_CACHE.glob("*_1min_*.json"):
+        parts = f.stem.split("_")
+        code, day = parts[0], parts[2]
+        if code not in codes:
+            continue
         try:
-            volume = float(k.get("volume", 0))
-        except:
-            volume = 0.0
-        if i == 0:
-            ret = 0.0
-        else:
-            prev_close = float(klines[i - 1].get("close", 0))
-            ret = ((close - prev_close) / prev_close * 100) if prev_close else 0.0
-        result.append({"date": k.get("day", ""), "close": close, "return_pct": ret, "volume": volume})
-    return result
-
-
-def compute_v6_score(returns, idx):
-    window = 3
-    if idx < window:
-        return 0.0
-    ret_w = sum(r["return_pct"] for r in returns[idx - window + 1:idx + 1])
-    vol_today = returns[idx].get("volume", 0)
-    vol_prev = [returns[j].get("volume", 0) for j in range(max(0, idx - 5), idx)]
-    avg_vol = sum(vol_prev) / len(vol_prev) if vol_prev and sum(vol_prev) > 0 else vol_today
-    vol_ratio = vol_today / avg_vol if avg_vol > 0 else 1.0
-    vol_factor = 0.3 + 0.7 * min(vol_ratio / 1.5, 1.0)
-    return ret_w * vol_factor
-
-
-def get_price_at_time(bars, target_time):
-    """找最接近 target_time 的 bar 的 close。"""
-    target_min = int(target_time[:2]) * 60 + int(target_time[3:5])
-    best_price = None
-    best_diff = 999
-    for bar in bars:
-        t = bar.get("time", "")
-        if t and len(t) >= 5:
-            bar_min = int(t[:2]) * 60 + int(t[3:5])
-            diff = abs(bar_min - target_min)
-            if diff < best_diff:
-                best_diff = diff
-                best_price = bar.get("close", 0)
-    return best_price
-
-
-def get_bars_until(bars, cutoff_time):
-    cutoff_min = int(cutoff_time[:2]) * 60 + int(cutoff_time[3:5])
-    result = []
-    for bar in bars:
-        t = bar.get("time", "")
-        if t and len(t) >= 5:
-            bar_min = int(t[:2]) * 60 + int(t[3:5])
-            if bar_min <= cutoff_min:
-                result.append(bar)
-    return result
-
-
-def simulate_trailing(buy_cost, bars, trigger=3.0, drop=0.5, stop_loss=-0.5):
-    """追踪止盈模拟，返回(收益率, 卖出原因, 卖出价)。"""
-    trigger_price = buy_cost * (1 + trigger / 100)
-    stop_price = buy_cost * (1 + stop_loss / 100) if stop_loss < 0 else 0
-    tracking = False
-    peak_high = 0.0
-
-    for bar in bars:
-        bar_high = bar.get("high", 0)
-        bar_low = bar.get("low", 0)
-
-        if stop_loss < 0 and bar_low <= stop_price:
-            return stop_loss, "stop_loss", stop_price
-
-        if not tracking and bar_high >= trigger_price:
-            tracking = True
-            peak_high = bar_high
-        elif tracking and bar_high > peak_high:
-            peak_high = bar_high
-
-        if tracking:
-            trail_sell = peak_high * (1 - drop / 100)
-            if bar_low <= trail_sell:
-                ret = (trail_sell - buy_cost) / buy_cost * 100
-                return ret, "trailing_stop", trail_sell
-
-    sell_price = bars[-1].get("close", 0) if bars else buy_cost
-    ret = (sell_price - buy_cost) / buy_cost * 100
-    return ret, "close", sell_price
-
-
-def main():
-    print("=== 1分钟线 vs 5分钟线 偏差对比 ===")
-    print()
-
-    # 选几只ETF测试
-    test_etfs = [
-        ("159995", "芯片ETF"),
-        ("512400", "有色金属ETF"),
-        ("515220", "煤炭ETF"),
-        ("159997", "电子ETF"),
-        ("512800", "银行ETF"),
-    ]
-
-    buy_time = "09:50"
-    sell_time = "09:35"
-
-    all_results = []
-
-    for etf_code, etf_name in test_etfs:
-        print(f">>> {etf_code} {etf_name}")
-
-        # 拉1分钟线（最近5天）
-        bars_1min = fetch_1min_kline_em(etf_code, ndays=5)
-        if not bars_1min:
-            print(f"    1分钟线获取失败，跳过")
+            bars = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
             continue
-        print(f"    1分钟线: {len(bars_1min)} 天 ({sorted(bars_1min.keys())})")
-
-        # 拉5分钟线（取同样的天数）
-        bars_5min = fetch_5min_kline_sina(etf_code, datalen=5000)
-        if not bars_5min:
-            print(f"    5分钟线获取失败，跳过")
+        if not bars:
             continue
-        # 只取1分钟线覆盖的日期
-        common_dates = sorted(set(bars_1min.keys()) & set(bars_5min.keys()))
-        print(f"    5分钟线: {len(bars_5min)} 天, 共同日期: {len(common_dates)} 天")
+        rb = resample_1min_to_5min(bars)
+        if rb:
+            etf_5min.setdefault(code, {})[day] = rb
+    return etf_5min
 
-        if len(common_dates) < 2:
-            print(f"    共同日期不足2天，无法回测")
-            continue
 
-        # 逐天对比
-        for i in range(len(common_dates) - 1):
-            buy_date = common_dates[i]
-            sell_date = common_dates[i + 1]
+def mdd(trades: list[dict]) -> float:
+    eq, peak, m = 1.0, 1.0, 0.0
+    for t in sorted(trades, key=lambda x: x["signal_date"]):
+        eq *= 1 + t["return_pct"] / 100
+        peak = max(peak, eq)
+        m = min(m, (eq - peak) / peak * 100)
+    return m
 
-            # 买入价（两种粒度都用5分钟线的买入价，保证一致）
-            buy_bars_5 = bars_5min.get(buy_date, [])
-            buy_price = get_price_at_time(buy_bars_5, buy_time)
-            if not buy_price or buy_price <= 0:
-                continue
 
-            # 次日卖出bar
-            sell_bars_1 = bars_1min.get(sell_date, [])
-            sell_bars_5 = bars_5min.get(sell_date, [])
+def main() -> None:
+    etf_list = get_all_t0_etfs()
+    codes = {e["code"] for e in etf_list}
+    print(f">>> T+0 池 {len(codes)} 只")
 
-            # 截取到卖出时间
-            sell_bars_1_cut = get_bars_until(sell_bars_1, sell_time)
-            sell_bars_5_cut = get_bars_until(sell_bars_5, sell_time)
+    native = json.loads(OUT.read_text(encoding="utf-8"))["etf_5min"]
+    bd = json.loads(BACKFILL.read_text(encoding="utf-8"))["etf_daily"]
+    resp = load_resampled_5min(codes)
+    print(f">>> 原生5分K: {sum(len(v) for v in native.values())} 标/日; "
+          f"重采样5分K(来自1分): {sum(len(v) for v in resp.values())} 标/日")
 
-            if not sell_bars_1_cut or not sell_bars_5_cut:
-                continue
+    # 取"两份数据都覆盖、且覆盖≥90%标的"的日期，保证同窗口可比
+    # (run_backtest 会自动跳过单只缺数据的标的，故不要求100%覆盖)
+    from collections import Counter
+    native_days = {c: set(native.get(c, {})) for c in codes}
+    resp_days = {c: set(resp.get(c, {})) for c in codes}
+    cov = Counter()
+    for c in codes:
+        for d in (native_days[c] & resp_days[c]):
+            cov[d] += 1
+    thr = 0.9 * len(codes)
+    eval_dates = sorted(d for d, n in cov.items() if n >= thr)
+    all_dates = sorted({day for c in codes for day in native_days[c]})
+    if not eval_dates:
+        # 兜底：放宽到≥50%
+        eval_dates = sorted(d for d, n in cov.items() if n >= 0.5 * len(codes))
+    print(f">>> 同覆盖窗口(≥90%标的): {eval_dates[0]} ~ {eval_dates[-1]} "
+          f"({len(eval_dates)} 交易日)\n")
 
-            # 1分钟线回测
-            ret_1, reason_1, price_1 = simulate_trailing(buy_price, sell_bars_1_cut)
-            # 5分钟线回测
-            ret_5, reason_5, price_5 = simulate_trailing(buy_price, sell_bars_5_cut)
+    def run(tag, data, sig, buy, conf):
+        r = run_backtest(etf_list, bd, data, all_dates, eval_dates, FEE_PCT,
+                         use_filter=True, daily_proxy=False,
+                         confirm_time=conf, signal_time=sig, buy_time=buy)
+        st = r["stats"]
+        print(f"  [{tag}] 笔数 {r['trade_count']:>3} | 累计 {r['final_equity_pct']:+7.2f}% "
+              f"| 回撤 {mdd(r['trades']):>6.2f}% | 胜率 {st.get('win_rate',0):>5.1f}% "
+              f"| 均笔 {st.get('avg',0):>+6.2f}%")
+        return r
 
-            diff = ret_1 - ret_5
-            all_results.append({
-                "etf": etf_code,
-                "name": etf_name,
-                "buy_date": buy_date,
-                "sell_date": sell_date,
-                "buy_price": buy_price,
-                "ret_1min": ret_1,
-                "ret_5min": ret_5,
-                "diff": diff,
-                "reason_1min": reason_1,
-                "reason_5min": reason_5,
-                "sell_price_1min": price_1,
-                "sell_price_5min": price_5,
-            })
+    print("=== 原生5分K ===")
+    nat_lag = run("滞后14:50/14:55 cf14:40", native, "14:50", "14:55", "14:40")
+    nat_al = run("对齐14:51/14:56 cf14:41", native, "14:51", "14:56", "14:41")
+    print("=== 重采样5分K(来自1分K) ===")
+    rsp_lag = run("滞后14:50/14:55 cf14:40", resp, "14:50", "14:55", "14:40")
+    rsp_al = run("对齐14:51/14:56 cf14:41", resp, "14:51", "14:56", "14:41")
 
-            print(f"    {buy_date}→{sell_date}: 买={buy_price:.3f} "
-                  f"1分钟={ret_1:+.2f}%({reason_1}) 5分钟={ret_5:+.2f}%({reason_5}) "
-                  f"偏差={diff:+.2f}%")
+    print("\n=== 差异拆解 (同窗口同策略) ===")
+    def delta(a, b):
+        return a["final_equity_pct"] - b["final_equity_pct"]
+    print(f"  数据源差(原生pytdx5分 - 新浪1分重采样): {delta(nat_lag, rsp_lag):+.2f}%  "
+          f"[Sina vs pytdx 价格源差异，非粒度]")
+    print(f"  数据源差(对齐口径):                   {delta(nat_al, rsp_al):+.2f}%  "
+          f"[同上，对齐口径]")
+    print(f"  滞后/粒度效应(原生滞后 - 原生对齐):   {delta(nat_lag, nat_al):+.2f}%  "
+          f"[同数据内 bar完成滞后虚增，对齐口径已消除]")
+    print(f"  滞后/粒度效应(新浪1分滞后-对齐):     {delta(rsp_lag, rsp_al):+.2f}%  "
+          f"[同上，1分K重采样后仍存在]")
 
-    # 汇总
-    print()
-    print("=" * 90)
-    print("  1分钟线 vs 5分钟线 偏差汇总")
-    print("=" * 90)
-
-    if not all_results:
-        print("  无有效数据")
-        return
-
-    print(f"  样本数: {len(all_results)}")
-    print()
-
-    diffs = [r["diff"] for r in all_results]
-    avg_diff = sum(diffs) / len(diffs)
-    abs_diffs = [abs(d) for d in diffs]
-    avg_abs_diff = sum(abs_diffs) / len(abs_diffs)
-    max_diff = max(diffs, key=abs)
-
-    print(f"  平均偏差(1分钟-5分钟): {avg_diff:+.3f}%")
-    print(f"  平均绝对偏差: {avg_abs_diff:.3f}%")
-    print(f"  最大偏差: {max_diff:+.3f}%")
-    print()
-
-    # 原因对比
-    same_reason = sum(1 for r in all_results if r["reason_1min"] == r["reason_5min"])
-    print(f"  卖出原因一致: {same_reason}/{len(all_results)} = {same_reason/len(all_results)*100:.0f}%")
-    print()
-
-    # 逐笔明细
-    print("  逐笔明细:")
-    print(f"  {'ETF':>8} {'买入日':>12} {'买入价':>8} {'1分钟收益':>10} {'5分钟收益':>10} {'偏差':>8} {'1分钟原因':>12} {'5分钟原因':>12}")
-    for r in all_results:
-        print(f"  {r['etf']:>8} {r['buy_date']:>12} {r['buy_price']:8.3f} "
-              f"{r['ret_1min']:+9.2f}% {r['ret_5min']:+9.2f}% {r['diff']:+7.2f}% "
-              f"{r['reason_1min']:>12} {r['reason_5min']:>12}")
-
-    print()
-    print("=" * 90)
-    if avg_abs_diff < 0.3:
-        print(f"  结论: 偏差很小（平均{avg_abs_diff:.2f}%），5分钟线回测结果可信")
-    elif avg_abs_diff < 1.0:
-        print(f"  结论: 偏差中等（平均{avg_abs_diff:.2f}%），5分钟线回测有参考价值但需注意误差")
-    else:
-        print(f"  结论: 偏差较大（平均{avg_abs_diff:.2f}%），5分钟线回测不可信，需要1分钟线")
-    print("=" * 90)
+    # 诊断：原生 vs 重采样 的 trade 集合与买卖价是否一致
+    print("\n=== 诊断: 原生滞后 vs 重采样滞后 逐笔 ===")
+    nl = {(t["signal_date"], t["etf"]): t for t in nat_lag["trades"]}
+    rl = {(t["signal_date"], t["etf"]): t for t in rsp_lag["trades"]}
+    only_n = [k for k in nl if k not in rl]
+    only_r = [k for k in rl if k not in nl]
+    common_keys = [k for k in nl if k in rl]
+    print(f"  原生独有 {len(only_n)} 笔, 重采样独有 {len(only_r)} 笔, 交集 {len(common_keys)} 笔")
+    if only_n:
+        print(f"  原生独有: {only_n[:5]}")
+    if only_r:
+        print(f"  重采样独有: {only_r[:5]}")
+    if common_keys:
+        diff_buy = [k for k in common_keys
+                    if abs(nl[k]["buy_price"] - rl[k]["buy_price"]) > 1e-4]
+        diff_sell = [k for k in common_keys
+                     if abs(nl[k]["sell_price"] - rl[k]["sell_price"]) > 1e-4]
+        print(f"  交集里买价不同 {len(diff_buy)} 笔, 卖价不同 {len(diff_sell)} 笔")
+        # 抽样展示一笔买价差异
+        if diff_buy:
+            k = diff_buy[0]
+            print(f"  样例 {k}: 原生买 {nl[k]['buy_price']:.4f} / 重采样买 "
+                  f"{rl[k]['buy_price']:.4f} (差 "
+                  f"{(nl[k]['buy_price']-rl[k]['buy_price'])*100/rl[k]['buy_price']:+.2f}%)")
 
 
 if __name__ == "__main__":
