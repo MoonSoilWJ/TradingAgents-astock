@@ -3,7 +3,7 @@
 
 策略（9 日 1 分 K 回测验证，无未来函数；5 分 TRIX(5,3) 累计 +36.31% 最优）：
 - 501018 近10日 MA20 穿越≥2 → 震荡期跳过买入
-- 14:45 选 T+0 池当日涨幅最大且 ≥3% 的 ETF → 14:50 买入
+- 14:40 与 14:45 双时点涨幅均 ≥3% 的 TOP1 → 14:50 买入（防尾盘脉冲踩线）
 - 次日 09:40~11:05 每 50 秒检查 5 分钟 TRIX(5,3) 死叉 → 卖出；无死叉则 11:05 定时卖
 
 用法:
@@ -87,14 +87,18 @@ BUY_TIME = "14:50"
 TRIX_SIGNAL_PERIOD = 3
 SELL_BAR_LABEL = "5分K"
 SELL_CUTOFF = "11:05"
+# 双时点确认：CONFIRM_TIME 时刻涨幅也须 ≥ MIN_GAIN，防尾盘脉冲踩线单
+# （回测侧对应 backtest_t0_today1.py --confirm-time，须与 CONFIRM_TIME 一致）
+CONFIRM_TIME = "14:40"
 # 与 backtest_t0_sell_trix_compare.py 最优方案一致；卖点逻辑与 simulate_trix_cross_after 对齐
-STRATEGY_VERSION = "t0_hybrid_quality_orig_20260722"
+# 20260728: 新增双时点确认（14:40 涨幅也须≥MIN_GAIN，防尾盘脉冲踩线单）
+STRATEGY_VERSION = "t0_hybrid_quality_confirm1440_20260728"
 FEE_NOTE = "手续费: 万3双边"
 REGIME_RULE = (
     f"501018近10日MA20穿越≥{CHOPPY_MA_CROSS}=震荡；"
     f"震荡/趋势→优质池仍交易，中性→原T0池"
 )
-BUY_RULE = f"{SIGNAL_TIME} 混合池涨幅≥{MIN_GAIN:.0f}% TOP1 → {BUY_TIME} 买入"
+BUY_RULE = f"{CONFIRM_TIME}/{SIGNAL_TIME} 双时点涨幅均≥{MIN_GAIN:.0f}% TOP1 → {BUY_TIME} 买入"
 HYBRID_POOL_RULE = "趋势/震荡→优质池(regime品类过滤)；中性→原T0池"
 SELL_RULE = (
     f"次日 {SELL_BAR_LABEL} TRIX({TRIX_PERIOD},{TRIX_SIGNAL_PERIOD}) 死叉"
@@ -324,6 +328,23 @@ def _bar_time_1m(bar: dict) -> str:
     if " " in bar.get("day", ""):
         return bar["day"].split(" ")[1][:5]
     return bar.get("time", "00:00")[:5]
+
+
+def confirm_signal_gain(top: dict) -> tuple[bool, float | None]:
+    """双时点确认：CONFIRM_TIME 时刻涨幅也须 ≥ MIN_GAIN。
+
+    用 1 分 K 收盘价计算；数据缺失时放行（不因数据问题误杀）。
+    """
+    last_close = top.get("last_close") or 0
+    sym = top.get("sina_symbol") or ""
+    if not last_close or not sym:
+        return True, None
+    bars = fetch_1min_today(sym)
+    px, _tm = price_1min_at_or_before(bars, CONFIRM_TIME)
+    if px is None or px <= 0:
+        return True, None
+    g = (px - last_close) / last_close * 100
+    return g >= MIN_GAIN, round(g, 2)
 
 
 def peak_from_1min(bars_1m: list[dict], buy_price: float, since: str = TRIX_MIN_SELL) -> float:
@@ -615,6 +636,23 @@ def run_signal(dry_run: bool = False) -> int:
         top = pick_from_ranked_live(ranked, regime, use_regime_filter=True, t0_only=False)
         ranked_view = ranked
 
+    pulse_reject: dict | None = None
+    if top:
+        ok_confirm, g_confirm = confirm_signal_gain(top)
+        if not ok_confirm:
+            pulse_reject = {
+                "etf": top["code"],
+                "name": top["name"],
+                "gain_now": top["today_gain"],
+                "gain_confirm": g_confirm,
+            }
+            print(
+                f"⛔ 双时点确认失败: {top['name']} ({top['code']}) "
+                f"{CONFIRM_TIME} 涨幅 {g_confirm:+.2f}% < {MIN_GAIN:.0f}%"
+                f"（现涨 {top['today_gain']:+.2f}%，疑似尾盘脉冲，放弃）"
+            )
+            top = None
+
     state = load_state()
     pos = state.get("position")
 
@@ -666,6 +704,31 @@ def run_signal(dry_run: bool = False) -> int:
             "regime": regime,
             "hypo_etf": hypo["code"],
             "hypo_gain": hypo["today_gain"],
+        }
+        save_state(state)
+    elif pulse_reject:
+        msg = (
+            f"双时点确认失败: {pulse_reject['name']} ({pulse_reject['etf']}) "
+            f"{CONFIRM_TIME} {pulse_reject['gain_confirm']:+.2f}% < {MIN_GAIN:.0f}%"
+        )
+        print(msg)
+        lines.extend([
+            "**信号**: ⛔ **尾盘脉冲过滤，放弃买入**",
+            f"- 候选: {pulse_reject['name']} ({pulse_reject['etf']})",
+            f"- 现涨幅 {pulse_reject['gain_now']:+.2f}% ≥ {MIN_GAIN:.0f}%，"
+            f"但 {CONFIRM_TIME} 仅 {pulse_reject['gain_confirm']:+.2f}%",
+            f"- 判定: 涨幅靠尾盘急拉过线，信号不稳，跳过",
+            "",
+            *format_top5_lines(ranked_view, pulse_reject["etf"]),
+        ])
+        title = "T0轮动 脉冲过滤跳过"
+        state["last_signal"] = {
+            "timestamp": datetime.now().isoformat(),
+            "skipped": True,
+            "reason": "pulse_confirm",
+            "etf": pulse_reject["etf"],
+            "today_gain": pulse_reject["gain_now"],
+            "gain_confirm": pulse_reject["gain_confirm"],
         }
         save_state(state)
     elif not top:

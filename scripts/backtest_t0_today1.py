@@ -111,8 +111,13 @@ def simulate_trix_cross_after(
     trix_period: int = TRIX_PERIOD,
     trix_signal_period: int | None = None,
     min_sell_time: str = TRIX_MIN_SELL,
+    max_sell_time: str | None = None,
 ) -> tuple[float, str, dict]:
-    """次日 TRIX 死叉卖，忽略 min_sell_time 之前的死叉。"""
+    """次日 TRIX 死叉卖，忽略 min_sell_time 之前的死叉。
+
+    max_sell_time: 卖出截止时间（如实盘 "11:05"）。超过截止不再找死叉，
+    无死叉则在截止时刻强平（time_sell），与实盘 t0_monitor 一致。
+    """
     if trix_signal_period is None:
         trix_signal_period = max(trix_period // 2, 3)
     all_bars = min_bars_today + min_bars_next
@@ -126,11 +131,15 @@ def simulate_trix_cross_after(
     trix = calc_trix(closes, trix_period)
     signal = calc_trix_signal(trix, trix_signal_period)
     min_sell_min = time_to_min(min_sell_time)
+    max_sell_min = time_to_min(max_sell_time) if max_sell_time else None
     search_start = max(warmup_len, min_warmup)
 
     for i in range(search_start, len(all_bars)):
-        if time_to_min(bar_clock(all_bars[i])) < min_sell_min:
+        clock_min = time_to_min(bar_clock(all_bars[i]))
+        if clock_min < min_sell_min:
             continue
+        if max_sell_min is not None and clock_min > max_sell_min:
+            break
         if trix[i - 1] >= signal[i - 1] and trix[i] < signal[i]:
             sell_price = closes[i]
             bar = all_bars[i]
@@ -144,6 +153,24 @@ def simulate_trix_cross_after(
                 "sell_time": bar_clock(bar),
                 "trix": trix[i],
                 "signal": signal[i],
+            }
+
+    if max_sell_min is not None:
+        # 截止前无死叉 → 截止时刻强平（对齐实盘 time_sell）
+        cutoff_idx = None
+        for i in range(warmup_len, len(all_bars)):
+            if time_to_min(bar_clock(all_bars[i])) <= max_sell_min:
+                cutoff_idx = i
+        if cutoff_idx is not None:
+            bar = all_bars[cutoff_idx]
+            sell_price = closes[cutoff_idx]
+            sell_date = str(bar.get("day", ""))[:10]
+            return (sell_price - buy_cost) / buy_cost * 100, "time_sell", {
+                "reason": "cutoff_time_sell",
+                "sell_price": sell_price,
+                "bar": bar.get("day", ""),
+                "sell_date": sell_date,
+                "sell_time": bar_clock(bar),
             }
 
     last_close = closes[-1] if closes else buy_cost
@@ -245,6 +272,31 @@ def rank_by_today_gain(
     return scores
 
 
+def gain_at_time(
+    etf_daily: dict,
+    etf_5min: dict,
+    code: str,
+    day: str,
+    hm: str,
+) -> float | None:
+    """某时刻相对昨收的涨幅%；无数据返回 None。"""
+    info = etf_daily.get(code)
+    if not info:
+        return None
+    returns = info["returns"]
+    idx_map = {r["date"]: i for i, r in enumerate(returns)}
+    if day not in idx_map or idx_map[day] == 0:
+        return None
+    prev_close = returns[idx_map[day] - 1]["close"]
+    if not prev_close or prev_close <= 0:
+        return None
+    bars = etf_5min.get(code, {}).get(day, [])
+    px = price_at_time(bars, hm)
+    if px is None or px <= 0:
+        return None
+    return (px - prev_close) / prev_close * 100
+
+
 def run_backtest(
     etf_list: list[dict],
     etf_daily: dict,
@@ -258,6 +310,8 @@ def run_backtest(
     daily_proxy: bool = False,
     skip_choppy: bool = False,
     proxy_klines: list[dict] | None = None,
+    sell_cutoff: str | None = None,
+    confirm_time: str | None = None,
 ) -> dict:
     trades: list[dict] = []
     skipped: list[dict] = []
@@ -304,6 +358,19 @@ def run_backtest(
 
         gain, top1 = picked
         code = top1["code"]
+
+        # 双时点确认：confirm_time(如14:45)时涨幅也须≥MIN_GAIN，防尾盘脉冲踩线
+        if confirm_time and not daily_proxy and use_filter:
+            g_confirm = gain_at_time(etf_daily, etf_5min, code, day, confirm_time)
+            if g_confirm is not None and g_confirm < MIN_GAIN:
+                skipped.append({
+                    "date": day,
+                    "reason": f"双时点确认失败({confirm_time} {g_confirm:.2f}%<{MIN_GAIN:.0f}%)",
+                    "top_gain": gain,
+                    "etf": code,
+                })
+                continue
+
         sell_day = next_trading_day(all_dates, day)
         if not sell_day:
             continue
@@ -338,6 +405,7 @@ def run_backtest(
                 bars_for_trix(sell_bars),
                 trix_period=TRIX_PERIOD,
                 min_sell_time=min_sell,
+                max_sell_time=sell_cutoff,
             )
             sell_price = detail.get("sell_price")
             if sell_price is None:
@@ -378,6 +446,8 @@ def run_backtest(
         "use_filter": use_filter,
         "daily_proxy": daily_proxy,
         "skip_choppy": skip_choppy,
+        "sell_cutoff": sell_cutoff,
+        "confirm_time": confirm_time,
     }
 
 
@@ -513,6 +583,10 @@ def main():
     parser.add_argument("--no-skip-choppy", action="store_true", help="关闭震荡期跳过")
     parser.add_argument("--fee", type=float, default=FEE_PCT, help="单边手续费(默认0.03=万3)")
     parser.add_argument("--no-filter", action="store_true", help="关闭优化过滤（对比原版）")
+    parser.add_argument("--sell-cutoff", type=str, default="",
+                        help="卖出截止时间(如 11:05)，超过截止无死叉则强平，对齐实盘")
+    parser.add_argument("--confirm-time", type=str, default="",
+                        help="双时点确认(如 14:45): 该时刻涨幅也须≥MIN_GAIN，防尾盘脉冲")
     args = parser.parse_args()
 
     use_filter = not args.no_filter
@@ -566,12 +640,18 @@ def main():
         daily_proxy=daily_proxy,
         skip_choppy=skip_choppy,
         proxy_klines=proxy_klines,
+        sell_cutoff=args.sell_cutoff or None,
+        confirm_time=args.confirm_time or None,
     )
     print_report(result, len(eval_dates), eval_dates[0], eval_dates[-1])
 
     tag = "daily" if daily_proxy else ("opt" if use_filter else "raw")
     if skip_choppy:
         tag += "_skip"
+    if args.sell_cutoff:
+        tag += "_cutoff" + args.sell_cutoff.replace(":", "")
+    if args.confirm_time:
+        tag += "_cf" + args.confirm_time.replace(":", "")
     out = Path.home() / ".tradingagents" / "rotation" / f"backtest_t0_today1_{tag}_{datetime.now().strftime('%Y%m%d_%H%M')}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     payload = {
