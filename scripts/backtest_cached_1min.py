@@ -118,48 +118,19 @@ def simulate_trix_1min(
 
 
 def run_1min_backtest(etf_list, all_dates, eval_dates, fee_pct):
+    """用日K选股（与5分K回测一致），用1分K做买入和TRIX卖出。"""
+    # 先拉日K数据用于选股
+    from backtest_t0_today1 import rank_by_today_gain, load_market_data
+    print(">>> 加载日K+5分K用于选股...")
+    etf_daily, etf_5min_full, _, _ = load_market_data(etf_list, 30)
+
     trades = []
     for day in eval_dates:
-        # 用5分K选股（1分K可能不够选股的涨幅计算）
-        # 实际上选股用日K收盘价算涨幅，这里用5分K缓存
-        from backtest_t0_today1 import rank_by_today_gain
-        # 临时用5分K缓存构建 etf_5min
-        etf_5min_day = {}
-        for etf in etf_list:
-            code = etf["code"]
-            bars = load_cached_5min(code, day)
-            if bars:
-                etf_5min_day[code] = {day: bars}
-
-        # 需要日K数据算涨幅排名 — 用5分K合成
-        etf_daily_temp = {}
-        for code, day_bars in etf_5min_day.items():
-            if day in day_bars and day_bars[day]:
-                prev_close = float(day_bars[day][0]["open"])  # 近似前日收盘=今日开盘
-                partial = price_at_time(day_bars[day], SIGNAL_TIME)
-                if partial:
-                    gain = (partial - prev_close) / prev_close * 100
-                    etf_daily_temp[code] = {"returns": [{"date": day, "close": partial, "open": prev_close, "return_pct": gain}]}
-
-        # 简化选股：直接用5分K涨幅排名
-        scores = []
-        for etf in etf_list:
-            code = etf["code"]
-            bars = etf_5min_day.get(code, {}).get(day, [])
-            if not bars:
-                continue
-            prev_close = float(bars[0]["open"])
-            partial = price_at_time(bars, SIGNAL_TIME)
-            if not partial or prev_close <= 0:
-                continue
-            gain = (partial - prev_close) / prev_close * 100
-            scores.append((gain, etf))
-
-        scores.sort(key=lambda x: x[0], reverse=True)
+        # 选股：用日K+5分K，与5分K回测完全一致
+        scores = rank_by_today_gain(etf_list, etf_daily, etf_5min_full, day, SIGNAL_TIME)
         if len(scores) < 2:
             continue
 
-        # 过滤 gain >= MIN_GAIN
         picked = None
         for gain, etf in scores:
             if gain >= MIN_GAIN:
@@ -174,20 +145,35 @@ def run_1min_backtest(etf_list, all_dates, eval_dates, fee_pct):
         if not sell_day:
             continue
 
-        # 买入价（1分K）
+        # 买入价：优先用1分K，回退5分K
         day_1min = load_cached_1min(code, day)
-        buy_price = price_at_time(day_1min, BUY_TIME) if day_1min else price_at_time(load_cached_5min(code, day), BUY_TIME)
+        day_5min = etf_5min_full.get(code, {}).get(day, [])
+        buy_price = price_at_time(day_1min, BUY_TIME) if day_1min else None
+        if not buy_price or buy_price <= 0:
+            buy_price = price_at_time(day_5min, BUY_TIME)
         if not buy_price or buy_price <= 0:
             continue
 
-        # 卖出（1分K TRIX）
+        # 卖出：1分K TRIX
         sell_1min = load_cached_1min(code, sell_day)
         if not sell_1min:
-            continue
+            # 无1分K回退5分K
+            from backtest_t0_new import simulate_trix_timed
+            sell_5min = etf_5min_full.get(code, {}).get(sell_day, [])
+            if not sell_5min:
+                continue
+            ret_pct, sell_reason, detail = simulate_trix_timed(
+                buy_price, day_5min, sell_5min,
+            )
+        else:
+            # 1分K TRIX（warmup用前日1分K）
+            prev_day_idx = all_dates.index(day) - 1 if day in all_dates else -1
+            prev_day = all_dates[prev_day_idx] if prev_day_idx >= 0 else None
+            prev_1min = load_cached_1min(code, prev_day) if prev_day else []
+            ret_pct, sell_reason, detail = simulate_trix_1min(
+                buy_price, prev_1min + day_1min, sell_1min,
+            )
 
-        ret_pct, sell_reason, detail = simulate_trix_1min(
-            buy_price, day_1min, sell_1min,
-        )
         sell_price = detail.get("sell_price", buy_price)
         ret = apply_net_return(buy_price, sell_price, fee_pct)
         trades.append({
@@ -197,6 +183,7 @@ def run_1min_backtest(etf_list, all_dates, eval_dates, fee_pct):
             "buy_price": round(buy_price, 4),
             "sell_price": round(sell_price, 4),
             "sell_reason": sell_reason,
+            "sell_source": "1min" if sell_1min else "5min_fallback",
             "return_pct": ret,
         })
 
