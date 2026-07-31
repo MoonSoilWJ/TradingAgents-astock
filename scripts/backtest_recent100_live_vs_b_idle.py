@@ -286,6 +286,7 @@ def main() -> None:
         "monthly": {"live": m_live, "b_core": m_b, "idle": m_idle, "shadow": m_sh},
         "live_trades": live_trades,
         "b_trades": b_trades,
+        "b_confirm_trix_trades": b_cf_trix_trades,
         "idle_trades": idle_trades,
     }
     out_path = OUT.with_name(f"recent{N}_live_vs_b_idle.json")
