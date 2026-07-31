@@ -99,11 +99,11 @@ def _parse_json_summary(path: Path, data: dict) -> tuple[str, dict[str, Any]]:
 
 def _match_strategy(name: str) -> str | None:
     if name.startswith("t0_idle_walk_forward_"):
-        return "t0_idle_shadow"
+        return "t0_b_idle_shadow"
     if fnmatch.fnmatch(name, "backtest_t0_idle_*.json") or fnmatch.fnmatch(
         name, "backtest_t0_freq_compare_*.json"
     ):
-        return "t0_idle_shadow"
+        return "t0_b_idle_shadow"
     for strat in load_registry().get("strategies", []):
         for pattern in strat.get("artifact_patterns") or []:
             if fnmatch.fnmatch(name, pattern):

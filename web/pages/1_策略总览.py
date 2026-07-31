@@ -15,7 +15,6 @@ from web.strategy.artifact_scanner import min_cache_stats, scan_artifacts
 from web.strategy.paths import STATUS_LABELS, STATUS_ORDER
 from web.strategy.registry_loader import count_by_status, get_strategies, load_registry
 from web.strategy.state_reader import rotation_state, t0_state, walk_forward_state
-from web.strategy.idle_shadow_table import render_idle_shadow_card
 from web.strategy.t0_journal import load_t0_trades, trades_to_table_rows
 from web.strategy.t0_table import TABLE_COLUMNS
 from web.strategy.theme import fmt_dt, inject_css, render_strategy_card
@@ -66,8 +65,12 @@ else:
     st.info("暂无 T+0 成交记录")
 
 st.divider()
-st.subheader("🌤️ T+0 闲置双段 Shadow")
-render_idle_shadow_card(days=14, compact=True)
+st.subheader("🆕 优化策略 B+idle (实盘候选 · SHADOW)")
+st.success("实盘优化后 = **B+idle**: 全市场 Top1 选股(≥3%, 不 regime 过滤) + 闲置资金隔夜动量腿(idle)。"
+           "与实盘平行运行、仅记录不下单。策略说明书 / 执行步骤 / 验证结论见侧栏 **『B+idle策略』页**。"
+           "本页仅展示影子净值概览。")
+from web.strategy.b_idle_shadow_table import render_b_idle_overview
+render_b_idle_overview(days=30)
 
 st.divider()
 

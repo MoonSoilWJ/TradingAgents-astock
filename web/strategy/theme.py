@@ -30,6 +30,49 @@ def inject_css() -> None:
             margin-right: 0.5rem;
         }
         .rule-kv { color: #aaa; font-size: 0.85rem; margin: 0.15rem 0; }
+
+        /* ── B+idle 专属美化 ── */
+        .section-title {
+            font-size: 1.15rem; font-weight: 800; color: #f5f1eb;
+            margin: 1.4rem 0 0.7rem; padding-left: 0.6rem;
+            border-left: 4px solid #ff5a1f; line-height: 1.2;
+        }
+        .banner {
+            border: 1px solid #2a2a3a; border-radius: 12px;
+            padding: 0.9rem 1.1rem; background: linear-gradient(135deg,#171721,#101018);
+            margin-bottom: 1rem;
+        }
+        .step-card {
+            border: 1px solid #23232f; border-radius: 12px;
+            padding: 0.7rem 0.95rem; background: #131319; margin-bottom: 0.6rem;
+        }
+        .step-time {
+            display:inline-block; font-weight:800; color:#0a0a0a;
+            background:#ff5a1f; border-radius:6px; padding:0.1rem 0.55rem;
+            font-size:0.82rem; margin-right:0.5rem;
+        }
+        .step-title { font-weight:700; color:#f5f1eb; font-size:0.95rem; }
+        .step-body { color:#b9bccb; font-size:0.85rem; line-height:1.5; margin-top:0.25rem; }
+        .verdict {
+            border-radius: 10px; padding: 0.7rem 0.95rem; margin: 0.6rem 0;
+            font-size: 0.88rem; line-height: 1.55;
+        }
+        .verdict-ok { background:#0f2018; border:1px solid #1f6b46; color:#9be8c0; }
+        .verdict-warn { background:#211a0f; border:1px solid #6b541f; color:#e8d29b; }
+        .kpi-grid { display:flex; flex-wrap:wrap; gap:0.6rem; margin:0.5rem 0; }
+        .kpi {
+            flex:1 1 120px; border:1px solid #23232f; border-radius:10px;
+            padding:0.6rem 0.8rem; background:#131319;
+        }
+        .kpi .k { color:#8b90a3; font-size:0.72rem; }
+        .kpi .v { color:#ff5a1f; font-size:1.25rem; font-weight:800; }
+        .kpi .d { color:#8b90a3; font-size:0.72rem; }
+        .pill {
+            display:inline-block; padding:0.1rem 0.5rem; border-radius:999px;
+            font-size:0.72rem; font-weight:600; margin-left:0.4rem;
+        }
+        .pill-in { background:#0f2018; color:#9be8c0; border:1px solid #1f6b46; }
+        .pill-out { background:#211a0f; color:#e8d29b; border:1px solid #6b541f; }
         </style>
         """,
         unsafe_allow_html=True,

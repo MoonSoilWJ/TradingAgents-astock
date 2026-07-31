@@ -189,13 +189,17 @@ def sell_trix_mode(
     buy_price: float,
     fee_pct: float,
 ) -> tuple[float, str] | None:
-    """窗口内 5 分 TRIX 死叉卖（暖场用 11:05 前 bars）。"""
+    """窗口内 5 分 TRIX 死叉卖（暖场用 11:05 前 bars）。
+
+    注意: window = bars_until(...) 已包含买入前的全部 bar, 不可再 prepend `pre`,
+    否则上午 bar 被重复拼接, 循环会从第二份上午副本起点扫描, 命中买入前的虚假死叉
+    (例如 10:10 的 0.45 高点), 造出错误的高收益。all_b 直接等于 window。
+    """
     window = bars_until(day_bars, sell_cutoff)
     if not window:
         return None
     bm = time_to_min(buy_time)
-    pre = [b for b in day_bars if bar_time_min(b) < bm]
-    all_b = pre + window
+    all_b = window
     min_warmup = TRIX_PERIOD * 3 + 5
     if len(all_b) < min_warmup:
         return sell_time_mode(day_bars, buy_time, sell_cutoff, buy_price, fee_pct)
@@ -203,7 +207,7 @@ def sell_trix_mode(
     closes = [float(b["close"]) for b in all_b]
     trix = calc_trix(closes, TRIX_PERIOD)
     sig = calc_trix_signal(trix, 3)
-    warm = len(pre)
+    warm = sum(1 for b in all_b if bar_time_min(b) < bm)
     start = max(warm, min_warmup)
     sell_min = time_to_min(TRIX_MIN_SELL)
 

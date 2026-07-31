@@ -61,52 +61,36 @@
       "log": "walk_forward.log"
     },
     {
-      "id": "idle_leg2_pick",
-      "name": "闲置 Shadow 段2选股",
-      "cron": "5 11 * * 1-5",
-      "script": "scripts/t0_idle_shadow.py --leg2-pick",
-      "strategy_id": "t0_idle_shadow",
-      "log": "t0_idle_shadow.log"
+      "id": "bidle_signal",
+      "name": "B+idle 核心信号",
+      "cron": "45 14 * * 1-5",
+      "script": "scripts/t0_b_idle_shadow.py --signal",
+      "strategy_id": "t0_b_idle_shadow",
+      "log": "b_idle_shadow.log"
     },
     {
-      "id": "idle_leg1_pick",
-      "name": "闲置 Shadow 段1选股",
-      "cron": "25 11 * * 1-5",
-      "script": "scripts/t0_idle_shadow.py --leg1-pick",
-      "strategy_id": "t0_idle_shadow",
-      "log": "t0_idle_shadow.log"
+      "id": "bidle_idle_buy",
+      "name": "B+idle idle动量腿买入",
+      "cron": "50 14 * * 1-5",
+      "script": "scripts/t0_b_idle_shadow.py --idle-buy",
+      "strategy_id": "t0_b_idle_shadow",
+      "log": "b_idle_shadow.log"
     },
     {
-      "id": "idle_leg1_buy",
-      "name": "闲置 Shadow 段1买入",
-      "cron": "5 13 * * 1-5",
-      "script": "scripts/t0_idle_shadow.py --leg1-buy",
-      "strategy_id": "t0_idle_shadow",
-      "log": "t0_idle_shadow.log"
+      "id": "bidle_sell_watch",
+      "name": "B+idle 核心 hybrid 卖出监控",
+      "cron": "40 09 * * 1-5",
+      "script": "scripts/t0_b_idle_shadow.py --sell-loop",
+      "strategy_id": "t0_b_idle_shadow",
+      "log": "b_idle_shadow.log"
     },
     {
-      "id": "idle_leg1_sell",
-      "name": "闲置 Shadow 段1卖出",
-      "cron": "30 13 * * 1-5",
-      "script": "scripts/t0_idle_shadow.py --leg1-sell",
-      "strategy_id": "t0_idle_shadow",
-      "log": "t0_idle_shadow.log"
-    },
-    {
-      "id": "idle_leg2_buy",
-      "name": "闲置 Shadow 段2买入",
-      "cron": "5 14 * * 1-5",
-      "script": "scripts/t0_idle_shadow.py --leg2-buy",
-      "strategy_id": "t0_idle_shadow",
-      "log": "t0_idle_shadow.log"
-    },
-    {
-      "id": "idle_leg2_sell",
-      "name": "闲置 Shadow 段2卖出",
-      "cron": "15 14 * * 1-5",
-      "script": "scripts/t0_idle_shadow.py --leg2-sell",
-      "strategy_id": "t0_idle_shadow",
-      "log": "t0_idle_shadow.log"
+      "id": "bidle_idle_sell",
+      "name": "B+idle idle次日固定卖",
+      "cron": "49 14 * * 1-5",
+      "script": "scripts/t0_b_idle_shadow.py --sell-check --idle-sell",
+      "strategy_id": "t0_b_idle_shadow",
+      "log": "b_idle_shadow.log"
     }
   ]
 }

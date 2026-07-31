@@ -14,8 +14,9 @@ if str(_PROJECT_ROOT) not in sys.path:
 from web.strategy.artifact_scanner import log_files, min_cache_stats
 from web.strategy.registry_loader import get_strategy, load_cron_manifest
 from web.strategy.state_reader import rotation_state, t0_state, walk_forward_state
-from web.strategy.idle_shadow_table import render_idle_shadow_card
 from web.strategy.t0_table import render_t0_trade_table
+from web.strategy.b_idle_shadow_table import render_b_idle_overview, render_b_idle_vs_live
+from web.strategy.t0_journal import load_t0_trades, trades_to_table_rows
 from web.strategy.theme import fmt_dt, inject_css
 
 st.set_page_config(page_title="实盘监控", page_icon="📡", layout="wide")
@@ -25,12 +26,16 @@ st.title("📡 实盘监控")
 st.caption("T+0 交易流水 · 定时任务 · 健康状态")
 
 t0 = t0_state()
-st.subheader("T+0 交易流水")
+st.subheader("T+0 交易流水 (实盘)")
 render_t0_trade_table(state_data=t0.get("data"), days=60)
 
 st.divider()
 
-render_idle_shadow_card(days=30)
+# ── B+idle SHADOW (新策略影子, 不替代实盘) ──
+render_b_idle_overview(days=60)
+live = load_t0_trades(days=60)["closed"]
+live_rows = trades_to_table_rows(live)
+render_b_idle_vs_live(live_rows, days=60)
 
 st.divider()
 
