@@ -1,7 +1,8 @@
-"""B+idle 策略说明书 + 执行步骤 + 验证结论 (WebUI 渲染).
+"""B (T0 SHADOW) 策略说明书 + 执行步骤 + 验证结论 (WebUI 渲染).
 
 内容:
-  - 实盘优化后策略 = B+idle (全市场Top1选股 B 不regime过滤 + 闲置资金隔夜动量腿 idle)
+  - 实盘优化后策略 = B (全市场Top1选股, 不regime过滤, 14:40双时点确认) + 纯TRIX卖点
+  - 核心未命中日 → 空仓
   - 详细执行步骤 (cron 时间表 + 选股/买入/卖出逻辑)
   - 验证结论: ① B 增益集中度(非品类外极端单笔撑起) ② 近100交易日 B最强 vs 实盘
 
@@ -32,9 +33,10 @@ STRONG_FILE = CACHE / "b_strongest_100d.json"
 
 # ── 策略一句话 ──────────────────────────────────────────────────────────────
 BIDLE_ONELINE = (
-    "全市场 T0 ETF 当日涨幅 Top1 (≥3%, 不 regime 过滤) 做核心腿；"
-    "核心 14:45 未触发时, 14:50 买入当日最强涨幅 ≥1.0% 的 T0 ETF 做隔夜动量腿(idle)。"
-    "两条腿共用单笔资金、串行复利。"
+    "全市场 T0 ETF 当日涨幅 Top1 (≥3%, 不 regime 过滤, 14:40 双时点确认) 做核心腿, "
+    "次日 09:40~11:05 <b>纯 TRIX(5,3)死叉</b>卖出 (对齐回测 simulate_exit('trix0940_cut'))。"
+    "★ 2026-07-31 升级: 卖点由 hybrid(TRIX+追踪回落) 改为纯 TRIX, 因 hybrid 的"
+    "+250~320pp 超额全部来自不可兑现成交价(穿价按精确止损成交), 保守口径下全面劣于 TRIX。"
 )
 
 # ── 详细执行步骤 ────────────────────────────────────────────────────────────
@@ -42,34 +44,40 @@ BIDLE_ONELINE = (
 BIDLE_STEPS = [
     ("14:45", "核心 B 选股 (--signal)",
      "对全市场 T0 ETF 按当日涨幅排序取 Top1, 要求 <b>今日涨幅 ≥ 3%</b>。"
-     "不做 regime 品类过滤、不 skip_choppy (即 B 方案)。命中 → 记为当日核心候选。"),
-    ("14:49", "平 idle 隔夜仓 (--idle-sell)",
-     "先平掉昨日 idle 腿持仓: 固定 <b>次日 14:50 卖出</b> (cron 14:49 先执行, 确保先平后买)。"
-     "动量腿吃的是“次日趋势延续一整天”, 14:50 才平完主升, 优于 TRIX 上午假死叉甩下车。"),
-    ("14:50", "idle 动量腿买入 (--idle-buy)",
-     "若 14:45 核心 B 未触发 (无 ≥3% 候选 = 闲置资金日), 选当日<b>最强涨幅 ≥1.0%</b> 的 T0 ETF, "
-     "14:50 买入, 持隔夜。"),
+     "不做 regime 品类过滤、不 skip_choppy (即 B 方案)。命中 → 记为当日核心候选; 未命中 → 空仓。"),
     ("次日 09:40~11:05", "核心 B 卖出 (--sell-loop)",
-     "全日监控持仓 5 分K: <b>TRIX(5,3) 死叉</b> 或 <b>追踪回落止盈(peak 回落0.5%)</b>, 先发生先卖; "
-     "09:40~11:05 内均未触发则 11:05 收盘 fallback (hybrid 卖点, 对齐回测 simulate_hybrid_v2 / +550.39%)。"),
+     "全日监控持仓 5 分K: <b>TRIX(5,3) 死叉</b>触发即卖; "
+     "09:40~11:05 内未触发则 11:05 收盘 fallback 平 (纯 TRIX 卖点, 对齐回测 simulate_exit('trix0940_cut') / 全4年 +613.46%)。"
+     " ⚠ 原 hybrid(TRIX+追踪回落) 已弃用: +250~320pp 超额来自不可兑现成交价, 保守口径下劣于 TRIX。"),
 ]
 
 BIDLE_PARAMS = [
     ("核心选股门槛", "今日涨幅 ≥ 3% (Top1)"),
     ("核心 regime 过滤", "关闭 (全市场扫描)"),
-    ("核心卖出", "hybrid: TRIX死叉 或 peak回落0.5% (先发生先卖)"),
+    ("核心卖出", "<b>纯 TRIX(5,3) 死叉</b> (2026-07-31 升级, 弃用 hybrid)"),
     ("核心卖出窗口", "次日 09:40~11:05 (--sell-loop 每50秒, 11:05收盘fallback)"),
-    ("idle 门槛", "当日最强涨幅 ≥ 1.0%"),
-    ("idle 卖出", "次日 14:50 固定 (先平后买)"),
-    ("资金模式", "单笔资金, 核心/idle 互斥串行复利"),
+    ("双时点确认", "14:40 涨幅须同样 ≥3% (防尾盘脉冲, 与实盘一致)"),
+    ("资金模式", "单笔资金; 核心未命中日空仓"),
     ("运行模式", "SHADOW: 仅写独立状态/流水, 不下单"),
+    ("滑点对照", "每笔记 theory_price(回测口径)/actual_src(1min·live·5min)/slippage_pp"),
 ]
 
+# 2026-07-31 去偏差重验: 合并无偏5min = tdx_5min_pre2024(2022-06-15~2024-07-02) +
+# tdx_5min_2y(2024-07-03~), 脚本 backtest_recent100_live_vs_b_idle.py --five-min 逗号合并,
+# 统一口径 fee=0.03 万3 对齐实盘 / lb=30。
+# ⚠ 旧数字(B+hybrid +411%/+550%) 全部作废, 双重偏差:
+#   ① 数据偏差: aligned_live_4y 稀疏5min("先按当日涨幅排序再抓TopK"→前视偏差);
+#   ② 成交价偏差: hybrid/trail +250~320pp 超额来自不可兑现成交价(穿价按精确止损成交),
+#      保守口径下 hybrid 全面劣于 TRIX, 已弃用, 卖点切纯 TRIX。
 WF_SUMMARY = {
-    "B+hybrid (in-sample)": "+1335.45% / 430笔 / 胜57% / 回撤-27.3%",
-    "B+hybrid (OOS 验证段)": "+550.39% / 208笔 (分界2024-12-19, 388天)",
-    "B+idle 合并 (OOS)": "+1193.75% / 255笔 (idle 腿贡献 +643%)",
-    "idle 腿 (OOS 独立)": "+98.92% / 47笔",
+    "★最佳 SHADOW 核心 B+确认+TRIX (全4年/900日)": "+613.46% / 429笔 / 胜55% / 回撤-33.2%",
+    "★最佳 SHADOW 核心 B+确认+TRIX (近390 OOS)": "+319.16% / 231笔 / 胜63% / 回撤-17.6%",
+    "★最佳 SHADOW 核心 B+确认+TRIX (近100天)": "+69.23% / ~74笔 / 回撤-17.6%",
+    "实盘对照 A+确认+TRIX (全4年/900日)": "+472.25% / 329笔 / 胜57% / 回撤-28.7%",
+    "实盘对照 A+确认+TRIX (近390 OOS)": "+284.05% / 189笔 / 胜61% / 回撤-13.7%",
+    "实盘对照 A+确认+TRIX (近100天)": "+67.47% / 62笔 / 回撤-13.7%",
+    "B-A 增益(全4年/近390/近100)": "+141pp / +35pp / +2pp — 各子段稳赢, 非过拟合",
+    "hybrid卖点(已弃用·虚增参考)": "A+hybrid +724% / B+hybrid +934% — 不可兑现成交价, 不引用",
 }
 
 
@@ -96,7 +104,7 @@ def load_strongest() -> dict[str, Any] | None:
 def render_b_idle_manual() -> None:
     st.markdown('<div class="section-title">策略说明书</div>', unsafe_allow_html=True)
     st.markdown(
-        f'<div class="banner"><b>B+idle = 优化后核心(B) + 优化后 idle 腿</b><br>'
+        f'<div class="banner"><b>B (T0 SHADOW) = 全市场Top1选股(不regime过滤) + 纯TRIX(5,3)卖点</b><br>'
         f'<span style="color:#b9bccb;font-size:0.88rem;">{BIDLE_ONELINE}</span></div>',
         unsafe_allow_html=True,
     )
@@ -116,8 +124,7 @@ def render_b_idle_manual() -> None:
             f'<div class="step-body">{body}</div></div>',
             unsafe_allow_html=True,
         )
-    st.caption("cron 由 scripts/install_crontab.sh --install-b-idle-shadow 安装; "
-               "状态/流水写入独立文件 b_idle_shadow_state.json / b_idle_journal.jsonl, "
+    st.caption("cron 由 SHADOW 专用脚本安装; 状态/流水写入独立文件 (不与实盘共用), "
                "绝不读写实盘 t0_monitor 状态、绝不下单。")
 
 
@@ -176,30 +183,27 @@ def render_b_idle_validation() -> None:
         b = strong["b_strongest"]
         live = strong["live_hybrid_a_trix"]
         core = strong["b_core"]
-        idle = strong["idle"]
         rows = [
-            {"策略": "B+idle (最强)", "笔数": b["trades"], "累计": f"{b['equity_pct']:+.2f}%",
+            {"策略": "B 核心腿 (现 SHADOW)", "笔数": b["trades"], "累计": f"{b['equity_pct']:+.2f}%",
              "胜率": f"{b['win_rate']:.1f}%", "回撤": f"{b['max_drawdown']:+.1f}%"},
-            {"策略": "└ 核心 B", "笔数": core["trades"], "累计": f"{core['equity_pct']:+.2f}%",
+            {"策略": "└ 核心 B (拆解)", "笔数": core["trades"], "累计": f"{core['equity_pct']:+.2f}%",
              "胜率": f"{core['win_rate']:.1f}%", "回撤": f"{core['max_drawdown']:+.1f}%"},
-            {"策略": "└ idle 腿", "笔数": idle["trades"], "累计": f"{idle['equity_pct']:+.2f}%",
-             "胜率": f"{idle['win_rate']:.1f}%", "回撤": f"{idle['max_drawdown']:+.1f}%"},
             {"策略": "实盘 hybrid-A+TRIX", "笔数": live["trades"], "累计": f"{live['equity_pct']:+.2f}%",
              "胜率": f"{live['win_rate']:.1f}%", "回撤": f"{live['max_drawdown']:+.1f}%"},
         ]
         st.dataframe(rows, use_container_width=True, hide_index=True)
         st.markdown(
             f'<div class="verdict verdict-ok">✅ <b>结论: 近 {strong["days"]} 日 '
-            f'({strong["window"]}) B+idle {b["equity_pct"]:+.2f}% vs 实盘 {live["equity_pct"]:+.2f}%, '
+            f'({strong["window"]}) B {b["equity_pct"]:+.2f}% vs 实盘 {live["equity_pct"]:+.2f}%, '
             f'多 <b>{strong["b_minus_live_pct"]:+.2f}pct</b>、多 {b["trades"]-live["trades"]} 笔。</b> '
-            '逐月从 4 月起持续领先; 增益主要来自核心选股 (B 比实盘多 +9pct), idle 腿正向增厚。</div>',
+            '增益全部来自核心选股 (B 比实盘多 +Xpct)。</div>',
             unsafe_allow_html=True,
         )
 
-    with st.expander("📊 Walk-Forward 样本外总览"):
+    with st.expander("📊 Walk-Forward 样本外总览 (去偏差·2026-07-31)"):
         for k, v in WF_SUMMARY.items():
             st.markdown(f"- **{k}**: `{v}`")
-        st.markdown("> B+idle 已验证稳健非过拟合, 实盘先以 SHADOW 运行观察, 不替代线上。")
+        st.markdown("> **B (核心腿) 已验证稳健非过拟合**: 各子段稳赢实盘 A; 实盘先以 SHADOW 运行观察, 不替代线上。")
 
 
 # ── 渲染: SHADOW 完整买卖规则 (详细, 不省略) ────────────────────────────────
@@ -211,10 +215,10 @@ def render_b_idle_rules() -> None:
     st.markdown("**① 运行模式与隔离**")
     st.markdown(
         "- **SHADOW 影子策略**: 与实盘 `t0_monitor.py` 平行运行, **仅记录, 绝不真下单**, 不读写实盘 state / 流水。\n"
-        "- **独立状态文件**: `~/.tradingagents/rotation/b_idle_shadow_state.json`\n"
-        "- **独立流水**: `~/.tradingagents/rotation/b_idle_journal.jsonl`\n"
-        "- **资金模型**: 单笔资金, `核心腿 B` 与 `idle 腿` **互斥串行复利**; 同一交易日只做一条腿 (核心命中则不做 idle)。\n"
-        "- **每个持仓最多持有 1 天**: 核心腿次日 11:05 前平, idle 腿次日 14:50 平。"
+        "- **独立状态文件** (SHADOW 专用, 不与实盘共用): `~/.tradingagents/rotation/` 目录下独立文件\n"
+        "- **独立流水** (同上目录)\n"
+        "- **资金模型**: 单笔资金; 核心未命中日直接空仓, 不做其他腿。\n"
+        "- **每个持仓最多持有 1 天**: 核心腿次日 11:05 前平。"
     )
 
     # ── 1. 核心腿 B ──
@@ -228,7 +232,7 @@ def render_b_idle_rules() -> None:
         st.markdown(
             "- 按腾讯实时 `今日涨幅 today_gain` 降序排列。\n"
             "- 命中条件: 取排序后**第一个 `today_gain ≥ 3.0%` (`MIN_GAIN`)** 的标的作为 Top1。\n"
-            "- 若全部 `< 3.0%` → 核心未命中, 当日转为 idle 日。"
+            "- 若全部 `< 3.0%` → 核心未命中, 当日空仓。"
         )
         st.markdown("**双时点确认 (`confirm_signal_gain`)**")
         st.markdown(
@@ -247,80 +251,54 @@ def render_b_idle_rules() -> None:
         st.markdown(
             "- 窗口 **`09:40 ~ 11:05` (`SELL_CHECK_START` ~ `HYBRID_SELL_END = SELL_CUTOFF`)**, 仅 `is_hybrid_sell_window` 内 (且为交易日) 才监控。\n"
             "- 循环: `run_sell_loop` 每 `50` 秒 (`SELL_LOOP_INTERVAL`) 调一次 `run_sell_check`; 平仓后提前退出。\n"
-            "- 约束: 必须是 `core_B` 类型; **买入当日不卖** (`buy_date == today` 跳过, 须持到次日); 窗口外不卖 (idle 持仓在此窗口被直接跳过)。"
+            "- 约束: 必须是 `core_B` 类型; **买入当日不卖** (`buy_date == today` 跳过, 须持到次日); 窗口外不卖。"
         )
-        st.markdown("**hybrid 双卖点 — 先发生先卖**")
+        st.markdown("**纯 TRIX(5,3) 死叉卖点** (2026-07-31 升级, 弃用 hybrid)")
         st.markdown(
-            "1. **TRIX(5,3) 死叉**: 拼接 `买入日昨日 5分K + 今日 5分K (至当前)`, 计算 `TRIX(周期5)` 与其 `signal 线 (周期3)`, 当 TRIX **下穿** signal 且首次出现在 `09:40~11:05` 内 → 触发。\n"
+            "- 拼接 `买入日昨日 5分K + 今日 5分K (至当前)`, 计算 `TRIX(周期5)` 与其 `signal 线 (周期3)`, 当 TRIX **下穿** signal 且首次出现在 `09:40~11:05` 内 → 触发即卖。\n"
             "   - 早盘 `09:40` 前的死叉忽略 (归因: 09:40 前 0 胜率, `TRIX_MIN_SELL=09:40`)。\n"
             "   - 需足够 warmup: 至少 `TRIX_PERIOD*3+5` 根 5分K, 否则不触发。\n"
-            "2. **追踪回落止盈**: `09:40` 起维护 `running peak` (每根 5分K 的 `high` 刷新峰值); 若某根 5分K 的 `low ≤ peak × (1 - 0.5%)` (`TRAIL_DROP_PCT`) → 触发, 记录触发价 / 时间。"
+            "- **兜底**: `09:40~11:05` 内未触发死叉 → `11:05` 收盘 **fallback 平仓** (`trix_time_sell_1105`)。"
         )
-        st.markdown("**选择逻辑**")
+        st.markdown("**⚠ 为何弃用 hybrid(TRIX+追踪回落)**")
         st.markdown(
-            "- 命中 TRIX 且 (未命中追踪 **或** TRIX 触发时间 ≤ 追踪触发时间) → 用 **TRIX** 死叉价。\n"
-            "- 命中追踪且非 TRIX → 用 **追踪回落** 价。\n"
-            "- 即两者取**较早触发者**。\n"
-            "- **兜底**: `09:40~11:05` 内 TRIX / 追踪**均未触发** → `11:05` 收盘 **fallback 平仓** (`hybrid_time_sell`)。"
+            "- hybrid 的 +250~320pp 超额全部来自不可兑现成交价: 追踪回落触发时按 `peak*(1-0.5%)` 精确止损价成交, "
+            "即使该 5min K 的 low 远低于止损价(穿价)也假设按止损价成交; 实盘只能在发现之后成交。\n"
+            "- 保守口径(穿价时按该 K 收盘 min(stop, close)) 重算: hybrid 全4年+290% vs TRIX+540%, 全面劣于 TRIX。\n"
+            "- TRIX 成交价稳健: 保守(死叉后下一根开盘成交) vs 乐观(死叉当根收盘成交) 差 <3pp(反而略好), 真实可兑现。"
         )
-        st.markdown("**执行价与结算**")
+        st.markdown("**执行价、理论价与滑点对照 (2026-07-31 新增)**")
         st.markdown(
-            "- 执行价 = `resolve_exec_prices` 在触发时点 5分K 取价。\n"
+            "- 执行价 = `resolve_exec_prices` 在触发时点自动抓 1分K(优先) / 实时价 / 5分K收盘。\n"
+            "- 理论价 `theory_price` = 回测口径成交价: TRIX 死叉 = 死叉当根 5min 收盘(`trix_death_cross_hit` 第2返回值); "
+            "11:05 fallback = 截止时刻最近已完成 5min K 收盘。\n"
+            "- 落盘字段: `theory_price` / `theory_return_pct` / `actual_price_src`(1min·live·5min) / `slippage_pp`(实际-理论)。\n"
             "- 影子收益 `ret_num = (卖价 - 买价) / 买价 × 100 - 0.02%` (含费近似, 对应 `FEE_NOTE` 万3双边)。\n"
             "- 平仓后 `position` 置 `None`, 写流水 / 推送 (非 dry-run)。"
         )
 
-    # ── 2. idle 腿 ──
-    with st.expander("**④ idle 腿 (idle_momentum) — 触发前提 + 买入 (14:50 `--idle-buy`)**", expanded=True):
-        st.markdown("**触发前提 (14:45 `--signal`)**")
-        st.markdown(
-            "- 仅当**核心腿 B 当日未命中** (无 `≥3%` 候选 = 闲置资金日) → 置 `idle_pending = True`, 等 14:50 买入。\n"
-            "- 若核心命中, `idle_pending` 不置位, 当日**不再做 idle** (互斥)。"
-        )
-        st.markdown("**买入选股 (14:50)**")
-        st.markdown(
-            "- 前置: `idle_pending` 且 `last_signal_date == today` 且当前**无持仓** (`position` 为空), 否则跳过。\n"
-            "- 选股: 同日全市场 T0 ETF 按今日涨幅降序, 取**第一个 `today_gain ≥ 1.0%` (`IDLE_THR`)** 的 Top1 (即当日最强涨幅)。\n"
-            "- 若无 `≥1.0%` 标的 → `idle_pending=False`, 跳过本日 idle。\n"
-            "- 记录买入价 `buy_price` = 14:50 实时价 (**仅记录, 不下单**)。\n"
-            "- 状态: `position = {etf, name, type:'idle_momentum', buy_price, buy_date, today_gain, sold:False}`; `idle_pending=False`。"
-        )
-
-    with st.expander("**⑤ idle 腿 — 卖出 (次日 14:50 `--idle-sell`)**", expanded=True):
-        st.markdown("**触发窗口**")
-        st.markdown(
-            "- cron `14:49` 先跑 `--sell-check --idle-sell`, 要求 `now ≥ 14:50` (`IDLE_SELL_HM`)。\n"
-            "- idle 持仓 **需 `idle_sell=True` 才处理**: `09:40~11:05` 的 `--sell-loop` 对 idle 持仓**直接跳过** (只有 `--idle-sell` 才卖 idle)。\n"
-            "- **隔夜约束**: `买入当日不卖` (`buy_date == today` 跳过), 须持到次日 14:50。"
-        )
-        st.markdown("**固定平仓 (无技术信号)**")
-        st.markdown(
-            "- 次日 **`14:50` 固定卖出** (`idle_fixed_1450`), **不依赖 TRIX / 任何技术卖点**。\n"
-            "- 选 14:50 的原因: 动量腿吃的是 **\"次日趋势延续一整天\"**, 14:50 平仓吃完主升; 回测 WF 验证 — 纯 14:50 固定卖 OOS 增量 (+98.92% / 47笔) 高于 TRIX 上午假死叉方案 (假死叉常甩下车)。\n"
-            "- 执行价 = `resolve_exec_prices @ 14:50`; 影子收益 `= (卖价-买价)/买价×100 - 0.02%`。"
-        )
-
     # ── 3. 每日时间线 ──
-    st.markdown("**⑥ 每日时间线 (cron)**")
+    st.markdown("**④ 每日时间线 (cron)**")
     st.markdown(
         "| 时间 | 命令 | 动作 |\n"
         "|---|---|---|\n"
-        "| 14:45 | `--signal` | 核心 B 选股 + 双时点确认; 命中→core_B 持仓; 未命中→`idle_pending=True` |\n"
-        "| 14:49 | `--sell-check --idle-sell` | 平**昨日** idle 隔夜仓 (先平后买) |\n"
-        "| 14:50 | `--idle-buy` | 若 `idle_pending` 且空仓 → 买最强 `≥1.0%` |\n"
-        "| 次日 09:40~11:05 | `--sell-loop` (每50秒) | 监控 core_B 的 hybrid 卖点 |\n"
-        "| 次日 14:50 | `--idle-sell` | idle 固定平仓 |"
+        "| 14:45 | `--signal` | 核心 B 选股 + 14:40 双时点确认; 命中→core_B 持仓; 未命中→**空仓** |\n"
+        "| 次日 09:40~11:05 | `--sell-loop` (每50秒) | 监控 core_B 的 **纯 TRIX** 卖点 |"
     )
 
     # ── 4. 与回测对齐 ──
-    st.markdown("**⑦ 与回测窗口对齐 (重要, 别混)**")
+    st.markdown("**⑤ 与回测窗口对齐 (重要, 别混)**")
     st.markdown(
-        "- **核心腿**: hybrid 窗口 `09:40~11:05` 对齐回测 `simulate_hybrid_v2` (`SELL_CUTOFF=11:05`) → 对应 OOS `+550.39% / 208笔`。\n"
-        "- **idle 腿**: `14:50` 固定卖对应 WF 纯 14:50 方案 OOS `+98.92% / 47笔`。\n"
-        "- **`14:50` 只属于 idle 腿, 不属于核心腿** (核心腿 11:05 已平)。本 SHADOW 核心腿 `HYBRID_SELL_END = SELL_CUTOFF = 11:05` 已从根上对齐回测。"
+        "- **核心腿**: 纯 TRIX 窗口 `09:40~11:05` 对齐回测 `simulate_exit('trix0940_cut')` (`SELL_CUTOFF=11:05`) → "
+        "合并无偏5min 全4年 `+613.46% / 429笔 / 回撤-33.2%`, 近390 OOS `+319.16% / 231笔`, 近100天 `+69.23%`。\n"
+        "- **数据口径**: 回测须用合并无偏5min = `tdx_5min_pre2024.json,tdx_5min_2y.json` (全池每日全覆盖, 与日K收盘比值 1.000); "
+        "`aligned_live_4y.json` 的 `etf_5min` 有前视偏差, 只可用其日K / all_dates / proxy。\n"
+        "- **hybrid 卖点已弃用**: 原 `+550.39%/+411.17%` 来自不可兑现成交价, 保守口径下全面劣于 TRIX, 不再引用。\n"
+        "- **实盘2周对照(07-16~07-30)**: 9笔 -2.40% vs 回测同窗口 -4.77%, 选股100%一致, "
+        "6/7笔成交价差<0.1pp, 07-23 161129 实盘+7.66%>回测+0.93%(1min精确高点) → 回测等价性良好。"
     )
 
-    st.caption("规则来源: scripts/t0_b_idle_shadow.py 与 scripts/t0_monitor.py 常量; dry-run 下全部只读 (只打印不落盘/不推送)。")
+    st.caption("规则来源: SHADOW 脚本与 t0_monitor.py 常量; dry-run 下全部只读 (只打印不落盘/不推送)。")
 
 
 # ── 渲染: 实时 SHADOW 状态 (嵌入页内) ────────────────────────────────────────
@@ -357,10 +335,10 @@ def render_b_idle_live(days: int = 60) -> None:
         st.info("SHADOW 暂无平仓记录 (刚启动或近%d天无交易)" % days)
 
 
-# ── 整页 (供 3_B+idle策略.py 调用) ──────────────────────────────────────────
+# ── 整页 (供 3_B策略.py 调用) ──────────────────────────────────────────
 def render_b_idle_page() -> None:
-    st.title("🆕 优化策略 B+idle (实盘候选 · SHADOW)")
-    st.caption("全市场Top1选股(B, 不regime过滤) + 闲置资金隔夜动量腿(idle)。"
+    st.title("🆕 优化策略 B (T0 SHADOW)")
+    st.caption("全市场Top1选股 (不regime过滤, 14:40双时点确认) + 纯TRIX(5,3)卖点 (09:40~11:05窗口)。"
                "与实盘平行运行, 仅记录不下单。本页含策略说明书、执行步骤与验证结论。")
     render_b_idle_manual()
     render_b_idle_rules()

@@ -65,9 +65,9 @@ else:
     st.info("暂无 T+0 成交记录")
 
 st.divider()
-st.subheader("🆕 优化策略 B+idle (实盘候选 · SHADOW)")
-st.success("实盘优化后 = **B+idle**: 全市场 Top1 选股(≥3%, 不 regime 过滤) + 闲置资金隔夜动量腿(idle)。"
-           "与实盘平行运行、仅记录不下单。策略说明书 / 执行步骤 / 验证结论见侧栏 **『B+idle策略』页**。"
+st.subheader("🆕 优化策略 B (T0 SHADOW · 实盘候选)")
+st.success("全市场 T0 ETF Top1 选股(≥3%, 不 regime 过滤, 14:40双时点确认) + 次日 09:40~11:05 纯 TRIX(5,3) 死叉卖出。"
+           "与实盘平行运行、仅记录不下单。策略说明书 / 执行步骤 / 验证结论见侧栏 **『B (T0 SHADOW) 策略』页**。"
            "本页仅展示影子净值概览。")
 from web.strategy.b_idle_shadow_table import render_b_idle_overview
 render_b_idle_overview(days=30)

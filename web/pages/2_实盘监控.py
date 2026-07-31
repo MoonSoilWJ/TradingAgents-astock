@@ -31,7 +31,7 @@ render_t0_trade_table(state_data=t0.get("data"), days=60)
 
 st.divider()
 
-# ── B+idle SHADOW (新策略影子, 不替代实盘) ──
+# ── B (T0 SHADOW) 新策略影子, 不替代实盘 ──
 render_b_idle_overview(days=60)
 live = load_t0_trades(days=60)["closed"]
 live_rows = trades_to_table_rows(live)

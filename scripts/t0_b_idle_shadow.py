@@ -4,11 +4,15 @@
 与 t0_monitor.py 平行运行, 但:
   1. 核心腿选股用 B 方案: 扫全市场 T0 ETF (含跨境/商品, 不限 T+0 交割, 不限品类),
      取当日涨幅 ≥ MIN_GAIN(3%) 的 Top1, 不 regime 过滤, 不 skip_choppy。
-  2. 核心腿卖出用 hybrid: TRIX(5,3)死叉 或 追踪回落止盈(peak 回落0.5%), 先发生先卖;
-     09:40~11:05 内均未触发则 11:05 收盘 fallback 平仓 (对齐回测 simulate_hybrid_v2 窗口 09:40~11:05)。
-     idle 腿仍次日 14:50 固定平仓。
-  3. idle 腿: 核心 14:45 未触发时, 14:50 取当日最强涨幅 ≥ IDLE_THR(1.0%) 的 T0 ETF,
-     隔夜持有, 次日 14:50 固定平仓。
+  2. 核心腿卖出用 TRIX(5,3)死叉; 09:40~11:05 内未触发则 11:05 收盘 fallback 平仓
+     (对齐回测 simulate_exit("trix0940_cut") 窗口 09:40~11:05)。
+     【2026-07-31 升级】由 hybrid(TRIX+追踪回落止盈) 改为纯 TRIX: 去偏差+保守成交价重验后,
+     hybrid 的全部超额(+250~320pp)来自不可兑现成交价(穿价按精确止损价成交, 实盘只能在
+     发现之后成交), 保守口径下 hybrid 全面劣于 TRIX; 而 TRIX 成交价稳健(保守≈乐观),
+     且 B+确认+TRIX 在全4年/各子段均稳定优于 A+确认+TRIX(实盘), 故 SHADOW 切到 TRIX。
+  3. idle 腿【2026-07-31 起已停用, IDLE_ENABLED=False】: 原为核心 14:45 未触发时 14:50 买
+     当日最强 ≥IDLE_THR(1.0%) 隔夜持有、次日 14:50 平仓。改用无偏 5min 数据(tdx_5min_2y)
+     重算后为负期望(100天 -16.85% / 390天 -4.67%, 12 组参数全负), 故关闭, 只保留核心 B 腿。
   4. 绝不真下单, 不读写实盘状态/流水。独立写入:
        STATE_FILE = ~/.tradingagents/rotation/b_idle_shadow_state.json
        JOURNAL   = ~/.tradingagents/rotation/b_idle_journal.jsonl
@@ -17,7 +21,7 @@
 
 crontab (与实盘同窗口并行):
   45 14 * * 1-5  cd /path && python3 scripts/t0_b_idle_shadow.py --signal
-  40 9  * * 1-5  cd /path && python3 scripts/t0_b_idle_shadow.py --sell-loop      # 09:40~11:05 每50秒 hybrid 卖出监控(对齐回测)
+  40 9  * * 1-5  cd /path && python3 scripts/t0_b_idle_shadow.py --sell-loop      # 09:40~11:05 每50秒 TRIX 卖出监控(对齐回测)
   49 14 * * 1-5  cd /path && python3 scripts/t0_b_idle_shadow.py --sell-check --idle-sell  # idle 次日14:50固定卖
 """
 from __future__ import annotations
@@ -55,8 +59,16 @@ TRADE_JOURNAL = STATE_DIR / "b_idle_journal.jsonl"
 SIGNAL_TIME = "14:45"
 IDLE_BUY = "14:50"
 IDLE_SELL_HM = "14:50"
-IDLE_THR = 1.0          # idle 动量选股阈值(记忆 id 48239141: 1.0% OOS 最优)
-CONFIRM_TIME = "14:50"
+IDLE_THR = 1.0          # idle 动量选股阈值
+# 双时点确认沿用 t0_monitor.CONFIRM_TIME(14:40) —— confirm_signal_gain 内部读该常量
+CONFIRM_TIME = TM.CONFIRM_TIME
+
+# ── idle 隔夜动量腿: 已停用 (2026-07-31) ──
+# 原 +98.92% 结论建立在 aligned_live_4y 稀疏5min 上, 该缓存"先按当日收盘涨幅排序再抓TopK",
+# 存在数据可得性前视偏差。改用无偏 tdx_5min_2y 重算后:
+#   最近100天 -16.85%(21笔,胜29%) / 390天OOS -4.67%(135笔) ;
+#   敏感性 4阈值×3卖点 共12组在100天窗口全负 → 无正期望, 不再记录该腿。
+IDLE_ENABLED = False
 
 # ── hybrid 卖点 (核心腿, 与回测 simulate_hybrid_v2 对齐) ──
 HYBRID_SELL_END = SELL_CUTOFF  # "11:05", 核心腿 hybrid 窗口 09:40~11:05 (对齐回测 simulate_hybrid_v2 / +550.39%)
@@ -178,7 +190,8 @@ def run_signal(dry_run: bool = False) -> int:
             "### [SHADOW B+idle] 核心腿买入信号触发",
             f"- 策略: B 全市场Top1 (≥{MIN_GAIN}%)",
             f"- 标的: **{chosen['name']}** ({chosen['code']}) 涨幅 {chosen['today_gain']:+.2f}%",
-            f"- 计划买价: {price:.4f} | 卖点: TRIX({TRIX_PERIOD},{TRIX_SIGNAL_PERIOD})死叉",
+            f"- 计划买价: {price:.4f} | 卖点: TRIX({TRIX_PERIOD},{TRIX_SIGNAL_PERIOD})死叉"
+            f", {SELL_CHECK_START}~{HYBRID_SELL_END} 内未触发则 {HYBRID_SELL_END} 收盘平",
             "> ⚠️ 此为 SHADOW 影子策略，仅记录，不下单。",
         ]
         if not dry_run:
@@ -193,10 +206,13 @@ def run_signal(dry_run: bool = False) -> int:
             print("\n".join(lines))
         return 0
 
-    # ② idle 腿: 核心未命中 → 14:50 动量隔夜
-    print(">>> 核心 B 未命中 (idle 日), 等待 14:50 动量腿")
+    # ② idle 腿: 核心未命中 → 14:50 动量隔夜 (IDLE_ENABLED=False 时空仓)
+    if IDLE_ENABLED:
+        print(">>> 核心 B 未命中 (idle 日), 等待 14:50 动量腿")
+    else:
+        print(">>> 核心 B 未命中 (idle 日), idle 腿已停用(无偏数据下无正期望), 今日空仓")
     state["last_signal_date"] = today
-    state["idle_pending"] = True
+    state["idle_pending"] = bool(IDLE_ENABLED)
     if not dry_run:
         save_state(state)
     return 0
@@ -205,6 +221,9 @@ def run_signal(dry_run: bool = False) -> int:
 def run_idle_buy(dry_run: bool = False) -> int:
     """14:50 执行 idle 动量腿 (仅当今日核心未命中)。"""
     print("=== [SHADOW B+idle] idle 动量腿 14:50 买入 ===")
+    if not IDLE_ENABLED:
+        print("idle 腿已停用(无偏数据回测无正期望: 100天 -16.85% / 390天 -4.67%)，跳过")
+        return 0
     if not is_trading_day():
         print("非交易日，跳过")
         return 0
@@ -316,55 +335,63 @@ def run_sell_check(dry_run: bool = False, idle_sell: bool = False) -> int:
         sell_price = prices["primary"]
         ret_num = (sell_price - buy_price) / buy_price * 100 - 0.02  # 含费近似
         reason = "idle_fixed_1450"
+        theory_price = sell_price  # idle 腿无回测对照口径, 理论=实际
+        theory_src = "idle_1450_noref"
     else:
-        # hybrid 卖点: TRIX 死叉 或 追踪回落止盈(peak 回落0.5%), 先发生先卖;
-        # 09:40~11:05 内均未触发则 11:05 收盘 fallback 平仓 (对齐回测 simulate_hybrid_v2)
-        hit_trix, _, trix_time_str, _ = trix_death_cross_hit(
+        # TRIX 卖点: TRIX(5,3)死叉; 09:40~11:05 内未触发则 11:05 收盘 fallback 平仓
+        # (对齐回测 simulate_exit("trix0940_cut"))
+        # 第2返回值 = 死叉当根5min收盘价 = 回测 simulate_trix_cross_after 成交口径(理论价)
+        hit_trix, theory_dc_price, trix_time_str, _ = trix_death_cross_hit(
             buy_price, by_day.get(buy_date, []), bars_today, now_hm,
         )
         trix_hm = ""
         if hit_trix:
             trix_hm = trix_time_str.split(" ")[-1][:5] if " " in trix_time_str else trix_time_str[:5]
-        hit_trail, _trail_trigger_price, trail_hm = hybrid_trail_hit(buy_price, bars_today)
 
-        use_trix = hit_trix and (not hit_trail or time_to_min(trix_hm) <= time_to_min(trail_hm))
-        use_trail = hit_trail and not use_trix
-
-        if use_trix:
+        if hit_trix:
             sell_hm = trix_hm
             prices = resolve_exec_prices(sym, bars_today, sell_hm, cur)
             sell_price = prices["primary"]
             ret_num = (sell_price - buy_price) / buy_price * 100 - 0.02
             reason = "trix_death_cross"
-        elif use_trail:
-            sell_hm = trail_hm
-            prices = resolve_exec_prices(sym, bars_today, sell_hm, cur)
-            sell_price = prices["primary"]
-            ret_num = (sell_price - buy_price) / buy_price * 100 - 0.02
-            reason = "hybrid_trail_drop"
+            theory_price = theory_dc_price
+            theory_src = "trix_dc_5m_close"
         elif now_hm >= HYBRID_SELL_END:
-            # 11:05 收盘 fallback (hybrid time_sell): 窗口内无触发则收盘平
+            # 11:05 收盘 fallback (time_sell): 窗口内无死叉则收盘平
             sell_hm = HYBRID_SELL_END
             prices = resolve_exec_prices(sym, bars_today, sell_hm, cur)
             sell_price = prices["primary"]
             ret_num = (sell_price - buy_price) / buy_price * 100 - 0.02
-            reason = "hybrid_time_sell_1450"
+            reason = f"trix_time_sell_{HYBRID_SELL_END.replace(':', '')}"
+            # 理论价 = 截止时刻最近已完成5minK收盘(回测 window[-1].close 的实时近似)
+            theory_price = prices.get("px_5m") or sell_price
+            theory_src = "time_sell_5m_close"
         else:
-            print(f"TRIX/追踪均未触发, 浮盈 {float_ret:+.2f}% [SHADOW 继续持有]")
+            print(f"TRIX 未触发, 浮盈 {float_ret:+.2f}% [SHADOW 继续持有]")
             return 0
 
     ret_num = round(ret_num, 4)
-    print(f">>> 卖出触发 @{sell_hm} 价 {sell_price:.4f} 收益 {ret_num:+.2f}% [SHADOW]")
+    # 理论价(回测口径) vs 实际价(1min/实时), 量化滑点
+    theory_ret = round((theory_price - buy_price) / buy_price * 100 - 0.02, 4)
+    slippage_pp = round(ret_num - theory_ret, 4)
+    actual_src = prices.get("source", "")
+    print(f">>> 卖出触发 @{sell_hm} 实际价 {sell_price:.4f}({actual_src}) 收益 {ret_num:+.2f}% | "
+          f"理论价 {theory_price:.4f}({theory_src}) 收益 {theory_ret:+.2f}% | 滑点 {slippage_pp:+.2f}pp [SHADOW]")
     pos["sold"] = True
     pos["sell_date"] = today
     pos["sell_price"] = sell_price
     pos["return_pct"] = ret_num
     pos["sell_reason"] = reason
+    pos["theory_price"] = round(theory_price, 4)
+    pos["theory_return_pct"] = theory_ret
+    pos["actual_price_src"] = actual_src
+    pos["slippage_pp"] = slippage_pp
     lines = [
         f"### [SHADOW B+idle] 卖出信号 | {pos['name']} ({etf})",
         f"- 类型: {pos.get('type')} | 卖点: {reason}",
-        f"- 买入: {buy_date} @ {buy_price:.4f} | 卖出: {today} @ {sell_price:.4f}",
+        f"- 买入: {buy_date} @ {buy_price:.4f} | 卖出: {today} @ {sell_price:.4f}({actual_src})",
         f"- **影子收益: {ret_num:+.2f}%** (未实盘下单)",
+        f"- 理论价(回测口径): {theory_price:.4f}({theory_src}) 收益 {theory_ret:+.2f}% | 滑点 {slippage_pp:+.2f}pp",
     ]
     if not dry_run:
         state["position"] = None
@@ -373,6 +400,8 @@ def run_sell_check(dry_run: bool = False, idle_sell: bool = False) -> int:
             "sell_date": today, "sell_time": sell_hm, "leg": pos.get("type"),
             "etf": etf, "name": pos["name"], "buy_price": buy_price,
             "sell_price": sell_price, "return_pct": ret_num, "sell_reason": reason,
+            "theory_price": round(theory_price, 4), "theory_return_pct": theory_ret,
+            "actual_price_src": actual_src, "slippage_pp": slippage_pp,
             "note": "SHADOW-未实盘平仓",
         })
         send_dingtalk(f"[SHADOW] 卖出{pos['name']} {ret_num:+.2f}%", "\n".join(lines))

@@ -1,4 +1,4 @@
-"""Load B+idle SHADOW journal/state for dashboard (与实盘平行, 仅记录不下单)."""
+"""Load B (T0 SHADOW) journal/state for dashboard (与实盘平行, 仅记录不下单)."""
 
 from __future__ import annotations
 
@@ -12,11 +12,10 @@ from web.strategy.paths import ROTATION_DIR
 BIDLE_STATE = ROTATION_DIR / "b_idle_shadow_state.json"
 BIDLE_JOURNAL = ROTATION_DIR / "b_idle_journal.jsonl"
 
-LEG_LABELS = {"core_B": "核心B", "idle_momentum": "idle动量"}
+LEG_LABELS = {"core_B": "核心B"}
 
 SELL_REASON_LABELS = {
     "trix_death_cross": "TRIX死叉",
-    "idle_fixed_1450": "idle14:50固定",
 }
 
 
@@ -33,6 +32,9 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             continue
         if isinstance(row, dict):
+            # idle 隔夜动量腿已停用, 仪表盘不再展示其历史记录
+            if row.get("leg") == "idle_momentum" or row.get("type") == "idle_momentum":
+                continue
             rows.append(row)
     return rows
 
@@ -103,9 +105,7 @@ def load_b_idle_data(*, days: int = 60) -> dict[str, Any]:
             "avg_pct": sum(rets) / len(rets) if rets else None,
             "win_rate": (sum(1 for r in rets if r > 0) / len(rets) * 100) if rets else None,
             "core_pct": _compound(by_leg.get("core_B", [])) if by_leg.get("core_B") else None,
-            "idle_pct": _compound(by_leg.get("idle_momentum", [])) if by_leg.get("idle_momentum") else None,
             "core_count": len(by_leg.get("core_B", [])),
-            "idle_count": len(by_leg.get("idle_momentum", [])),
         },
     }
 

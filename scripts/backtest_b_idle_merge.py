@@ -220,7 +220,7 @@ def main():
     print(f"\n>>> 合并 (B核心+idle动量): {merged_eq:+.2f}%  {sm['trades']}笔  "
           f"胜{sm['win_rate']:.0f}%  回撤{sm['max_drawdown']:+.1f}%  [IN-SAMPLE上界, 过拟合风险]")
     print(f"    = 纯B核心 {core['final_equity_pct']:+.2f}%  +  idle增量 {merged_eq - core['final_equity_pct']:+.2f}%")
-    print(f"    ⚠ 真实预期看下方 OOS: 合并 {oos_merged['equity_pct']:+.2f}% (idle贡献 +{oos_merged['equity_pct']-oos_core['equity_pct']:+.2f}%)")
+    print(f"    ⚠ 真实预期看下方 OOS 段输出")
     py_c = per_year(core_trades)
     py_m = per_year(momentum_trades)
     py_all = per_year(merged)
