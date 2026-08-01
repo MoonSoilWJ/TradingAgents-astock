@@ -17,6 +17,7 @@
     ~/.tradingagents/rotation/b_idle_journal.jsonl      (shadow, 过滤 idle_momentum)
     ~/.tradingagents/rotation/t0_monitor_state.json    (实盘状态)
     ~/.tradingagents/rotation/b_idle_shadow_state.json  (shadow 状态)
+    ~/.tradingagents/rotation/recent390_live_vs_b_idle.json   (OOS 回测, 缺则搜 cache/t0_5min/)
 
 输出 JSON 结构对齐 strategy-web/src/types/strategy.ts:
     [{ id, name, type, status, description, tags,
@@ -46,19 +47,41 @@ ROTATION_DIR = Path.home() / ".tradingagents" / "rotation"
 #   b_confirm_trix              shadow 汇总 {trades, equity_pct, win_rate, max_drawdown}
 #   live_trades                 实盘逐笔 (189 笔)
 #   b_confirm_trix_trades      shadow 逐笔 (231 笔)
-OOS_BACKTEST_FILE = ROTATION_DIR / "recent390_live_vs_b_idle.json"
+# OOS 回测文件可能位于多个位置，按优先级依次查找：
+#   1. ~/.tradingagents/rotation/recent390_live_vs_b_idle.json
+#   2. ~/.tradingagents/cache/t0_5min/recent390_live_vs_b_idle.json
+#   3. ~/.tradingagents 下任意子目录递归匹配
+_OOS_BACKTEST_CANDIDATES = [
+    ROTATION_DIR / "recent390_live_vs_b_idle.json",
+    Path.home() / ".tradingagents" / "cache" / "t0_5min" / "recent390_live_vs_b_idle.json",
+]
+
+
+def _find_oos_backtest_file() -> Path | None:
+    for cand in _OOS_BACKTEST_CANDIDATES:
+        if cand.exists():
+            return cand
+    # 兜底：递归搜索 ~/.tradingagents 下首个匹配文件
+    for p in (Path.home() / ".tradingagents").rglob("recent390*idle*.json"):
+        return p
+    return None
+
 
 _OOS_CACHE: dict[str, Any] | None = None
+_OOS_CACHE_PATH: Path | None = None
 
 
 def _load_oos_backtest() -> dict[str, Any] | None:
-    global _OOS_CACHE
+    global _OOS_CACHE, _OOS_CACHE_PATH
     if _OOS_CACHE is not None:
         return _OOS_CACHE
-    if not OOS_BACKTEST_FILE.exists():
+    found = _find_oos_backtest_file()
+    if found is None:
+        print(f"  ! 警告: 未找到 OOS 回测文件 recent390_live_vs_b_idle.json，回测数据将为空")
         return None
+    _OOS_CACHE_PATH = found
     try:
-        _OOS_CACHE = json.loads(OOS_BACKTEST_FILE.read_text(encoding="utf-8"))
+        _OOS_CACHE = json.loads(found.read_text(encoding="utf-8"))
         return _OOS_CACHE
     except (json.JSONDecodeError, OSError):
         return None
