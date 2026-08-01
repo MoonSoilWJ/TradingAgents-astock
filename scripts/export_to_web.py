@@ -410,7 +410,9 @@ def _nav_curve(closed: list[dict[str, Any]]) -> list[list[float]]:
         ret = float(c["returnPct"])
         nav *= 1 + ret / 100
         # 输出累计收益率% = (nav - 1) * 100
-        cum_return_pct = round((nav - 1) * 100, 2)
+        # 注意: 不在此处 round, 保留高精度, 避免相邻累计值相减时误差被放大
+        # (前端 tooltip 的"当日涨幅" = 相邻累计差, 需与明细单笔 returnPct 一致)
+        cum_return_pct = (nav - 1) * 100
         try:
             ts = int(datetime.strptime(str(c["sellDate"]), "%Y-%m-%d").timestamp() * 1000)
         except ValueError:
@@ -433,7 +435,8 @@ def _backtest_curve(strategy_id: str) -> list[list[float]]:
     for t in sorted_trades:
         ret = float(t["return_pct"])
         nav *= 1 + ret / 100
-        cum_pct = round((nav - 1) * 100, 2)
+        # 不提前 round, 保留高精度, 与明细单笔 returnPct 对齐
+        cum_pct = (nav - 1) * 100
         try:
             ts = int(datetime.strptime(str(t["sell_date"]), "%Y-%m-%d").timestamp() * 1000)
         except ValueError:
