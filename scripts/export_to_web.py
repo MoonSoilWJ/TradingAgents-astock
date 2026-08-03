@@ -210,7 +210,22 @@ def _merge_trades(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
          需要用 signal_date + etf + leg 匹配合并
 
     持仓中(只有 buy 信号, 没有对应 sell 事件)也输出, status=open.
+
+    OOS 补充: 实盘 journal 通常不含 signal_time, 这里从 recent390 的 live_trades
+    按 (signal_date, etf, sell_date) 匹配, 用真实的 signal_time 回填.
     """
+    # 0. 构建 OOS live_trades 的查找表 (用于补充实盘缺失的 signal_time / buy_time)
+    _oos = _load_oos_backtest()
+    _oos_signal_map: dict[tuple, str] = {}
+    _oos_buy_map: dict[tuple, str] = {}
+    if _oos:
+        for t in _oos.get("live_trades", []):
+            k = (str(t.get("signal_date", "")), str(t.get("etf", "")), str(t.get("sell_date", "")))
+            if t.get("signal_time"):
+                _oos_signal_map[k] = str(t["signal_time"])
+            if t.get("buy_time"):
+                _oos_buy_map[k] = str(t["buy_time"])
+
     # 1. 先收集所有 buy 信号事件 (有 buy_price 但没有 sell_price)
     buys: dict[str, dict[str, Any]] = {}
     buy_events: list[dict[str, Any]] = []  # 保留原始顺序, 用于输出持仓中
@@ -278,9 +293,21 @@ def _merge_trades(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "signalDate": signal_date,
             "buyDate": ev.get("buy_date") or buy.get("signal_date") or buy.get("buy_date"),
             "sellDate": ev.get("sell_date"),
-            "buyTime": ev.get("buy_time") or buy.get("buy_time") or buy.get("signal_time"),
+            "buyTime": (
+                ev.get("buy_time")
+                or buy.get("buy_time")
+                or _oos_buy_map.get(
+                    (str(signal_date or ""), str(ev.get("etf") or buy.get("etf") or ""), str(ev.get("sell_date") or ""))
+                )
+            ),
             "sellTime": ev.get("sell_time"),
-            "signalTime": buy.get("signal_time") or ev.get("signal_time"),
+            "signalTime": (
+                buy.get("signal_time")
+                or ev.get("signal_time")
+                or _oos_signal_map.get(
+                    (str(signal_date or ""), str(ev.get("etf") or buy.get("etf") or ""), str(ev.get("sell_date") or ""))
+                )
+            ),
             "etf": ev.get("etf") or buy.get("etf"),
             "name": ev.get("name") or buy.get("name"),
             "buyPrice": round(buy_price, 4) if buy_price else None,
@@ -306,8 +333,13 @@ def _merge_trades(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "status": "open",
             "signalDate": ev.get("signal_date") or ev.get("buy_date"),
             "buyDate": ev.get("signal_date") or ev.get("buy_date"),
-            "buyTime": ev.get("signal_time") or ev.get("buy_time"),
-            "signalTime": ev.get("signal_time"),
+            "buyTime": ev.get("buy_time") or ev.get("signal_time"),
+            "signalTime": (
+                ev.get("signal_time")
+                or _oos_signal_map.get(
+                    (str(ev.get("signal_date") or ev.get("buy_date") or ""), str(ev.get("etf") or ""), "")
+                )
+            ),
             "sellDate": None,
             "etf": ev.get("etf"),
             "name": ev.get("name"),
@@ -378,7 +410,9 @@ def _nav_curve(closed: list[dict[str, Any]]) -> list[list[float]]:
         ret = float(c["returnPct"])
         nav *= 1 + ret / 100
         # 输出累计收益率% = (nav - 1) * 100
-        cum_return_pct = round((nav - 1) * 100, 2)
+        # 注意: 不在此处 round, 保留高精度, 避免相邻累计值相减时误差被放大
+        # (前端 tooltip 的"当日涨幅" = 相邻累计差, 需与明细单笔 returnPct 一致)
+        cum_return_pct = (nav - 1) * 100
         try:
             ts = int(datetime.strptime(str(c["sellDate"]), "%Y-%m-%d").timestamp() * 1000)
         except ValueError:
@@ -401,7 +435,8 @@ def _backtest_curve(strategy_id: str) -> list[list[float]]:
     for t in sorted_trades:
         ret = float(t["return_pct"])
         nav *= 1 + ret / 100
-        cum_pct = round((nav - 1) * 100, 2)
+        # 不提前 round, 保留高精度, 与明细单笔 returnPct 对齐
+        cum_pct = (nav - 1) * 100
         try:
             ts = int(datetime.strptime(str(t["sell_date"]), "%Y-%m-%d").timestamp() * 1000)
         except ValueError:
@@ -521,12 +556,22 @@ def _build_open_trade_from_state(pos: dict[str, Any]) -> dict[str, Any]:
     """从 state 文件的 position 字段构造"持仓中"交易."""
     buy_price = _parse_pct(pos.get("buy_price")) or 0
     signal_gain = _parse_pct(pos.get("today_gain"))
+    # 尝试从 OOS live_trades 按 (signal_date, etf) 补充 signal_time / buy_time
+    _oos = _load_oos_backtest()
+    _oos_sig = None
+    _oos_buy = None
+    if _oos:
+        for t in _oos.get("live_trades", []):
+            if str(t.get("signal_date", "")) == str(pos.get("buy_date", "")) and str(t.get("etf", "")) == str(pos.get("etf", "")):
+                _oos_sig = t.get("signal_time")
+                _oos_buy = t.get("buy_time")
+                break
     return {
         "status": "open",
         "signalDate": pos.get("buy_date"),
         "buyDate": pos.get("buy_date"),
-        "buyTime": pos.get("buy_time"),
-        "signalTime": pos.get("signal_time"),
+        "buyTime": pos.get("buy_time") or _oos_buy,
+        "signalTime": pos.get("signal_time") or _oos_sig,
         "sellDate": None,
         "etf": pos.get("etf"),
         "name": pos.get("name"),
