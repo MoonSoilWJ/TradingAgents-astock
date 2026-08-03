@@ -77,6 +77,19 @@ def month_table(trades: list[dict]) -> dict:
     return out
 
 
+def year_table(trades: list[dict]) -> dict:
+    by: dict[str, list[float]] = {}
+    for t in trades:
+        by.setdefault(t["signal_date"][:4], []).append(t["return_pct"])
+    out = {}
+    for y in sorted(by):
+        eq = 1.0
+        for x in by[y]:
+            eq *= 1 + x / 100
+        out[y] = {"trades": len(by[y]), "ret": round((eq - 1) * 100, 2)}
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="最近N天 实盘 vs B+idle SHADOW")
     ap.add_argument("--recent", type=int, default=100)
@@ -87,6 +100,8 @@ def main() -> None:
     ap.add_argument("--fee", type=float, default=FEE_PCT)
     ap.add_argument("--confirm-time", type=str, default="14:40",
                     help="双时点确认时刻(对齐实盘 t0_monitor CONFIRM_TIME); none 关闭")
+    ap.add_argument("--out", type=str, default=str(OUT),
+                    help="输出 json 路径(默认 recent{N}_live_vs_b_idle.json)")
     args = ap.parse_args()
     cf_time = None if args.confirm_time.lower() == "none" else args.confirm_time
 
@@ -115,9 +130,14 @@ def main() -> None:
 
     lb = args.lookback
     N = args.recent
-    eval_dates = all_dates[-(N + 2 * lb):]
-    test_dates = eval_dates[-N:]
+    if N + 2 * lb > len(all_dates):
+        eval_dates = all_dates
+    else:
+        eval_dates = all_dates[-(N + 2 * lb):]
+    test_dates = eval_dates[-N:] if N <= len(eval_dates) else eval_dates
     warmup = len(eval_dates) - len(test_dates) - lb
+    if warmup < 0:
+        warmup = 0
     test_set = set(test_dates)
 
     print(f"\n=== 最近 {N} 个交易日: {test_dates[0]} ~ {test_dates[-1]} ===")
@@ -245,6 +265,18 @@ def main() -> None:
             return f"{v['ret']:+7.2f}%({v['trades']:>2})" if v else "      -     "
         print(f"  {m:<9}{f(m_live):>16}{f(m_b):>16}{f(m_idle):>16}{f(m_sh):>16}")
 
+    # 逐年
+    y_live, y_b, y_idle, y_sh = (year_table(x) for x in
+                                 (live_trades, b_trades, idle_trades, shadow_trades))
+    print(f"\n  逐年对比(按信号年, 复利):")
+    print(f"  {'年份':<7}{'LIVE实盘':>16}{'B核心':>16}{'idle腿':>16}{'SHADOW':>16}")
+    print("  " + "-" * 73)
+    for y in sorted(set(y_live) | set(y_sh)):
+        def g(tbl):
+            v = tbl.get(y)
+            return f"{v['ret']:+7.2f}%({v['trades']:>2})" if v else "      -     "
+        print(f"  {y:<7}{g(y_live):>16}{g(y_b):>16}{g(y_idle):>16}{g(y_sh):>16}")
+
     # 明细: SHADOW 相对 LIVE 的差异日
     live_by_day = {t["signal_date"]: t for t in live_trades}
     b_by_day = {t["signal_date"]: t for t in b_trades}
@@ -284,12 +316,14 @@ def main() -> None:
         "shadow_merged": s_shadow,
         "shadow_minus_live_pct": round(diff, 2),
         "monthly": {"live": m_live, "b_core": m_b, "idle": m_idle, "shadow": m_sh},
+        "annual": {"live": y_live, "b_core": y_b, "idle": y_idle, "shadow": y_sh},
+        "annual_b_confirm_trix": year_table(b_cf_trix_trades),
         "live_trades": live_trades,
         "b_trades": b_trades,
         "b_confirm_trix_trades": b_cf_trix_trades,
         "idle_trades": idle_trades,
     }
-    out_path = OUT.with_name(f"recent{N}_live_vs_b_idle.json")
+    out_path = Path(args.out)
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n已落盘: {out_path}")
 

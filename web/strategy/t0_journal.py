@@ -81,6 +81,7 @@ def _normalize_trade(raw: dict[str, Any], *, source: str) -> dict[str, Any]:
         "key": _trade_key({**raw, "sell_date": sell_date}),
         "source": source,
         "buy_date": raw.get("buy_date"),
+        "signal_time": raw.get("signal_time") or "14:45",
         "buy_time": raw.get("buy_time") or "14:50",
         "etf": raw.get("etf"),
         "name": raw.get("name") or raw.get("etf"),
@@ -182,6 +183,7 @@ def open_position_row(state_data: dict[str, Any] | None) -> dict[str, Any] | Non
     return {
         "状态": "持仓中",
         "买入日": pos.get("buy_date"),
+        "信号时间": "14:45",
         "买入时间": "14:50",
         "标的": pos.get("name"),
         "代码": pos.get("etf"),
@@ -205,6 +207,7 @@ def trades_to_table_rows(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows.append({
             "状态": "已平仓",
             "买入日": t.get("buy_date"),
+            "信号时间": t.get("signal_time"),
             "买入时间": t.get("buy_time"),
             "标的": t.get("name"),
             "代码": t.get("etf"),
@@ -239,6 +242,7 @@ def backfill_journal_from_shadow(*, dry_run: bool = False) -> int:
             "name": trade.get("name"),
             "type": trade.get("type", ""),
             "buy_date": trade.get("buy_date"),
+            "signal_time": trade.get("signal_time") or "14:45",
             "buy_time": trade.get("buy_time"),
             "buy_price": trade.get("buy_price"),
             "signal_gain_pct": trade.get("signal_gain_pct"),

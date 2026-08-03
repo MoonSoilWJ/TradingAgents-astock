@@ -37,6 +37,7 @@ CACHE = Path.home() / ".tradingagents" / "cache" / "t0_5min"
 ALIGNED = CACHE / "aligned_live_4y.json"
 TDX2Y = CACHE / "tdx_5min_2y.json"
 OUT = CACHE / "tdx_5min_pre2024.json"
+FULL_DAILY = CACHE / "full_daily_2015_2026.json"  # 10年完整日K(pre段齐全), 用于判上市+对齐
 
 DEFAULT_START = "2022-06-15"
 DEFAULT_END = "2024-07-02"      # tdx_5min_2y 起点前一天
@@ -61,14 +62,38 @@ def main() -> None:
     args = ap.parse_args()
 
     a = json.loads(ALIGNED.read_text(encoding="utf-8"))
-    etf_daily = a["etf_daily"]
     all_dates = [d for d in a["all_dates"] if args.start <= d <= args.end]
-    codes = sorted(json.loads(TDX2Y.read_text(encoding="utf-8"))["etf_5min"].keys())
+    all_codes = sorted(json.loads(TDX2Y.read_text(encoding="utf-8"))["etf_5min"].keys())
+    early_cut = "2022-06-15"
+    # 对齐日K优先用 full_daily(10年完整, pre段齐全); 否则 aligned 的 pre 段为空,
+    # 会导致早期标的判不出来、对齐无基准(本次回填就因这 bug 漏抓了 pre 段)。
+    if FULL_DAILY.exists():
+        etf_daily = json.loads(FULL_DAILY.read_text(encoding="utf-8"))
+        print(f">>> 对齐日K用 full_daily({len(etf_daily)}只, pre段齐全)", flush=True)
+    else:
+        etf_daily = a["etf_daily"]
+        print(">>> 对齐日K用 aligned(警告: pre段缺失, 早期标的可能漏抓)", flush=True)
+    codes = [c for c in all_codes
+             if any(r.get("date", "") < early_cut
+                    for r in etf_daily.get(c, {}).get("returns", []))]
+    print(f">>> 早期(2015~2022-06-14)已上市的标的: {len(codes)} 只 (共 {len(all_codes)} 只)", flush=True)
     if args.limit_codes:
         codes = codes[:args.limit_codes]
 
     out = json.loads(OUT.read_text(encoding="utf-8")) if OUT.exists() else {"etf_5min": {}}
     five = out["etf_5min"]
+    # 抓 pre 段前, 清掉文件中旧的 planC 稀疏近似 pre 数据(<early_cut),
+    # 避免未对齐/前视偏差脏数据混入(实测旧数据有 1.3 万根需×10修正)。
+    if args.start < early_cut:
+        n_old = 0
+        for c in list(five):
+            for d in [x for x in five[c] if x < early_cut]:
+                del five[c][d]
+                n_old += 1
+            if not five[c]:
+                del five[c]
+        if n_old:
+            print(f">>> 已清空旧 pre 段近似数据 {n_old} 个(code,day)", flush=True)
     done0 = sum(len(v) for v in five.values())
     print(f">>> 目标 {len(codes)} 只 × {len(all_dates)} 天 "
           f"({all_dates[0]} ~ {all_dates[-1]}) = {len(codes)*len(all_dates)} 个请求")

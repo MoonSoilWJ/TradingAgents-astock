@@ -405,6 +405,7 @@ def log_trade_closed(
         "name": pos.get("name"),
         "type": pos.get("type", ""),
         "buy_date": pos.get("buy_date"),
+        "signal_time": SIGNAL_TIME,
         "buy_time": BUY_TIME,
         "buy_price": pos.get("buy_price"),
         "signal_gain_pct": pos.get("today_gain"),

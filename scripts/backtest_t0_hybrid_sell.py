@@ -222,8 +222,9 @@ def run_strategy(
         if not next_bars:
             continue
 
+        timing: dict[str, str] = {}
         if mode == "trix":
-            sell_price, sell_reason, _ = simulate_exit(
+            sell_price, sell_reason, timing = simulate_exit(
                 "trix0940_cut", buy_price, day_bars, BUY_TIME, next_bars, SELL_CUTOFF,
                 trix_period=TRIX_PERIOD, trix_signal_period=TRIX_SIGNAL_PERIOD,
             )
@@ -251,6 +252,9 @@ def run_strategy(
             "etf": code,
             "name": name,
             "today_gain": round(gain, 2),
+            "signal_time": SIGNAL_TIME,
+            "buy_time": BUY_TIME,
+            "sell_time": timing.get("sell_time", ""),
             "buy_price": round(buy_price, 4),
             "sell_price": round(sell_price, 4),
             "sell_reason": sell_reason,

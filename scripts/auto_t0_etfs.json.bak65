@@ -1,0 +1,327 @@
+[
+  {
+    "code": "159329",
+    "name": "沙特ETF",
+    "sina_symbol": "sz159329"
+  },
+  {
+    "code": "159501",
+    "name": "纳指基金",
+    "sina_symbol": "sz159501"
+  },
+  {
+    "code": "159513",
+    "name": "纳指大成",
+    "sina_symbol": "sz159513"
+  },
+  {
+    "code": "159561",
+    "name": "德国ETF",
+    "sina_symbol": "sz159561"
+  },
+  {
+    "code": "159569",
+    "name": "香港红利",
+    "sina_symbol": "sz159569"
+  },
+  {
+    "code": "159605",
+    "name": "互联中概",
+    "sina_symbol": "sz159605"
+  },
+  {
+    "code": "159607",
+    "name": "中概互联",
+    "sina_symbol": "sz159607"
+  },
+  {
+    "code": "159659",
+    "name": "纳指",
+    "sina_symbol": "sz159659"
+  },
+  {
+    "code": "159660",
+    "name": "纳指100",
+    "sina_symbol": "sz159660"
+  },
+  {
+    "code": "159688",
+    "name": "恒生互联",
+    "sina_symbol": "sz159688"
+  },
+  {
+    "code": "159747",
+    "name": "香港科技",
+    "sina_symbol": "sz159747"
+  },
+  {
+    "code": "159799",
+    "name": "港股通消",
+    "sina_symbol": "sz159799"
+  },
+  {
+    "code": "159830",
+    "name": "上海金",
+    "sina_symbol": "sz159830"
+  },
+  {
+    "code": "159866",
+    "name": "日经ETF",
+    "sina_symbol": "sz159866"
+  },
+  {
+    "code": "161116",
+    "name": "易基黄金",
+    "sina_symbol": "sz161116"
+  },
+  {
+    "code": "161128",
+    "name": "标普科技",
+    "sina_symbol": "sz161128"
+  },
+  {
+    "code": "161226",
+    "name": "白银基金",
+    "sina_symbol": "sz161226"
+  },
+  {
+    "code": "161730",
+    "name": "招商智星",
+    "sina_symbol": "sz161730"
+  },
+  {
+    "code": "161815",
+    "name": "银华通胀",
+    "sina_symbol": "sz161815"
+  },
+  {
+    "code": "161838",
+    "name": "创业板两",
+    "sina_symbol": "sz161838"
+  },
+  {
+    "code": "162107",
+    "name": "金鹰先进",
+    "sina_symbol": "sz162107"
+  },
+  {
+    "code": "162511",
+    "name": "国联安双",
+    "sina_symbol": "sz162511"
+  },
+  {
+    "code": "162714",
+    "name": "深证100",
+    "sina_symbol": "sz162714"
+  },
+  {
+    "code": "501312",
+    "name": "海外科技",
+    "sina_symbol": "sh501312"
+  },
+  {
+    "code": "511010",
+    "name": "国债ETF",
+    "sina_symbol": "sh511010"
+  },
+  {
+    "code": "511020",
+    "name": "活跃国债",
+    "sina_symbol": "sh511020"
+  },
+  {
+    "code": "511030",
+    "name": "公司债",
+    "sina_symbol": "sh511030"
+  },
+  {
+    "code": "511060",
+    "name": "5年地债",
+    "sina_symbol": "sh511060"
+  },
+  {
+    "code": "511070",
+    "name": "沪公司债",
+    "sina_symbol": "sh511070"
+  },
+  {
+    "code": "511090",
+    "name": "30年国债",
+    "sina_symbol": "sh511090"
+  },
+  {
+    "code": "511100",
+    "name": "基准国债",
+    "sina_symbol": "sh511100"
+  },
+  {
+    "code": "511110",
+    "name": "公司债易",
+    "sina_symbol": "sh511110"
+  },
+  {
+    "code": "511120",
+    "name": "科创债基",
+    "sina_symbol": "sh511120"
+  },
+  {
+    "code": "511130",
+    "name": "国债30年",
+    "sina_symbol": "sh511130"
+  },
+  {
+    "code": "511150",
+    "name": "科债永赢",
+    "sina_symbol": "sh511150"
+  },
+  {
+    "code": "511160",
+    "name": "国债东财",
+    "sina_symbol": "sh511160"
+  },
+  {
+    "code": "511190",
+    "name": "信用债",
+    "sina_symbol": "sh511190"
+  },
+  {
+    "code": "511200",
+    "name": "信用债基",
+    "sina_symbol": "sh511200"
+  },
+  {
+    "code": "511220",
+    "name": "城投ETF",
+    "sina_symbol": "sh511220"
+  },
+  {
+    "code": "511260",
+    "name": "十年国债",
+    "sina_symbol": "sh511260"
+  },
+  {
+    "code": "511270",
+    "name": "10年地债",
+    "sina_symbol": "sh511270"
+  },
+  {
+    "code": "511360",
+    "name": "短融ETF",
+    "sina_symbol": "sh511360"
+  },
+  {
+    "code": "511520",
+    "name": "政金债",
+    "sina_symbol": "sh511520"
+  },
+  {
+    "code": "511580",
+    "name": "国债政金",
+    "sina_symbol": "sh511580"
+  },
+  {
+    "code": "511660",
+    "name": "建信添益",
+    "sina_symbol": "sh511660"
+  },
+  {
+    "code": "511850",
+    "name": "财富宝E",
+    "sina_symbol": "sh511850"
+  },
+  {
+    "code": "511880",
+    "name": "银华日利",
+    "sina_symbol": "sh511880"
+  },
+  {
+    "code": "511990",
+    "name": "华宝添益",
+    "sina_symbol": "sh511990"
+  },
+  {
+    "code": "513000",
+    "name": "225ETF",
+    "sina_symbol": "sh513000"
+  },
+  {
+    "code": "513020",
+    "name": "科技HK",
+    "sina_symbol": "sh513020"
+  },
+  {
+    "code": "513040",
+    "name": "HK互联网",
+    "sina_symbol": "sh513040"
+  },
+  {
+    "code": "513150",
+    "name": "港科技50",
+    "sina_symbol": "sh513150"
+  },
+  {
+    "code": "513160",
+    "name": "科技30",
+    "sina_symbol": "sh513160"
+  },
+  {
+    "code": "513220",
+    "name": "互联网30",
+    "sina_symbol": "sh513220"
+  },
+  {
+    "code": "513380",
+    "name": "科技恒生",
+    "sina_symbol": "sh513380"
+  },
+  {
+    "code": "513390",
+    "name": "纳指基金",
+    "sina_symbol": "sh513390"
+  },
+  {
+    "code": "513560",
+    "name": "香港科技",
+    "sina_symbol": "sh513560"
+  },
+  {
+    "code": "513820",
+    "name": "港股分红",
+    "sina_symbol": "sh513820"
+  },
+  {
+    "code": "513870",
+    "name": "纳指指数",
+    "sina_symbol": "sh513870"
+  },
+  {
+    "code": "513890",
+    "name": "HK科技",
+    "sina_symbol": "sh513890"
+  },
+  {
+    "code": "513910",
+    "name": "红利央企",
+    "sina_symbol": "sh513910"
+  },
+  {
+    "code": "513920",
+    "name": "央企40",
+    "sina_symbol": "sh513920"
+  },
+  {
+    "code": "518680",
+    "name": "金ETF",
+    "sina_symbol": "sh518680"
+  },
+  {
+    "code": "518860",
+    "name": "上海金E",
+    "sina_symbol": "sh518860"
+  },
+  {
+    "code": "518890",
+    "name": "中银黄金",
+    "sina_symbol": "sh518890"
+  }
+]

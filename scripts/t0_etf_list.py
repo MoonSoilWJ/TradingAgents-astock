@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 # (code, name, sina_symbol)
@@ -162,9 +163,24 @@ BOND_ETFS: list[tuple[str, str, str]] = [
     ("159649", "可转债ETF", "sz159649"),
 ]
 
+# 自动发现层：由 scripts/refresh_t0_pool.py 写入，cron 定期刷新，无需手工维护。
+# 该文件不存在时等于空列表，get_all_t0_etfs() 行为不变。
+AUTO_T0_JSON: Path = Path(__file__).with_name("auto_t0_etfs.json")
+
+
+def load_auto_t0_etfs() -> list[tuple[str, str, str]]:
+    """读取自动发现的 T+0 标的（code, name, sina_symbol）。文件缺失/损坏则返回空。"""
+    if not AUTO_T0_JSON.exists():
+        return []
+    try:
+        data = json.loads(AUTO_T0_JSON.read_text(encoding="utf-8"))
+        return [(d["code"], d["name"], d.get("sina_symbol", "")) for d in data]
+    except Exception:
+        return []
+
 
 def get_all_t0_etfs() -> list[dict]:
-    """返回所有 T+0 ETF 列表（去重）。"""
+    """返回所有 T+0 ETF 列表（手工清单 + 自动发现层，去重）。"""
     seen: set[str] = set()
     result: list[dict] = []
     for pool, type_name in [
@@ -172,6 +188,7 @@ def get_all_t0_etfs() -> list[dict]:
         (GOLD_ETFS, "黄金"),
         (COMMODITY_ETFS, "商品"),
         (BOND_ETFS, "债券"),
+        (load_auto_t0_etfs(), "自动"),
     ]:
         for code, name, sina in pool:
             if code in seen:

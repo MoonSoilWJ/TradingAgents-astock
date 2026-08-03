@@ -57,6 +57,7 @@ STATE_FILE = STATE_DIR / "b_idle_shadow_state.json"
 TRADE_JOURNAL = STATE_DIR / "b_idle_journal.jsonl"
 
 SIGNAL_TIME = "14:45"
+BUY_TIME = "14:50"
 IDLE_BUY = "14:50"
 IDLE_SELL_HM = "14:50"
 IDLE_THR = 1.0          # idle 动量选股阈值
@@ -182,6 +183,7 @@ def run_signal(dry_run: bool = False) -> int:
         state["position"] = {
             "etf": chosen["code"], "name": chosen["name"], "type": "core_B",
             "buy_price": price, "buy_date": today, "today_gain": chosen["today_gain"],
+            "signal_time": SIGNAL_TIME, "buy_time": BUY_TIME,
             "sold": False,
         }
         state["last_signal_date"] = today
@@ -197,7 +199,8 @@ def run_signal(dry_run: bool = False) -> int:
         if not dry_run:
             save_state(state)
             append_journal({
-                "signal_date": today, "signal_time": SIGNAL_TIME, "leg": "core_B",
+                "signal_date": today, "signal_time": SIGNAL_TIME, "buy_time": BUY_TIME,
+                "leg": "core_B",
                 "etf": chosen["code"], "name": chosen["name"], "buy_price": price,
                 "today_gain": chosen["today_gain"], "note": "SHADOW-未实盘下单",
             })
@@ -246,6 +249,7 @@ def run_idle_buy(dry_run: bool = False) -> int:
     state["position"] = {
         "etf": top["code"], "name": top["name"], "type": "idle_momentum",
         "buy_price": price, "buy_date": today, "today_gain": top["today_gain"],
+        "signal_time": IDLE_BUY, "buy_time": IDLE_BUY,
         "sold": False,
     }
     state["idle_pending"] = False
@@ -259,7 +263,8 @@ def run_idle_buy(dry_run: bool = False) -> int:
     if not dry_run:
         save_state(state)
         append_journal({
-            "signal_date": today, "signal_time": IDLE_BUY, "leg": "idle_momentum",
+            "signal_date": today, "signal_time": IDLE_BUY, "buy_time": IDLE_BUY,
+            "leg": "idle_momentum",
             "etf": top["code"], "name": top["name"], "buy_price": price,
             "today_gain": top["today_gain"], "note": "SHADOW-未实盘下单",
         })
@@ -398,6 +403,7 @@ def run_sell_check(dry_run: bool = False, idle_sell: bool = False) -> int:
         save_state(state)
         append_journal({
             "sell_date": today, "sell_time": sell_hm, "leg": pos.get("type"),
+            "signal_time": pos.get("signal_time", ""), "buy_time": pos.get("buy_time", ""),
             "etf": etf, "name": pos["name"], "buy_price": buy_price,
             "sell_price": sell_price, "return_pct": ret_num, "sell_reason": reason,
             "theory_price": round(theory_price, 4), "theory_return_pct": theory_ret,
