@@ -29,7 +29,7 @@ import akshare as ak
 
 CACHE_DIR = Path.home() / ".tradingagents" / "cache" / "etf_full"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-CACHE_FILE = CACHE_DIR / "etf_daily_sina_8wide.json"
+CACHE_FILE = CACHE_DIR / "etf_daily_qfq8.json"
 
 # 8 只宽基标的：每只给候选代码，回测时取历史最长者（暴露后上市标的）
 UNIVERSE: dict[str, list[str]] = {
@@ -54,8 +54,69 @@ def to_sina(code: str) -> str:
     return "sz" + code
 
 
+def fetch_em_qfq(code: str, tries: int = 5) -> list | None:
+    """东财前复权日K。ETF 的份额折算/拆分必须用复权数据, 否则出现假涨假跌。"""
+    for k in range(tries):
+        try:
+            df = ak.fund_etf_hist_em(symbol=code, period="daily", adjust="qfq")
+        except Exception:  # noqa: BLE001
+            time.sleep(1.0 * (k + 1))
+            continue
+        if df is None or len(df) == 0:
+            return None
+        rows = [[str(r["日期"]), float(r["收盘"])] for _, r in df.iterrows()
+                if r["收盘"] and float(r["收盘"]) > 0]
+        rows.sort(key=lambda x: x[0])
+        return rows
+    return None
+
+
+def fix_splits(rows: list, thr: float = 0.25) -> tuple:
+    """对不复权数据自动做"拆分/份额折算"接续复权。
+
+    ETF 单日理论最大波动 20%(创业板/科创板), 超过 thr=25% 必是折算/拆分断点。
+    做法: 在断点处把此前全部历史价按 后价/前价 缩放, 得到连续的前复权序列。
+    """
+    n = len(rows)
+    prices = [r[1] for r in rows]
+    out = [0.0] * n
+    factor, fixed = 1.0, 0
+    for i in range(n - 1, -1, -1):
+        out[i] = prices[i] * factor
+        if i > 0:
+            p, q = prices[i - 1], prices[i]
+            if p > 0 and abs(q / p - 1) > thr:
+                factor *= q / p
+                fixed += 1
+    return [[rows[i][0], out[i]] for i in range(n)], fixed
+
+
+def fetch_sina_raw(code: str) -> list | None:
+    """新浪日K(不复权) — 仅作东财失败时的回退, 存在拆分未复权风险。"""
+    try:
+        h = ak.fund_etf_hist_sina(symbol=to_sina(code))
+    except Exception:  # noqa: BLE001
+        return None
+    if h is None or len(h) == 0:
+        return None
+    rows = [[str(r["date"]), float(r["close"])] for _, r in h.iterrows()
+            if r["close"] and float(r["close"]) > 0]
+    rows.sort(key=lambda x: x[0])
+    return rows
+
+
+def count_jumps(rows: list, thr: float = 0.15) -> int:
+    """单日涨跌幅超过 thr 的次数 — 用于暴露未复权的拆分/折算断点。"""
+    n = 0
+    for i in range(1, len(rows)):
+        p, q = rows[i - 1][1], rows[i][1]
+        if p > 0 and abs(q / p - 1) > thr:
+            n += 1
+    return n
+
+
 def fetch_universe(fresh: bool = False) -> dict:
-    """返回 {name: {"code":..., "rows":[[date, close], ...]}} 日K(新浪不复权)。缓存本地。"""
+    """返回 {name: {"code":..., "rows":[[date, close], ...]}} 前复权日K。缓存本地。"""
     if CACHE_FILE.exists() and not fresh:
         print(f"[缓存] 命中 {CACHE_FILE}")
         return json.loads(CACHE_FILE.read_text(encoding="utf-8"))
@@ -63,27 +124,31 @@ def fetch_universe(fresh: bool = False) -> dict:
     out: dict[str, dict] = {}
     t0 = time.time()
     for name, codes in UNIVERSE.items():
-        best_code, best_rows = None, None
+        best_code, best_rows, best_src = None, None, ""
         for code in codes:
-            s = to_sina(code)
-            try:
-                h = ak.fund_etf_hist_sina(symbol=s)
-            except Exception as e:  # noqa: BLE001
-                print(f"  [拉取失败] {name} {code}: {e}")
+            rows = fetch_em_qfq(code)
+            src = "em-qfq"
+            if rows is None:
+                rows = fetch_sina_raw(code)
+                src = "sina-raw"
+                if rows:
+                    rows, nfix = fix_splits(rows)
+                    if nfix:
+                        src = f"sina+splitfix({nfix})"
+                        print(f"  [复权修正] {name} {code}: 自动接续 {nfix} 处折算/拆分断点")
+            if not rows:
+                print(f"  [拉取失败] {name} {code}")
                 continue
-            if h is None or len(h) == 0:
-                continue
-            rows = [[str(r["date"]), float(r["close"])] for _, r in h.iterrows()
-                    if r["close"] and float(r["close"]) > 0]
-            rows.sort(key=lambda x: x[0])
             if best_rows is None or len(rows) > len(best_rows):
-                best_code, best_rows = code, rows
+                best_code, best_rows, best_src = code, rows, src
         if best_rows is None:
             print(f"  [全部失败] {name}")
             continue
-        out[name] = {"code": best_code, "rows": best_rows}
-        print(f"  [OK] {name:8s} {best_code}  起{best_rows[0][0]} 止{best_rows[-1][0]} "
-              f"K线{len(best_rows)}")
+        out[name] = {"code": best_code, "rows": best_rows, "src": best_src}
+        jm = count_jumps(best_rows)
+        flag = f"  ⚠异常跳变{jm}" if jm else ""
+        print(f"  [OK] {name:8s} {best_code} [{best_src}] 起{best_rows[0][0]} "
+              f"止{best_rows[-1][0]} K线{len(best_rows)}{flag}")
 
     # 基准(沪深300指数 sh000300, 新浪)
     try:
@@ -130,7 +195,8 @@ def run_backtest(data: dict, *, mom_win: int = 20, fee_pct: float = 0.05,
         if ii is None or ii < mom_win:
             return None, None
         rows = rows_of[name]
-        ma = sum(rows[ii - mom_win + k][1] for k in range(mom_win)) / mom_win
+        # 标准 MA20: 含当日在内的最近 20 根收盘均值
+        ma = sum(rows[ii - mom_win + 1 + k][1] for k in range(mom_win)) / mom_win
         close = rows[ii][1]
         if ma <= 0:
             return None, None

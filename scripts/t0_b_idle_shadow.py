@@ -38,6 +38,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 import t0_monitor as TM  # noqa: E402 复用行情/推送/TRIX 函数 (仅函数, 不读写其实盘状态)
+from sync_web import sync_to_web  # noqa: E402 买卖信号触发后同步到 Web
 from t0_monitor import (  # noqa: E402
     MIN_GAIN, SELL_RULE, SELL_BAR_LABEL, TRIX_PERIOD, TRIX_SIGNAL_PERIOD,
     TRIX_MIN_SELL, SELL_CUTOFF, SELL_CHECK_START, SELL_CHECK_END,
@@ -205,6 +206,8 @@ def run_signal(dry_run: bool = False) -> int:
                 "today_gain": chosen["today_gain"], "note": "SHADOW-未实盘下单",
             })
             send_dingtalk(f"[SHADOW] B核心信号{chosen['name']}", "\n".join(lines))
+            # 核心 B 买入信号触发后, 把最新状态同步到 Web
+            sync_to_web()
         else:
             print("\n".join(lines))
         return 0
@@ -269,6 +272,8 @@ def run_idle_buy(dry_run: bool = False) -> int:
             "today_gain": top["today_gain"], "note": "SHADOW-未实盘下单",
         })
         send_dingtalk(f"[SHADOW] idle信号{top['name']}", "\n".join(lines))
+        # idle 动量腿买入信号触发后, 把最新状态同步到 Web
+        sync_to_web()
     else:
         print("\n".join(lines))
     return 0
@@ -411,6 +416,8 @@ def run_sell_check(dry_run: bool = False, idle_sell: bool = False) -> int:
             "note": "SHADOW-未实盘平仓",
         })
         send_dingtalk(f"[SHADOW] 卖出{pos['name']} {ret_num:+.2f}%", "\n".join(lines))
+        # 卖出信号触发后, 把最新流水同步到 Web
+        sync_to_web()
     else:
         print("\n".join(lines))
     return 0

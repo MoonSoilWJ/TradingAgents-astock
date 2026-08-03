@@ -58,6 +58,7 @@ from backtest_t0_today1 import (  # noqa: E402
 from rotation_monitor import fetch_tencent_quotes, send_dingtalk  # noqa: E402
 from t0_etf_list import get_all_t0_etfs, get_quality_etfs  # noqa: E402
 from t0_regime import CHOPPY_MA_CROSS, REGIME_PROXY, detect_regime, format_regime_block  # noqa: E402
+from sync_web import sync_to_web  # noqa: E402 买卖信号触发后同步到 Web
 
 try:
     from tradingagents.dataflows.instrument import settlement_rule
@@ -819,6 +820,9 @@ def run_signal(dry_run: bool = False) -> int:
             "pick_mode": pick_mode,
         }
         save_state(state)
+        if not dry_run:
+            # 触发买入信号后, 把最新状态同步到 Web
+            sync_to_web()
 
     if dry_run:
         print("\n>>> --dry-run，跳过推送")
@@ -1041,6 +1045,10 @@ def run_sell_check(dry_run: bool = False) -> int:
         else:
             print(f"截至 {now_hm} 未触发 TRIX 死叉，继续持仓（不推送）")
             return 0
+
+    if not dry_run:
+        # 卖出信号触发后, 把最新流水同步到 Web
+        sync_to_web()
 
     if dry_run:
         print("\n>>> --dry-run，跳过推送")

@@ -42,13 +42,13 @@ sys.path.insert(0, str(_HERE))
 from backtest_8wide_ma20_rotation import (  # noqa: E402
     CACHE_DIR,
     benchmark_hs300,
+    count_jumps,
+    fetch_em_qfq,
+    fetch_sina_raw,
     fetch_universe,
-    to_sina,
 )
 
-import akshare as ak  # noqa: E402
-
-EXPAND_CACHE = CACHE_DIR / "etf_daily_sina_expand.json"
+EXPAND_CACHE = CACHE_DIR / "etf_daily_qfq_expand.json"
 
 # 扩池候选(明确偏离原版8只, 单独标注): 高波动/低相关, 给动量轮动更多"强腿"
 EXPAND_UNIVERSE: dict[str, list[str]] = {
@@ -130,6 +130,14 @@ class Series:
                 sd = var ** 0.5
                 if sd > 1e-9:
                     arr[i] = r / sd
+        elif mdef == "ret_skip":
+            # 12-1 式动量: 跳过最近 1 天, 用 (i-1) 日收盘 / (i-1-w) 日收盘 - 1
+            # 剔除"决策日单日暴涨"带来的伪动量, 降低噪声
+            skip = 1
+            for i in range(w + skip, n):
+                b = self.close[i - w - skip]
+                if b > 0:
+                    arr[i] = self.close[i - skip] / b - 1
         self.mom[key] = arr
 
 
@@ -147,7 +155,7 @@ def build_series(data: dict) -> dict:
 # --------------------------------------------------------------------------
 def backtest(series: dict, dates: list, *, ma_win: int, mom_win: int,
              mom_def: str, hold_rank: int, buffer: float, rebal: int,
-             fee_pct: float = 0.05) -> dict:
+             fee_pct: float = 0.05, mom_thresh: float = -1e9) -> dict:
     """一次回测。dates 为已过滤起点的交易日轴。"""
     for s in series.values():
         s.build_ma(ma_win)
@@ -186,6 +194,8 @@ def backtest(series: dict, dates: list, *, ma_win: int, mom_win: int,
             m = s.ma[ma_win][i]
             mo = s.mom[mkey][i]
             if m is None or mo is None or m <= 0:
+                continue
+            if mo < mom_thresh:  # 最低动量门槛: 动量不足直接淘汰
                 continue
             if s.close[i] > m:  # 有效站上均线
                 cand.append((mo, nm))
@@ -253,6 +263,7 @@ def backtest(series: dict, dates: list, *, ma_win: int, mom_win: int,
         "yearly": {y: round(v * 100, 2) for y, v in year_ret.items()},
         "neg_years": [y for y, v in year_ret.items() if v < 0],
         "mar": round((cagr / abs(mdd)) if mdd < -1e-9 else 0, 2),
+        "curve": curve,
     }
 
 
@@ -262,18 +273,18 @@ def fetch_expand(fresh: bool = False) -> dict:
     out = {}
     for name, codes in EXPAND_UNIVERSE.items():
         for code in codes:
-            try:
-                h = ak.fund_etf_hist_sina(symbol=to_sina(code))
-            except Exception as e:  # noqa: BLE001
-                print(f"  [扩池失败] {name} {code}: {e}")
+            rows = fetch_em_qfq(code)
+            src = "em-qfq"
+            if rows is None:
+                rows = fetch_sina_raw(code)
+                src = "sina-raw"
+            if not rows:
+                print(f"  [扩池失败] {name} {code}")
                 continue
-            if h is None or len(h) == 0:
-                continue
-            rows = [[str(r["date"]), float(r["close"])] for _, r in h.iterrows()
-                    if r["close"] and float(r["close"]) > 0]
-            rows.sort(key=lambda x: x[0])
-            out[name] = {"code": code, "rows": rows}
-            print(f"  [OK] {name:8s} {code} 起{rows[0][0]} K线{len(rows)}")
+            out[name] = {"code": code, "rows": rows, "src": src}
+            jm = count_jumps(rows)
+            print(f"  [OK] {name:8s} {code} [{src}] 起{rows[0][0]} K线{len(rows)}"
+                  + (f"  ⚠跳变{jm}" if jm else ""))
             break
     EXPAND_CACHE.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
     return out
@@ -287,6 +298,8 @@ def main():
     ap.add_argument("--fee", type=float, default=0.05)
     ap.add_argument("--expand", action="store_true", help="扩池(加14只高波动ETF)")
     ap.add_argument("--top", type=int, default=15)
+    ap.add_argument("--final", action="store_true",
+                    help="只跑最终推荐方案(rank3 + 每周决策 + 1%%缓冲)并输出逐年表")
     args = ap.parse_args()
 
     print("=" * 78)
@@ -299,12 +312,55 @@ def main():
         data = dict(data)
         data.update(fetch_expand())
 
+    # 数据质量校验: 未复权的拆分/份额折算会造成假涨假跌, 直接污染回测
+    bad = []
+    for nm, info in data.items():
+        if nm == "__benchmark":
+            continue
+        j = count_jumps(info["rows"])
+        if j and info.get("src") != "em-qfq":
+            bad.append(f"{nm}({info['code']},{info.get('src')},跳变{j})")
+    if bad:
+        print("\n  ⚠ 数据质量告警(疑似未复权断点): " + ", ".join(bad))
+
     series = build_series(data)
     all_dates = sorted({d for s in series.values() for d in s.dates if d >= args.start})
     print(f"\n[数据] 标的 {len(series)} 只  交易日 {len(all_dates)} "
           f"({all_dates[0]} ~ {all_dates[-1]})")
 
     bm = benchmark_hs300(data, args.start)
+
+    # ---------------- 最终推荐方案 (--final) ----------------
+    if args.final:
+        FINAL = dict(ma_win=20, mom_win=20, mom_def="ma_dev",
+                     hold_rank=3, buffer=0.01, rebal=5)
+        r = backtest(series, all_dates, fee_pct=args.fee, **FINAL)
+        b = backtest(series, all_dates, ma_win=20, mom_win=20, mom_def="ma_dev",
+                     hold_rank=1, buffer=0.0, rebal=1, fee_pct=args.fee)
+        print("\n" + "=" * 78)
+        print("[最终推荐方案]  8只宽基 / MA20趋势过滤 / 相对MA20动量排序")
+        print("  改动1: 持仓跌到第3名之外才换(原版跌出第1就清仓)")
+        print("  改动2: 每5个交易日(每周)决策一次(原版每日)")
+        print("  改动3: 新第1动量需超过持仓1个百分点才换仓(换仓缓冲)")
+        print("=" * 78)
+        print(f"  {'年份':<8}{'优化后':>12}{'原版':>12}{'沪深300':>12}")
+        for y in sorted(r["yearly"]):
+            print(f"  {y:<8}{r['yearly'][y]:>11.2f}%{b['yearly'].get(y, 0):>11.2f}%"
+                  f"{bm.get('yearly', {}).get(y, 0):>11.2f}%")
+        print("-" * 78)
+        print(f"  {'累计':<8}{r['final_pct']:>11.2f}%{b['final_pct']:>11.2f}%"
+              f"{bm.get('final_pct', 0):>11.2f}%")
+        print(f"\n  年化 {r['cagr_pct']:.2f}% (原版 {b['cagr_pct']:.2f}%)   "
+              f"最大回撤 {r['mdd_pct']:.2f}% (原版 {b['mdd_pct']:.2f}%)")
+        print(f"  换仓 {r['switches']} 次 (原版 {b['switches']} 次)   "
+              f"亏损年 {r['neg_years'] or '无'} (原版 {b['neg_years'] or '无'})")
+        op = CACHE_DIR / "rotation_final_8wide.json"
+        op.write_text(json.dumps(
+            {"params": FINAL, "optimized": {k: v for k, v in r.items() if k != "curve"},
+             "baseline": {k: v for k, v in b.items() if k != "curve"},
+             "benchmark": bm}, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\n[保存] {op}")
+        return
 
     # ---------------- A. 原版基线 ----------------
     base = backtest(series, all_dates, ma_win=20, mom_win=20, mom_def="ma_dev",
@@ -397,6 +453,36 @@ def main():
           f"年化 {wf_full['cagr_pct']:+.2f}%  回撤 {wf_full['mdd_pct']:.2f}%")
     print("  逐年: " + "  ".join(f"{y}:{v:+.1f}%" for y, v in sorted(wf_full["yearly"].items())))
 
+    # ---------------- E. 单因素消融 ----------------
+    print("\n" + "-" * 78)
+    print("[E] 单因素消融 — 每个改动各自贡献多少 (其余参数保持原版)")
+    ABL = [
+        ("原版(基线)", dict(ma_win=20, mom_win=20, mom_def="ma_dev",
+                            hold_rank=1, buffer=0.0, rebal=1)),
+        ("① 只改: 每周决策(reb5)", dict(ma_win=20, mom_win=20, mom_def="ma_dev",
+                                        hold_rank=1, buffer=0.0, rebal=5)),
+        ("② 只改: 跌到第3名才走(rank3)", dict(ma_win=20, mom_win=20, mom_def="ma_dev",
+                                              hold_rank=3, buffer=0.0, rebal=1)),
+        ("③ 只改: 换仓缓冲2%(buf)", dict(ma_win=20, mom_win=20, mom_def="ma_dev",
+                                        hold_rank=1, buffer=0.02, rebal=1)),
+        ("④ 只改: 趋势用MA60", dict(ma_win=60, mom_win=20, mom_def="ma_dev",
+                                    hold_rank=1, buffer=0.0, rebal=1)),
+        ("⑤ 只改: 风险调整动量(sharpe)", dict(ma_win=20, mom_win=20, mom_def="sharpe",
+                                              hold_rank=1, buffer=0.0, rebal=1)),
+        ("★ ①+② 组合(走查最优)", dict(ma_win=20, mom_win=20, mom_def="ma_dev",
+                                       hold_rank=3, buffer=0.0, rebal=5)),
+    ]
+    print(f"    {'方案':<30}{'累计%':>10}{'年化%':>8}{'回撤%':>8}{'换仓':>6}{'亏损年':>7}")
+    abl_out = []
+    for label, p in ABL:
+        r = backtest(series, all_dates, fee_pct=args.fee, **p)
+        abl_out.append({"label": label, "params": p, "final_pct": r["final_pct"],
+                        "cagr_pct": r["cagr_pct"], "mdd_pct": r["mdd_pct"],
+                        "switches": r["switches"], "neg_years": r["neg_years"],
+                        "yearly": r["yearly"]})
+        print(f"    {label:<30}{r['final_pct']:>10.2f}{r['cagr_pct']:>8.2f}"
+              f"{r['mdd_pct']:>8.2f}{r['switches']:>6}{len(r['neg_years']):>7}")
+
     # ---------------- D. 缺口归因 ----------------
     CLAIM = 5215.88
     n_years = len(all_dates) / 244.0
@@ -431,6 +517,7 @@ def main():
             "oos_top10_avg_pct": round(avg_oos, 2),
             "full_with_is_params": wf_full,
         },
+        "ablation": abl_out,
         "benchmark": bm,
         "claim": {"final_pct": CLAIM, "need_cagr_pct": round(need_cagr, 2)},
         "universe": sorted(series.keys()),
