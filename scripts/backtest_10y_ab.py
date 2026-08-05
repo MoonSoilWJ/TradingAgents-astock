@@ -256,14 +256,56 @@ def cagr(total_pct: float, n_days: int) -> float:
     return ((1 + total_pct / 100) ** (1 / yrs) - 1) * 100
 
 
+def above_ma(etf_daily: dict, code: str, day: str, ma_days: int) -> bool | None:
+    """当日收盘是否 > MA(ma_days)。无未来函数: 只用 day(含)及之前的收盘。
+
+    取该标的所有 ≤day 的收盘, 取最后 ma_days+1 根 → 前 ma_days 根均值 = MA,
+    最后一根 = 当日收盘, 比较 close > MA。不足 ma_days+1 根 → None(视为不通过)。
+    口径与本策略 joinquant_unified_strategy.close_above_ma 完全一致(只是这里用
+    本地 etf_daily 而非聚宽 get_price)。
+    """
+    info = etf_daily.get(code)
+    if not info:
+        return None
+    closes = [r["close"] for r in info["returns"] if r["date"] <= day]
+    if len(closes) < ma_days + 1:
+        return None
+    ma = sum(closes[-(ma_days + 1):-1]) / ma_days
+    today = closes[-1]
+    if ma <= 0 or today <= 0:
+        return None
+    return today > ma
+
+
+def apply_gate(picks, etf_daily, ma_days):
+    """对选出的 Top1 加趋势门禁: 收盘≤MA 或数据不足 → 否决(None)。返回(n_gated, rejected)。"""
+    out, rej = {}, 0
+    for k, v in picks.items():
+        if not v:
+            out[k] = v
+            continue
+        code = v[0]
+        if above_ma(etf_daily, code, k[1], ma_days) is not True:
+            out[k] = None
+            rej += 1
+        else:
+            out[k] = v
+    return out, rej
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="10年 A vs B 近似回测")
     ap.add_argument("--start", type=str, default="2015-01-05")
     ap.add_argument("--lookback", type=int, default=30)
     ap.add_argument("--fee", type=float, default=FEE_PCT)
     ap.add_argument("--confirm-time", type=str, default="14:40")
+    ap.add_argument("--gate", type=str, default="none",
+                    help="A选股趋势门禁: none=关, ma20=收盘>MA20 才入选(模拟聚宽 v2.1+趋势门禁)")
+    ap.add_argument("--gate-ma", type=int, default=20)
     args = ap.parse_args()
     cf = None if args.confirm_time.lower() == "none" else args.confirm_time
+    GATE = args.gate.lower()
+    GATE_MA = args.gate_ma
 
     print("载入主缓存(交易日/proxy) ...", flush=True)
     cache = json.loads(CACHE.read_text(encoding="utf-8"))
@@ -349,9 +391,21 @@ def main() -> None:
     if cf:
         picks_a, rej_a = apply_confirm(picks_a, etf_daily, etf_5min, cf)
         print(f"    {cf} 确认否决 {rej_a} 天", flush=True)
+    # ---- A 选股趋势门禁(模拟聚宽 v2.1+趋势门禁, 仅在 A 上实测, 不与 B 混谈) ----
+    picks_a_gated = picks_a
+    rej_gate = 0
+    if GATE == "ma20":
+        picks_a_gated, rej_gate = apply_gate(picks_a, etf_daily, GATE_MA)
+        print(f"    [门禁 MA{GATE_MA}] 否决 {rej_gate} 天 "
+              f"({sum(1 for v in picks_a_gated.values() if v)} 笔留存)", flush=True)
     print(">>> A 卖出模拟(TRIX) ...", flush=True)
     ra = run_strategy("trix", a_test, all_dates, picks_a, etf_5min, args.fee)
     ta = ra["trades"] if ra else []
+    if GATE == "ma20":
+        rg = run_strategy("trix", a_test, all_dates, picks_a_gated, etf_5min, args.fee)
+        tg = rg["trades"] if rg else []
+    else:
+        tg = []
 
     # B 在 A 同窗口的子集(可比口径)
     tb_post = [t for t in tb if t["signal_date"] >= a_test[0]]
@@ -385,6 +439,7 @@ def main() -> None:
     y_b, y_a = year_table(tb), year_table(ta)
     s_b, s_a = stats_of(tb), stats_of(ta)
     s_b_post, s_b_pre = stats_of(tb_post), stats_of(tb_pre)
+    s_a_gate = stats_of(tg) if tg else None
 
     print("\n" + "=" * 78)
     print("  逐年收益(按信号年复利)  ★=无偏严谨段(全10年由DENSE全池无偏抓取)")
@@ -416,6 +471,13 @@ def main() -> None:
     line(f"B 全10年(全程无偏)", s_b, len(all_dates))
     print("  " + "-" * 76)
     print(f"  无偏段 B-A 差: {s_b_post['equity_pct'] - s_a['equity_pct']:+.2f} 个百分点")
+    if s_a_gate is not None:
+        print("  " + "-" * 76)
+        print(f"  ★ A+门禁(MA{GATE_MA})无偏段 {a_test[0][:7]}~2026-07:", end="")
+        line(f"★ A+门禁(MA{GATE_MA})", s_a_gate, n_post)
+        dg = s_a_gate['equity_pct'] - s_a['equity_pct']
+        print(f"  → 门禁对 A 的净效应: {dg:+.2f} 个百分点 "
+              f"(A {s_a['equity_pct']:.2f}% → A+门禁 {s_a_gate['equity_pct']:.2f}%)")
 
     print(f"\n  说明:")
     print(f"   · A 策略需 501018(proxy)判 regime + 全市场密集5min 建滚动优质池,")

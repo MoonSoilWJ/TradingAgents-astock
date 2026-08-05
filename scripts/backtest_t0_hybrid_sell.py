@@ -196,13 +196,15 @@ def run_strategy(
     etf_5min: dict,
     fee_pct: float,
     trail_drop_pct: float = 0.5,
+    signal_time: str | None = None,
 ) -> dict | None:
     rets: list[float] = []
     trades: list[dict] = []
     reasons: dict[str, int] = {}
+    st = signal_time or SIGNAL_TIME
 
     for day in eval_dates:
-        picked = picks.get((SIGNAL_TIME, day))
+        picked = picks.get((st, day))
         if not picked:
             continue
         code, gain, name = picked
@@ -252,7 +254,7 @@ def run_strategy(
             "etf": code,
             "name": name,
             "today_gain": round(gain, 2),
-            "signal_time": SIGNAL_TIME,
+            "signal_time": st,
             "buy_time": BUY_TIME,
             "sell_time": timing.get("sell_time", ""),
             "buy_price": round(buy_price, 4),

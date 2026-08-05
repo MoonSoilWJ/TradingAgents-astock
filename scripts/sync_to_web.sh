@@ -20,7 +20,9 @@ set -euo pipefail
 # ECS 目标（user@host:远端目录）
 SCP_TARGET="root@39.105.204.66:/var/www/strategy-web/"
 # 本地 strategy-web 的 public 目录（生成的 strategies.json 落这里，并作为 --scp 的本地源）
-WEB_PUBLIC="$HOME/Documents/strategy-web/public"
+# ⚠️ 必须放在 ~/ 根目录下，不能放 ~/Documents —— macOS TCC 会拦截 cron 写入 Documents，
+#    导致 PermissionError: Operation not permitted。家目录根不受此限制。
+WEB_PUBLIC="$HOME/strategy-web/public"
 # 本脚本所在目录（用来定位 export_to_web.py）
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # ==============================
