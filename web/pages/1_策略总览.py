@@ -51,6 +51,26 @@ with k4:
     st.metric("min_cache 文件", f"{cache['file_count']:,}")
 
 st.divider()
+st.subheader("🚀 当前在跑三策略")
+st.caption("实盘 A (本地真实下单) · SHADOW B (本地影子·不下单) · R3 月度轮动 (本地 SHADOW·不下单) — 三者并列验证 R3 选股方向")
+_running = (
+    ("t0_baseline_trix", "实盘 A · 本地真实下单"),
+    ("t0_b_idle_shadow", "SHADOW B · 本地影子·不下单"),
+    ("jq_r3_attack", "R3 月度轮动 · 本地 SHADOW·不下单"),
+)
+_by_id = load_registry().get("_by_id", {})
+_rcols = st.columns(3)
+for (_sid, _role), _col in zip(_running, _rcols):
+    _s = _by_id.get(_sid)
+    if not _s:
+        continue
+    with _col:
+        st.markdown(f"**{_s['name']}**")
+        st.markdown(f"<span style='color:#9aa0b5;font-size:0.78rem;'>{_role}</span>", unsafe_allow_html=True)
+        st.markdown(f"状态: `{_s.get('status')}` · 脚本: `{_s.get('script','')}`")
+        st.markdown(f"结论: {_s.get('conclusion','')}")
+
+st.divider()
 st.subheader("最近 T+0 成交")
 recent_t0 = trades_to_table_rows(load_t0_trades(days=30)["closed"][:5])
 if recent_t0:

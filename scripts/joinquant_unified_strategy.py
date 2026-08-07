@@ -1,5 +1,5 @@
 """
-大一统策略 · 聚宽（JoinQuant）回测   【v3.0 满仓进攻模式 · 无防守腿】
+大一统策略 · 聚宽（JoinQuant）回测   【v3.0 · DEFENSE_ENABLED 切换 满仓进攻/Overlay 防守】
 ================================================================================
 【核心设计：满仓进攻(A 方案) + 无防守对冲，零 regime 切换】
 ★ 2026-08-05 改: 用户要求"不要split分仓,满仓干" → 彻底删除防守腿/Overlay。
@@ -129,6 +129,75 @@ TREND_ADX_MIN = 30.0
 # 参数 · 防守腿（弱市抗跌资产，无动量/MA过滤）
 # ============================================================
 
+import json  # 读本地导出月度池(joinquant 沙箱内置, 显式 import 更安全)
+try:
+    from jq_attack_pools import JQ_ATTACK_POOLS  # 内联月度池(免上传 JSON)
+except Exception:
+    JQ_ATTACK_POOLS = {}
+
+# ★ 固定162质量池(内联, 免上传文件): 复现本地 backtest_10y_ab.py B策略
+#   手工T0有效103只(已排除退市虚标 159833/513680/513960) + auto质量宽基59只 = 162只
+#   由 scripts/generate_fixed162.py 生成, 手工103去重 + auto59 合并后排序。
+#   所有regime走全池当日涨幅Top1≥3%。ATTACK_POOL_RULE="FIXED" 时启用。
+FIXED_162_POOL = [
+    '159329.XSHE', '159501.XSHE', '159509.XSHE', '159510.XSHE', '159513.XSHE',
+    '159518.XSHE', '159541.XSHE', '159561.XSHE', '159562.XSHE', '159569.XSHE',
+    '159605.XSHE', '159607.XSHE', '159612.XSHE', '159615.XSHE', '159620.XSHE',
+    '159625.XSHE', '159628.XSHE', '159632.XSHE', '159636.XSHE', '159643.XSHE',
+    '159649.XSHE', '159655.XSHE', '159658.XSHE', '159659.XSHE', '159660.XSHE',
+    '159685.XSHE', '159687.XSHE', '159688.XSHE', '159691.XSHE', '159696.XSHE',
+    '159697.XSHE', '159712.XSHE', '159723.XSHE', '159740.XSHE', '159745.XSHE',
+    '159747.XSHE', '159792.XSHE', '159808.XSHE', '159812.XSHE', '159824.XSHE',
+    '159830.XSHE', '159840.XSHE', '159856.XSHE', '159863.XSHE', '159866.XSHE',
+    '159876.XSHE', '159887.XSHE', '159888.XSHE', '159892.XSHE', '159895.XSHE',
+    '159899.XSHE', '159901.XSHE', '159920.XSHE', '159934.XSHE', '159941.XSHE',
+    '159981.XSHE', '159985.XSHE', '159991.XSHE', '161116.XSHE', '161125.XSHE',
+    '161128.XSHE', '161129.XSHE', '161226.XSHE', '161815.XSHE', '162411.XSHE',
+    '162719.XSHE', '501018.XSHG', '501312.XSHG', '510900.XSHG', '511010.XSHG',
+    '511020.XSHG', '511030.XSHG', '511060.XSHG', '511070.XSHG', '511090.XSHG',
+    '511100.XSHG', '511110.XSHG', '511120.XSHG', '511130.XSHG', '511150.XSHG',
+    '511160.XSHG', '511180.XSHG', '511190.XSHG', '511200.XSHG', '511220.XSHG',
+    '511260.XSHG', '511270.XSHG', '511360.XSHG', '511380.XSHG', '511520.XSHG',
+    '511580.XSHG', '511660.XSHG', '511850.XSHG', '511880.XSHG', '511990.XSHG',
+    '513000.XSHG', '513010.XSHG', '513020.XSHG', '513030.XSHG', '513040.XSHG',
+    '513050.XSHG', '513060.XSHG', '513080.XSHG', '513100.XSHG', '513110.XSHG',
+    '513120.XSHG', '513130.XSHG', '513150.XSHG', '513160.XSHG', '513180.XSHG',
+    '513190.XSHG', '513200.XSHG', '513220.XSHG', '513260.XSHG', '513280.XSHG',
+    '513300.XSHG', '513330.XSHG', '513380.XSHG', '513390.XSHG', '513400.XSHG',
+    '513500.XSHG', '513520.XSHG', '513530.XSHG', '513550.XSHG', '513560.XSHG',
+    '513580.XSHG', '513590.XSHG', '513600.XSHG', '513620.XSHG', '513630.XSHG',
+    '513650.XSHG', '513660.XSHG', '513690.XSHG', '513700.XSHG', '513720.XSHG',
+    '513730.XSHG', '513750.XSHG', '513770.XSHG', '513800.XSHG', '513820.XSHG',
+    '513850.XSHG', '513860.XSHG', '513870.XSHG', '513880.XSHG', '513890.XSHG',
+    '513900.XSHG', '513910.XSHG', '513920.XSHG', '513950.XSHG', '513970.XSHG',
+    '513980.XSHG', '513990.XSHG', '517520.XSHG', '518600.XSHG', '518660.XSHG',
+    '518680.XSHG', '518800.XSHG', '518850.XSHG', '518860.XSHG', '518880.XSHG',
+    '518890.XSHG', '562990.XSHG',
+]
+
+# ★ 固定162-纯宽基池(内联, 免上传文件): FIXED_162_POOL 经主题/行业ETF剔除(对齐 R3 drop_sector=True)。
+#   剔除16只主题: 半导体(159510/159541)、油气(159518)、消费(159696/513690/513980)、
+#     医药医疗(159824/513060/513120/513590/513660/513720/513860/513970)、创新药(159991)。
+#   恒生科技(513010/513110/513130/513180/513260)等宽基保留。
+#   由 get_all_t0_etfs() 名称 + _SECTOR_NEGATIVE 离线生成(修复: 运行时 get_all_securities 过滤在聚宽沙箱致空池, 故改为内联字面量)。
+FIXED_NB_POOL = [
+    '159329.XSHE', '159501.XSHE', '159509.XSHE', '159513.XSHE', '159561.XSHE', '159562.XSHE', '159569.XSHE', '159605.XSHE', '159607.XSHE', '159612.XSHE',
+    '159615.XSHE', '159620.XSHE', '159625.XSHE', '159628.XSHE', '159632.XSHE', '159636.XSHE', '159643.XSHE', '159649.XSHE', '159655.XSHE', '159658.XSHE',
+    '159659.XSHE', '159660.XSHE', '159685.XSHE', '159687.XSHE', '159688.XSHE', '159691.XSHE', '159697.XSHE', '159712.XSHE', '159723.XSHE', '159740.XSHE',
+    '159745.XSHE', '159747.XSHE', '159792.XSHE', '159808.XSHE', '159812.XSHE', '159830.XSHE', '159840.XSHE', '159856.XSHE', '159863.XSHE', '159866.XSHE',
+    '159876.XSHE', '159887.XSHE', '159888.XSHE', '159892.XSHE', '159895.XSHE', '159899.XSHE', '159901.XSHE', '159920.XSHE', '159934.XSHE', '159941.XSHE',
+    '159985.XSHE', '161116.XSHE', '161125.XSHE', '161128.XSHE', '161129.XSHE', '161226.XSHE', '161815.XSHE', '162411.XSHE', '162719.XSHE', '501018.XSHG',
+    '501312.XSHG', '510900.XSHG', '511010.XSHG', '511020.XSHG', '511030.XSHG', '511060.XSHG', '511070.XSHG', '511090.XSHG', '511100.XSHG', '511110.XSHG',
+    '511120.XSHG', '511130.XSHG', '511150.XSHG', '511160.XSHG', '511180.XSHG', '511190.XSHG', '511200.XSHG', '511220.XSHG', '511260.XSHG', '511270.XSHG',
+    '511360.XSHG', '511380.XSHG', '511520.XSHG', '511580.XSHG', '511660.XSHG', '511850.XSHG', '511880.XSHG', '511990.XSHG', '513000.XSHG', '513010.XSHG',
+    '513020.XSHG', '513030.XSHG', '513040.XSHG', '513050.XSHG', '513080.XSHG', '513100.XSHG', '513110.XSHG', '513130.XSHG', '513150.XSHG', '513160.XSHG',
+    '513180.XSHG', '513190.XSHG', '513200.XSHG', '513220.XSHG', '513260.XSHG', '513280.XSHG', '513300.XSHG', '513330.XSHG', '513380.XSHG', '513390.XSHG',
+    '513400.XSHG', '513500.XSHG', '513520.XSHG', '513530.XSHG', '513550.XSHG', '513560.XSHG', '513580.XSHG', '513600.XSHG', '513620.XSHG', '513630.XSHG',
+    '513650.XSHG', '513700.XSHG', '513730.XSHG', '513750.XSHG', '513770.XSHG', '513800.XSHG', '513820.XSHG', '513850.XSHG', '513870.XSHG', '513880.XSHG',
+    '513890.XSHG', '513900.XSHG', '513910.XSHG', '513920.XSHG', '513950.XSHG', '513990.XSHG', '517520.XSHG', '518600.XSHG', '518660.XSHG', '518680.XSHG',
+    '518800.XSHG', '518850.XSHG', '518860.XSHG', '518880.XSHG', '518890.XSHG', '562990.XSHG',
+]
+
 DEF_LOOKBACK = 120
 MA_WINDOWS = (20, 60)        # 历史遗留，防守腿已不再使用此过滤（保留无害）
 DEFENSE_REBAL_DAY = 5        # 每月前几个交易日内更新一次防守目标
@@ -149,11 +218,14 @@ DEFENSE_POOL = [
     "510880.XSHG",   # 红利ETF
 ]
 
-# ★ 满仓模式开关 (2026-08-05 用户要求"不要split分仓,满仓干")
-#   DEFENSE_ENABLED=False → 彻底删除防守腿: 进攻有信号则 100% 可用资金买入,
-#   无信号日空仓(持现金)。即"满仓进攻, 无防守对冲"。
-#   进攻腿本身已用 order_value(target, 全部可用现金) → 有信号即满仓。
-#   设 True 可恢复 Overlay 防守腿(弱市补收益/降回撤, 但强市收益被稀释)。
+# ★ 满仓/Overlay 模式开关
+#   DEFENSE_ENABLED=False → 满仓进攻: 进攻有信号则 100% 可用资金买入, 无信号日空仓(持现金)。
+#   DEFENSE_ENABLED=True  → C方案 Overlay: 进攻腿常开 + 剩余资金进防守组合。
+#   ⚠ 2026-08-07 弱市验证结论: Overlay 在 2012-2021 弱/震荡段被纯进攻全面击溃
+#     (Overlay +1.71%/MDD42.0%/夏普-0.218 vs 纯进攻 +27.19%/MDD34.6%/夏普-0.092)。
+#     防守腿(黄金/红利/国债)在弱市自身也跌+稀释进攻资金 → 收益更低、回撤更大。
+#     ⇒ Overlay 仅强市(2022-26)降回撤成立, 弱市反而升回撤, 非对称无效。
+#     ⇒ 回归生产满仓进攻模式 DEFENSE_ENABLED=False (无信号日空仓 > 持防守资产)。
 DEFENSE_ENABLED = False
 
 # 兜底：短融ETF（不合格份额的现金替代）
@@ -185,6 +257,133 @@ AUTO_ETFS = [
     "513890.XSHG", "513910.XSHG", "513920.XSHG", "518680.XSHG",
     "518860.XSHG", "518890.XSHG",
 ]
+
+
+# ============================================================
+# 进攻候选池 —— 规则动态维护（替代写死的 59 只）
+# ============================================================
+# 思路: 与本地 refresh_t0_pool.py 一致, 用"监管前缀 + 宽基关键词 + 非主题"规则
+#       在全市场基金里自动发现真 T+0 宽基 ETF/LOF, 并与写死的 AUTO_ETFS 取并集
+#       (祖父保留, 防止规则关键词漏匹配导致已有有效标的丢失)。
+# 运行时 get_price 对未上市日期返回 None → 自动按上市日过滤(池子随上市动态生长)。
+# 注意: 为避开聚宽初始化时逐个标的历史成交查询的限频, 此处不做成交量门槛; 流动性
+#       由 MIN_GAIN≥3% 门禁在运行时自然过滤(迷你ETF 极少单日涨3%)。
+_REG_T0_PREFIX = {"511", "513", "518", "501", "161", "162"}
+_SAFE_CROSS_KEYWORDS = (
+    "纳指", "纳斯达克", "标普", "恒生", "港股通", "港股", "中概", "H股",
+    "原油", "黄金", "豆粕", "商品", "油气", "白银", "稀土", "越南", "亚太",
+    "中韩", "中阿", "德国", "法国", "印度", "沙特", "英国", "东南亚", "日经",
+    "东证", "225", "恒生科技", "标普500", "纳指100", "中概互联",
+)
+_SECTOR_NEGATIVE = (
+    "创新药", "医药", "生物", "医疗", "医", "新药", "生物科技", "半导体", "芯片",
+    "消费", "油气", "军工", "银行", "证券", "煤炭", "白酒", "汽车", "新能源",
+    "能源", "光伏", "锂电", "化工", "地产", "钢铁", "有色", "农业", "传媒",
+    "电子", "计算机", "5G", "人工智能", "机器人", "游戏", "中药",
+)
+ATTACK_UNIVERSE = None  # initialize() 中由 compute_attack_universe() 填充
+ATTACK_POOL_BY_MONTH = {}  # 精确月度池(内联模块填充); {ym:[jq_code]}, 键=使用月(无未来函数)
+
+# 轮动规则验证开关(优先级: RULE > FILE > 规则模式):
+#   ATTACK_POOL_RULE = "R3"  -> 用 jq_attack_pools.py 内联 JQ_ATTACK_POOLS["R3"](免上传 JSON, 无未来函数)。
+#   ATTACK_POOL_FILE  = "/path/xxx.json" -> 读导出 JSON(兼容旧方式)。
+#   两者皆 None -> 聚宽侧规则模式(默认 R3 等效; turn/listing 因限频不实现)。
+#   ATTACK_POOL_RULE = "FIXED" → 固定162质量池全池Top1(复现本地 backtest_10y_ab.py B策略,
+#     不区分regime, 所有候选走"当日涨幅Top1≥3%")。需上传 jq_attack_pool_fixed162.py。
+#   ATTACK_POOL_RULE = "FIXED_NB" → 固定162池剔除主题/行业ETF(纯宽基, 对齐 R3 drop_sector=True),
+#     分离"剔除主题"与"月度轮动"两因素: 固定纯宽基 vs FIXED含主题(952%) vs R3(1861%)。
+#   ATTACK_POOL_RULE = "R3"    → 月度轮动质量池(免上传JSON)。
+#   ATTACK_POOL_RULE = None    → 聚宽侧规则模式(默认 R3 等效; turn/listing 因限频不实现)。
+# ★2026-08-07 FIXED_NB 实跑(2014-2026): +891.61% / MDD-41.36% / 夏普0.584 / 965笔 / 胜49.0%。
+#   → 推翻"剔除主题有益"假设: FIXED_NB(891) < FIXED(952), 回撤几乎不变(-41.36%≈-41.4%)。
+#   剔除主题在【固定全池】语境反伤收益、不降回撤; drop_sector 只在【月度轮动】语境沾光(R3 1861 > R1 1541)。
+#   因素分解: ①剔除主题(固定池)=-61pp; ②月度轮动(FIXED_NB→R3)=+970pp(绝对主因子)。
+#   最优仍是 R3(+1861%/-23.5%/夏普1.01); 简单固定池则 FIXED(952) > FIXED_NB(891)。
+ATTACK_POOL_RULE = "FIXED_NB"
+ATTACK_POOL_FILE = None
+
+
+def _jq_is_genuine_t0(code, name):
+    base = code.split(".")[0]
+    if base[:3] in _REG_T0_PREFIX:
+        return True
+    if base.startswith("159") and name:
+        return any(kw in name for kw in _SAFE_CROSS_KEYWORDS)
+    return False
+
+
+def _jq_is_sector_negative(name):
+    return bool(name) and any(kw in name for kw in _SECTOR_NEGATIVE)
+
+
+def compute_attack_universe(pool_file=None, rule=None):
+    # 进攻候选池。两种模式:
+    # 1) pool_file 给定(推荐): 读 export_jq_pools.py 导出的 {ym:[jq_code]} 月度池。
+    #    ATTACK_UNIVERSE = 全周期并集(供趋势/震荡 regime 滚动优质池遍历);
+    #    ATTACK_POOL_BY_MONTH = 每月精确池(供中性 regime 按月取, 对齐本地 pool_fn)。
+    # 2) 无 pool_file: 聚宽侧规则模式(drop_sector 旋钮默认开; turn/listing 因限频不实现)。
+    global ATTACK_UNIVERSE, ATTACK_POOL_BY_MONTH
+    # ★固定162池模式(ATTACK_POOL_RULE="FIXED"): 复现本地 backtest_10y_ab.py B策略
+    #   全周期固定 162 只(手工T0 + auto质量宽基), 所有regime走全池当日涨幅Top1。
+    if rule == "FIXED":
+        if FIXED_162_POOL:
+            ATTACK_UNIVERSE = sorted(FIXED_162_POOL)
+            log.info(f"[池子] 固定162池模式: {len(ATTACK_UNIVERSE)} 只 (复现本地B)")
+            return ATTACK_UNIVERSE
+        log.warning("[池子] FIXED_162_POOL 为空, 退回规则模式")
+    if rule == "FIXED_NB":
+        # 固定162池剔除主题/行业ETF(纯宽基), 对齐 R3 的 drop_sector=True。
+        # 直接用内联字面量 FIXED_NB_POOL(离线由 get_all_t0_etfs 名称 + _SECTOR_NEGATIVE 生成),
+        # 不依赖运行时 get_all_securities(聚宽沙箱该调用会致空池, 已规避)。
+        if FIXED_NB_POOL:
+            ATTACK_UNIVERSE = sorted(FIXED_NB_POOL)
+            log.info(f"[池子] 固定162-纯宽基模式: {len(ATTACK_UNIVERSE)} 只 (剔除主题ETF, 对齐R3 drop_sector)")
+            return ATTACK_UNIVERSE
+        log.warning("[池子] FIXED_NB_POOL 为空, 退回规则模式")
+    # 优先: 内联模块 JQ_ATTACK_POOLS[rule](键=使用月, 值=上月末 pool_as_of, 严格无未来函数, 免上传 JSON)
+    if rule and rule in JQ_ATTACK_POOLS:
+        d = JQ_ATTACK_POOLS[rule]
+        ATTACK_POOL_BY_MONTH = {ym: list(v) for ym, v in d.items()}
+        ATTACK_UNIVERSE = sorted({c for v in ATTACK_POOL_BY_MONTH.values() for c in v})
+        return ATTACK_UNIVERSE
+    if pool_file:
+        try:
+            data = json.loads(open(pool_file, encoding="utf-8").read())
+        except Exception as e:
+            log.warning("[池子] 读取 pool_file 失败: %s -> 退回规则模式" % e)
+        else:
+            ATTACK_POOL_BY_MONTH = {ym: list(codes) for ym, codes in data.items()}
+            ATTACK_UNIVERSE = sorted({c for codes in ATTACK_POOL_BY_MONTH.values() for c in codes})
+            return ATTACK_UNIVERSE
+
+    seed = list(AUTO_ETFS)
+    seed_clean = [c for c in seed
+                  if c.split(".")[0][:3] != "511" and c not in DEFENSE_POOL]
+    try:
+        secs = get_all_securities(types=["fund"])
+    except Exception:
+        secs = None
+    if secs is None or len(secs) == 0:
+        ATTACK_UNIVERSE = seed_clean
+        return ATTACK_UNIVERSE
+    name_col = "name" if "name" in secs.columns else ("display_name" if "display_name" in secs.columns else None)
+    ds = True if rule is None else rule.get("drop_sector", True)
+    rule_list = []
+    for code in secs.index:
+        nm = secs.loc[code, name_col] if name_col else ""
+        nm = "" if nm is None else str(nm)
+        if not _jq_is_genuine_t0(code, nm):
+            continue
+        if ds and _jq_is_sector_negative(nm):
+            continue
+        base = code.split(".")[0]
+        if base[:3] == "511":
+            continue
+        if code in DEFENSE_POOL:
+            continue
+        rule_list.append(code)
+    ATTACK_UNIVERSE = sorted(set(rule_list) | set(seed_clean))
+    return ATTACK_UNIVERSE
 
 
 # ============================================================
@@ -376,7 +575,7 @@ def detect_regime(current_dt):
 def build_quality_pool(current_dt):
     """滚动优质池: auto 中过去 LOOKBACK 天累计涨幅 Top POOL_SIZE"""
     scored = []
-    for code in AUTO_ETFS:
+    for code in (ATTACK_UNIVERSE or AUTO_ETFS):
         mom = calc_momentum(code, current_dt, LOOKBACK)
         if mom is not None:
             scored.append((mom, code))
@@ -409,6 +608,13 @@ def initialize(context):
     g.current_regime = "中性"
     g.current_pool = "auto"
 
+    # --- 进攻候选池: 规则动态生成(全市场真T+0宽基 ∪ 写死seed), 替代固定59 ---
+    compute_attack_universe(ATTACK_POOL_FILE, ATTACK_POOL_RULE)
+    if ATTACK_UNIVERSE is not None:
+        log.info(f"[init] 进攻候选池(规则动态): {len(ATTACK_UNIVERSE)} 只 "
+                 f"(写死seed {len(AUTO_ETFS)} + 规则新增 "
+                 f"{len(set(ATTACK_UNIVERSE) - set(AUTO_ETFS))})")
+
     # --- 防守腿状态 ---
     g.defense_targets = {}          # {code: weight}  权重和=1
     g.last_defense_month = ""       # 每月只更新一次的去重标记
@@ -434,11 +640,11 @@ def initialize(context):
     log.info("=" * 62)
     log.info("UNIFIED v3.0 满仓进攻模式 (无防守腿)")
     if DEFENSE_ENABLED:
-        log.info(f"进攻池 {len(AUTO_ETFS)}只 | 防守池 {len(DEFENSE_POOL)}只等权"
+        log.info(f"进攻池 {len(ATTACK_UNIVERSE or AUTO_ETFS)}只 | 防守池 {len(DEFENSE_POOL)}只等权"
                  f"(无MA过滤, 已剔除511380可转债) | 兜底 {CASH_ETF}")
         log.info("零 regime 切换：进攻腿优先，剩余资金→防守组合，按天动态调整")
     else:
-        log.info(f"进攻池 {len(AUTO_ETFS)}只 | ★满仓模式: 进攻有信号即100%买入, "
+        log.info(f"进攻池 {len(ATTACK_UNIVERSE or AUTO_ETFS)}只 | ★满仓模式: 进攻有信号即100%买入, "
                  f"无信号日空仓 | 无防守对冲")
     log.info("零 regime 切换")
     log.info(f"★ 趋势门禁: {'开' if GATE_ENABLED else '关'} "
@@ -507,11 +713,18 @@ def scan_at_1440(context):
     regime = detect_regime(context.current_dt)
     g.current_regime = regime
 
-    if regime in ("趋势", "震荡"):
+    if ATTACK_POOL_RULE in ("FIXED", "FIXED_NB"):
+        # 固定162池(含主题 / 纯宽基)全池Top1(复现本地B, 不区分regime)
+        # 注: 池已排除3只退市虚标, 与本地 backtest_10y_ab.py 162 池对齐
+        pool = ATTACK_UNIVERSE or []
+        tag = "fixedNB" if ATTACK_POOL_RULE == "FIXED_NB" else "fixed162"
+        g.current_pool = f"{tag}({len(pool)})"
+    elif regime in ("趋势", "震荡"):
         pool = build_quality_pool(context.current_dt)
         g.current_pool = f"优质池({len(pool)})"
     else:
-        pool = AUTO_ETFS
+        ym = context.current_dt.strftime("%Y-%m")
+        pool = ATTACK_POOL_BY_MONTH.get(ym, []) or (ATTACK_UNIVERSE or AUTO_ETFS)
         g.current_pool = f"auto({len(pool)})"
 
     if context.current_dt.strftime("%Y-%m-%d") <= "2022-06-17":

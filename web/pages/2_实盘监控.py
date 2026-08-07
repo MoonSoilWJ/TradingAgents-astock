@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
@@ -12,12 +14,104 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from web.strategy.artifact_scanner import log_files, min_cache_stats
-from web.strategy.registry_loader import get_strategy, load_cron_manifest
-from web.strategy.state_reader import rotation_state, t0_state, walk_forward_state
+from web.strategy.registry_loader import get_strategy, load_cron_manifest, load_registry
+from web.strategy.state_reader import rotation_state, t0_state, walk_forward_state, state_file_info
 from web.strategy.t0_table import render_t0_trade_table
 from web.strategy.b_idle_shadow_table import render_b_idle_overview, render_b_idle_vs_live
 from web.strategy.t0_journal import load_t0_trades, trades_to_table_rows
-from web.strategy.theme import fmt_dt, inject_css
+from web.strategy.theme import fmt_dt, inject_css, status_badge_html
+
+
+def render_r3_detail():
+    """R3 月度轮动 SHADOW 详情: 当前持仓 + 本地交易明细(journal) + 当前攻击池 + 结论.
+
+    R3 现已转本地 SHADOW 实跑 (scripts/t0_r3_monitor.py, --install-r3): 选股走月度轮动池,
+    仅写 r3_shadow_state.json / r3_journal.jsonl, 不下单, 不改实盘。聚宽仅用于历史验证。
+    """
+    st.subheader("R3 (月度轮动 SHADOW) 详情")
+    st.caption("本地 SHADOW 实跑 (scripts/t0_r3_monitor.py, --install-r3): 选股走月度轮动池, 仅记录不下单, 不改实盘")
+    _by_id = load_registry().get("_by_id", {})
+    s = _by_id.get("jq_r3_attack")
+    if s:
+        st.markdown(f"状态 `{s.get('status')}` · 脚本 `{s.get('script','')}` · 版本 `{s.get('version','')}`")
+        rules = s.get("rules", {})
+        st.markdown(f"**选股**: {rules.get('pick','')}")
+        st.markdown(f"**买 / 卖**: {rules.get('buy','')} / {rules.get('sell','')}")
+        st.markdown(f"**结论**: {s.get('conclusion','')}")
+    # 当前持仓 (本地 state)
+    _state_path = Path.home() / ".tradingagents/rotation/r3_shadow_state.json"
+    _pos = None
+    if _state_path.exists():
+        try:
+            _stt = json.loads(_state_path.read_text(encoding="utf-8"))
+            _pos = _stt.get("position")
+        except Exception:
+            pass
+    if _pos and not _pos.get("sold"):
+        st.markdown(f"**当前持仓**: {_pos.get('name')}({_pos.get('etf')}) 买@{_pos.get('buy_price')} "
+                    f"({_pos.get('buy_date')}) 信号涨幅{_pos.get('today_gain')}% [SHADOW]")
+    else:
+        st.info("当前无持仓 (SHADOW)")
+    # 交易明细 (本地 journal: signal 行 + sell 行 聚合成一笔交易)
+    _jpath = Path.home() / ".tradingagents/rotation/r3_journal.jsonl"
+    _rows = []
+    _signals = {}
+    if _jpath.exists():
+        for _line in _jpath.read_text(encoding="utf-8").splitlines():
+            _line = _line.strip()
+            if not _line:
+                continue
+            try:
+                _row = json.loads(_line)
+            except Exception:
+                continue
+            if "sell_date" in _row:
+                _key = (_row.get("etf"), _row.get("buy_date"))
+                _sig = _signals.get(_key, {})
+                _reason = _row.get("sell_reason")
+                _reason_label = {"trix_death_cross": "TRIX死叉", "trix_time_sell_1105": "11:05定时"}.get(_reason, _reason)
+                _rows.append({
+                    "买入日": _row.get("buy_date"),
+                    "信号时间": _row.get("signal_time") or _sig.get("signal_time"),
+                    "标的": _row.get("name"),
+                    "代码": _row.get("etf"),
+                    "类型": _row.get("leg"),
+                    "信号涨幅%": _sig.get("today_gain"),
+                    "买入价": _row.get("buy_price"),
+                    "卖出日": _row.get("sell_date"),
+                    "卖出时间": _row.get("sell_time"),
+                    "卖出原因": _reason_label,
+                    "卖出价": _row.get("sell_price"),
+                    "影子收益%": round(_row["return_pct"], 2) if _row.get("return_pct") is not None else None,
+                    "理论收益%": round(_row["theory_return_pct"], 2) if _row.get("theory_return_pct") is not None else None,
+                    "滑点pp": round(_row["slippage_pp"], 2) if _row.get("slippage_pp") is not None else None,
+                })
+            elif "signal_date" in _row:
+                _signals[(_row.get("etf"), _row.get("signal_date"))] = _row
+    if _rows:
+        _rows.sort(key=lambda r: (r.get("卖出日") or "", r.get("卖出时间") or ""), reverse=True)
+        st.markdown(f"**交易明细 ({len(_rows)} 笔 · SHADOW 影子, 非真实成交)**")
+        st.dataframe(_rows, use_container_width=True, hide_index=True)
+    else:
+        st.info("暂无交易明细 (R3 SHADOW 尚未成交记录)")
+    # 当前攻击池 (取 <= 当前月的最后一个非空月份)
+    pool_path = _PROJECT_ROOT / "scripts" / "jq_pools" / "jq_attack_R3.json"
+    if pool_path.exists():
+        try:
+            pool = json.loads(pool_path.read_text(encoding="utf-8"))
+            ym_now = datetime.now().strftime("%Y-%m")
+            valid = [k for k in pool if k <= ym_now and pool[k]]
+            ym = max(valid) if valid else None
+            if ym:
+                codes = pool[ym]
+                with st.expander(f"当前攻击池 ({ym}, {len(codes)} 只)", expanded=False):
+                    st.text(", ".join(codes))
+            else:
+                st.info("暂无有效月度攻击池")
+        except Exception as e:  # noqa: BLE001
+            st.warning(f"读取 R3 攻击池失败: {e}")
+    else:
+        st.info("未找到 scripts/jq_pools/jq_attack_R3.json")
 
 st.set_page_config(page_title="实盘监控", page_icon="📡", layout="wide")
 inject_css()
@@ -25,24 +119,89 @@ inject_css()
 st.title("📡 实盘监控")
 st.caption("T+0 交易流水 · 定时任务 · 健康状态")
 
-t0 = t0_state()
-st.subheader("T+0 交易流水 (实盘)")
-render_t0_trade_table(state_data=t0.get("data"), days=60)
-
+# ── 在跑三策略概览 (紧凑卡片 + 今日持仓快照) ──
 st.divider()
+st.subheader("🚀 当前在跑三策略")
+st.caption("实盘 A (本地真实下单) · SHADOW B (本地影子·不下单) · R3 月度轮动 (本地 SHADOW·不下单)")
 
-# ── B (T0 SHADOW) 新策略影子, 不替代实盘 ──
-render_b_idle_overview(days=60)
-live = load_t0_trades(days=60)["closed"]
-live_rows = trades_to_table_rows(live)
-render_b_idle_vs_live(live_rows, days=60)
+_running = [
+    ("t0_baseline_trix", "实盘 A · 本地真实下单", "t0_monitor_state.json", "position"),
+    ("t0_b_idle_shadow", "SHADOW B · 本地影子·不下单", "b_idle_shadow_state.json", "position"),
+    ("jq_r3_attack", "R3 月度轮动 · 本地 SHADOW·不下单", "r3_shadow_state.json", "position"),
+]
+_by_id = load_registry().get("_by_id", {})
+_rcols = st.columns(3)
+for (_sid, _role, _state_rel, _pk), _col in zip(_running, _rcols):
+    _s = _by_id.get(_sid)
+    if not _s:
+        continue
+    with _col:
+        _stt = state_file_info(_state_rel)
+        _pos = (_stt.get("data") or {}).get(_pk) if _stt.get("data") else None
+        _has_open = bool(_pos) and not _pos.get("sold")
+        if _has_open:
+            _pos_txt = (f"持仓 {_pos.get('name', '')} ({_pos.get('etf', '')}) "
+                        f"@{_pos.get('buy_price', '')} 信号{_pos.get('today_gain', '')}%")
+        else:
+            _pos_txt = "空仓 / 无信号"
+        st.markdown(
+            f"""<div class="strategy-card">
+            <h4>{_s['name']}</h4>
+            <div class="strategy-meta">{_role}</div>
+            {status_badge_html(_s.get('status', 'shadow'))}
+            <div class="rule-kv">今日: {_pos_txt}</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
 
+# ── 三策略详情 (Tab 分组, 减少垂直滚动) ──
+tab_a, tab_b, tab_r3 = st.tabs(
+    ["🟢 实盘 A · 本地真实下单", "🔵 SHADOW B · 影子", "🟣 R3 月度轮动 · 影子"]
+)
+
+with tab_a:
+    t0 = t0_state()
+    st.subheader("T+0 交易流水 (实盘)")
+    render_t0_trade_table(state_data=t0.get("data"), days=60)
+    st.divider()
+    st.subheader("T+0 基线 TRIX — 运行状态")
+    st.caption(f"状态文件: {t0['path']} · 更新 {fmt_dt(t0['mtime'])}")
+    data = t0.get("data")
+    if data:
+        strat = data.get("strategy") or {}
+        if strat:
+            st.markdown("**当前策略版本**")
+            st.json(strat)
+        sig = data.get("last_signal")
+        if sig:
+            st.markdown("**最近信号**")
+            st.json(sig)
+        pos = data.get("position")
+        if pos:
+            st.markdown("**持仓**")
+            st.json(pos)
+        if not (strat or sig or pos):
+            st.json(data)
+    else:
+        st.info("t0_monitor_state.json 不存在或无法解析")
+
+with tab_b:
+    render_b_idle_overview(days=60)
+    live = load_t0_trades(days=60)["closed"]
+    live_rows = trades_to_table_rows(live)
+    render_b_idle_vs_live(live_rows, days=60)
+
+with tab_r3:
+    render_r3_detail()
+
+# ── 运维状态 ──
 st.divider()
+st.subheader("🛠 运维状态")
 
 manifest = load_cron_manifest()
 jobs = manifest.get("jobs", [])
 
-st.subheader("Cron 任务")
+st.markdown("**Cron 任务**")
 if jobs:
     rows = []
     for job in jobs:
@@ -58,10 +217,7 @@ if jobs:
 else:
     st.warning("未找到 strategies/cron_manifest.json")
 
-st.divider()
-
-col_r, col_t = st.columns(2)
-
+col_r, col_wf = st.columns(2)
 with col_r:
     st.subheader("板块轮动 v6")
     rot = rotation_state()
@@ -83,33 +239,6 @@ with col_r:
     else:
         st.info("monitor_state.json 不存在或无法解析")
 
-with col_t:
-    st.subheader("T+0 基线 TRIX")
-    t0 = t0_state()
-    st.caption(f"状态文件: {t0['path']} · 更新 {fmt_dt(t0['mtime'])}")
-    data = t0.get("data")
-    if data:
-        strat = data.get("strategy") or {}
-        if strat:
-            st.markdown("**当前策略版本**")
-            st.json(strat)
-        sig = data.get("last_signal")
-        if sig:
-            st.markdown("**最近信号**")
-            st.json(sig)
-        pos = data.get("position")
-        if pos:
-            st.markdown("**持仓**")
-            st.json(pos)
-        if not (strat or sig or pos):
-            st.json(data)
-    else:
-        st.info("t0_monitor_state.json 不存在或无法解析")
-
-st.divider()
-
-col_wf, col_cache = st.columns(2)
-
 with col_wf:
     st.subheader("Walk-Forward 最新")
     wf = walk_forward_state()
@@ -123,6 +252,7 @@ with col_wf:
     else:
         st.info("t0_walk_forward_state.json 尚未生成")
 
+col_cache, col_log = st.columns(2)
 with col_cache:
     st.subheader("数据缓存")
     cache = min_cache_stats()
@@ -130,12 +260,12 @@ with col_cache:
     st.write(f"最近缓存日期: **{cache.get('latest_date') or '—'}**")
     st.write(f"最后写入: {fmt_dt(cache.get('latest_mtime'))}")
 
-st.divider()
-st.subheader("日志文件")
-logs = log_files()
-if logs:
-    for lg in logs:
-        stale = ""
-        st.text(f"{lg['name']}  ·  {fmt_dt(lg['mtime'])}  ·  {lg['size']:,} bytes{stale}")
-else:
-    st.info("暂无 .log 文件")
+with col_log:
+    st.subheader("日志文件")
+    logs = log_files()
+    if logs:
+        with st.expander(f"查看 {len(logs)} 个日志文件", expanded=False):
+            for lg in logs:
+                st.text(f"{lg['name']}  ·  {fmt_dt(lg['mtime'])}  ·  {lg['size']:,} bytes")
+    else:
+        st.info("暂无 .log 文件")

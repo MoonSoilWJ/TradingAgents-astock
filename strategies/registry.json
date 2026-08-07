@@ -50,10 +50,10 @@
       "version": "b_idle_20260730",
       "rules": {
         "core_pick": "全市场 T0 ETF 当日涨幅 Top1, 今日涨幅 ≥ 3%, 不 regime 过滤",
-        "core_sell": "hybrid: 次日 5分K TRIX(5,3)死叉 或 追踪回落止盈(peak回落0.5%), 先发生先卖; 11:05未触发则11:05收盘fallback (对齐回测 simulate_hybrid_v2 / +550.39%)",
-        "idle_pick": "核心 14:45 未触发时, 14:50 买当日最强涨幅 ≥ 1.0% T0 ETF",
-        "idle_sell": "次日 14:50 固定卖",
-        "note": "仅写 b_idle_shadow_state.json / b_idle_journal.jsonl, 不下单, 不改实盘"
+        "core_sell": "纯 TRIX(5,3)死叉: 次日 5分K 窗口 09:40~11:05, 未触发则11:05收盘fallback (对齐回测 simulate_exit('trix0940_cut') / 全4年+613.46%)",
+        "idle_pick": "(已停用 IDLE_ENABLED=False, 核心未命中日空仓)",
+        "idle_sell": "(已停用)",
+        "note": "仅写 b_idle_shadow_state.json / b_idle_journal.jsonl, 不下单, 不改实盘; 卖点2026-07-31由hybrid升级为纯TRIX"
       },
       "logs": ["b_idle_shadow.jsonl", "b_idle_shadow.log"],
       "state_files": ["b_idle_shadow_state.json"],
@@ -63,8 +63,28 @@
         "b_idle_merge.json"
       ],
       "related": ["t0_baseline_trix"],
-      "conclusion": "WF OOS 合并 +1194%/255笔, idle 腿贡献 +643%; 近100日 +124.5% vs 实盘 +106.1%。稳健非过拟合, 先 SHADOW 观察。",
+      "conclusion": "B+确认+纯TRIX 去偏差重验: 全4年 +613.46%/429笔/MDD-33.2%, 近390 OOS +319.16%/231笔/MDD-17.6%, 各子段稳赢实盘A(全4年+472.25%)。卖点2026-07-31由hybrid(不可兑现成交价,已弃用)升级为纯TRIX; idle腿已停用。先SHADOW观察真实1min滑点。",
       "tags": ["shadow", "t0", "b_idle"]
+    },
+    {
+      "id": "jq_r3_attack",
+      "name": "R3 月度轮动攻击 (本地 SHADOW 实跑)",
+      "category": "t0",
+      "status": "shadow",
+      "script": "scripts/t0_r3_monitor.py",
+      "schedule": "本地 crontab 14:45 信号 / 09:40~11:05 卖出检查 (--install-r3)",
+      "version": "jq_r3_20260807",
+      "rules": {
+        "pick": "ATTACK_POOL_RULE=\"R3\": 月度轮动质量池(R1~R6内联字面量, 键=使用月/值=上月末pool_as_of, 严格无未来函数), drop_sector=True, 取当日涨幅Top1≥3%",
+        "buy": "14:50 (影子记录计划买价, 不下单)",
+        "sell": "次日 5分K TRIX(5,3) 09:40~11:05 / 11:05 定",
+        "note": "聚宽仅用于历史验证(2014-2026 +1861%), 验证结束后转本地 SHADOW 实跑: 选股走月度轮动池, 仅写 r3_shadow_state.json / r3_journal.jsonl, 不下单, 不改实盘"
+      },
+      "state_files": ["r3_shadow_state.json"],
+      "logs": ["r3_journal.jsonl", "r3_shadow.log"],
+      "related": ["t0_baseline_trix", "t0_b_idle_shadow"],
+      "conclusion": "聚宽 2014-2026 验证 +1861% / MDD-23.5% / 夏普1.01 / 胜49% (窗口不同不与本地实盘A+472.25%/SHADOW B+613.46%直接比收益)。验证结束转本地 SHADOW 实跑 (scripts/t0_r3_monitor.py, --install-r3), 观察月度轮动池选股在真实1min滑点下的等价性。月度轮动质量筛选=+970pp主因子。",
+      "tags": ["shadow", "t0", "r3", "jq_attack_pools"]
     },
     {
       "id": "t0_trail_shadow",
