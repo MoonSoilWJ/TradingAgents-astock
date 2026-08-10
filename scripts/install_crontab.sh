@@ -16,6 +16,7 @@
 #   bash scripts/install_crontab.sh --install-b-idle-shadow # 追加 B+idle SHADOW（新策略影子, 不改实盘）
 #   bash scripts/install_crontab.sh --install-pair-shadow  # 追加 配对收敛薄补充腿 SHADOW（核心B腿熄火时非趋势期点缀, 不下单）
 #   bash scripts/install_crontab.sh --install-r3     # 追加 R3 月度轮动 SHADOW（本地实跑影子, 选股走月度轮动池, 不下单）
+#   bash scripts/install_crontab.sh --install-pool-refresh  # 追加 池子月度维护流水线(refresh_t0_pool -> export_jq_pools, 每月1号)
 
 set -e
 
@@ -41,6 +42,11 @@ CACHE_ALLMARKET_CMD="cd ${PROJECT_DIR} && ${PYTHON3} scripts/cache_min_data.py -
 WF_CMD="cd ${PROJECT_DIR} && ${PYTHON3} scripts/t0_walk_forward.py >> ${HOME}/.tradingagents/rotation/walk_forward.log 2>&1"
 WF_CRON="0 9 1-7 * 1"   # 每月 1~7 日中的周一 9:00（首个工作日近似）
 
+# 池子月度维护流水线: 先刷新 auto 候选池(新上市 T+0 漏收补齐), 再重新生成月度轮动池(R1~R6)
+POOL_CMD="cd ${PROJECT_DIR} && ${PYTHON3} scripts/refresh_t0_pool.py && ${PYTHON3} scripts/export_jq_pools.py"
+POOL_LOG=">> ${HOME}/.tradingagents/rotation/pool_refresh.log 2>&1"
+POOL_CRON="0 9 1 * *"   # 每月 1 号 9:00
+
 MODE="t0-only"
 if [[ "${1:-}" == "--all" ]]; then
     MODE="all"
@@ -54,6 +60,8 @@ elif [[ "${1:-}" == "--install-pair-shadow" ]]; then
     MODE="pair-shadow-only"
 elif [[ "${1:-}" == "--install-r3" ]]; then
     MODE="r3-shadow-only"
+elif [[ "${1:-}" == "--install-pool-refresh" ]]; then
+    MODE="pool-refresh-only"
 fi
 
 BIDLE_CMD="cd ${PROJECT_DIR} && ${PYTHON3} scripts/t0_b_idle_shadow.py"
@@ -163,6 +171,14 @@ case "${MODE}" in
             echo "${R3_SELL_WATCH} * * 1-5 ${R3_CMD} --sell-loop ${R3_LOG}"
         } | sed '/^$/d' | crontab -
         ;;
+    pool-refresh-only)
+        echo "追加 池子月度维护流水线(refresh_t0_pool.py -> export_jq_pools.py, 每月1号)"
+        FILTERED="$(echo "${EXISTING}" | grep -v "refresh_t0_pool.py" | grep -v "export_jq_pools.py" || true)"
+        {
+            echo "${FILTERED}"
+            echo "${POOL_CRON} ${POOL_CMD} ${POOL_LOG}"
+        } | sed '/^$/d' | crontab -
+        ;;
 esac
 
 echo "✅ 定时任务已安装"
@@ -208,3 +224,14 @@ echo "R3 SHADOW 手动测试:"
 echo "  cd ${PROJECT_DIR} && python3 scripts/t0_r3_monitor.py --signal --dry-run"
 echo "  cd ${PROJECT_DIR} && python3 scripts/t0_r3_monitor.py --sell-check --dry-run"
 echo "  cd ${PROJECT_DIR} && python3 scripts/t0_r3_monitor.py --sell-loop --dry-run"
+echo ""
+echo "安装 池子月度维护流水线 定时 (refresh_t0_pool -> export_jq_pools, 每月1号):"
+echo "  bash scripts/install_crontab.sh --install-pool-refresh"
+echo ""
+echo "仅卸载 池子维护:"
+echo "  crontab -l | grep -v refresh_t0_pool.py | grep -v export_jq_pools.py | crontab -"
+echo ""
+echo "池子维护 手动测试（仅打印差异, 不写文件 / 不重生成）:"
+echo "  cd ${PROJECT_DIR} && python3 scripts/refresh_t0_pool.py --dry-run"
+echo "手动立即执行整条流水线（写文件 + 重生成 jq_attack_pools.py）:"
+echo "  cd ${PROJECT_DIR} && python3 scripts/refresh_t0_pool.py && python3 scripts/export_jq_pools.py"
