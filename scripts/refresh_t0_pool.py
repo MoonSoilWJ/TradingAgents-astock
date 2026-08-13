@@ -72,6 +72,16 @@ _MIN_LISTING_DAYS = 120          # 至少约 6 个月交易历史(避开上市�
 _MIN_AVG_TURNOVER = 30_000_000   # 日均成交金额 ≥ 3000 万(流动性门槛, 排除迷你主题 ETF)
 
 
+# 宽基港股 ETF(159xxx 的港股通/恒生/H股/香港类)不是任何动量攻击策略的 alpha 源
+# (单日暴涨但 T+1 回吐、挤占真正强票), 聚宽 R3 回测含 vs 不含净拖累 -177pp。
+# 作为事前规则从 auto 层剔除(与 dynamic_pool 的 R3 exclude_hk_wide 一致), 防未来 refresh 自动加回。
+_HK_WIDE_KEYWORDS = ("港股通", "港股", "H股", "香港", "HK")
+
+
+def _is_hk_wide(code: str, name: str) -> bool:
+    return code.startswith("159") and any(kw in name for kw in _HK_WIDE_KEYWORDS)
+
+
 def _is_genuine_t0(code: str, name: str) -> bool:
     if any(kw in name for kw in _NEGATIVE_KEYWORDS):
         return False
@@ -175,6 +185,9 @@ def refresh(use_quality: bool = True) -> dict:
             continue
         if not _is_genuine_t0(code, name):
             continue
+        if _is_hk_wide(code, name):
+            rejected.append({"code": code, "name": name, "why": "宽基港股(非alpha源,排除)"})
+            continue
         if use_quality:
             ok, why = _passes_quality(code, name)
             if not ok:
@@ -208,7 +221,7 @@ def refresh(use_quality: bool = True) -> dict:
                 nm = (mkt.get(c, {}) or {}).get("name") or d.get("name", "")
                 # 市场扫描对 LOF(161/501/162)可能不全 → 即便 c 不在 mkt 也保留
                 # (旧 auto 已通过 genuine 校验, 仅按最新质量门槛重新过滤主题ETF)
-                if _is_genuine_t0(c, nm):
+                if _is_genuine_t0(c, nm) and not _is_hk_wide(c, nm):
                     if use_quality:
                         ok, _ = _passes_quality(c, nm)
                         if not ok:

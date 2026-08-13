@@ -52,7 +52,7 @@ def prev_month(ym: str) -> str:
 RULES = {
     "R1": dict(drop_sector=False, min_avg_turnover=10_000_000, use_seed=True, min_listing_days=120),
     "R2": dict(drop_sector=False, min_avg_turnover=30_000_000, use_seed=True, min_listing_days=120),
-    "R3": dict(drop_sector=True,  min_avg_turnover=10_000_000, use_seed=True, min_listing_days=120),
+    "R3": dict(drop_sector=True,  min_avg_turnover=10_000_000, use_seed=True, min_listing_days=120, exclude_hk_wide=True),
     "R4": dict(drop_sector=True,  min_avg_turnover=30_000_000, use_seed=True, min_listing_days=120),
     "R5": dict(drop_sector=False, min_avg_turnover=100_000_000, use_seed=True, min_listing_days=120),
     "R6": dict(drop_sector=True,  min_avg_turnover=100_000_000, use_seed=True, min_listing_days=120),
@@ -100,6 +100,27 @@ def main():
     import os
     print(f"[export] 写模块 {OUTPY} ({os.path.getsize(OUTPY)/1024:.0f} KB)", flush=True)
     print("[export] 完成。聚宽侧设 ATTACK_POOL_RULE='R3' 即可, 无需上传 JSON。")
+
+    # 同步单文件内联版 joinquant_unified_single.py(用户直接粘贴到聚宽的版本,
+    # 末尾自带 JQ_ATTACK_POOLS 字面量)。仅替换从 'JQ_ATTACK_POOLS = {' 到文件末尾的块,
+    # 保留其上方策略代码与注释, 确保单次粘贴即可用、且与模块始终一致。
+    SINGLE = Path(__file__).resolve().parent / "joinquant_unified_single.py"
+    if SINGLE.exists():
+        txt = SINGLE.read_text(encoding="utf-8")
+        marker = "JQ_ATTACK_POOLS = {"
+        i = txt.index(marker)
+        head = txt[:i]  # 保留 marker 之前的注释/空行
+        L2 = ["JQ_ATTACK_POOLS = {"]
+        for name in RULES:
+            L2.append(f'    "{name}": {{')
+            for ym, codes in shifted_all[name].items():
+                jq = [to_jq(c) for c in codes]
+                L2.append(f'        "{ym}": {jq!r},')
+            L2.append('    },')
+        L2.append('}')
+        SINGLE.write_text(head + "\n".join(L2) + "\n", encoding="utf-8")
+        import os as _os
+        print(f"[export] 同步单文件内联 {SINGLE} ({_os.path.getsize(SINGLE)/1024:.0f} KB)", flush=True)
 
 
 if __name__ == "__main__":

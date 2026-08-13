@@ -65,6 +65,26 @@ def _attack_filter(codes) -> set[str]:
             continue
         out.add(c)
     return out
+
+
+# 宽基港股 ETF(159xxx 的港股通/恒生/H股/香港类)不是 R3 动量攻击池的 alpha 源:
+# 单日暴涨但 T+1 回吐、且会挤占真正强票(纳指/商品)席位。聚宽回测证明净拖累
+# (含 vs 不含 -177pp)。故作为【事前设计规则】排除(非回测后补丁), 仅对 159xxx
+# 港股宽基生效, 不动 513xxx 老恒生成分(它们在历史 R3 基准内已验证、属攻击池)。
+_HK_WIDE_KEYWORDS = ("港股通", "港股", "H股", "香港", "HK")
+
+
+def _hk_wide_filter(codes, enabled: bool) -> set[str]:
+    """enabled 时剔除 159xxx 中的港股宽基(非攻击池 alpha 源)。"""
+    if not enabled:
+        return set(codes)
+    out: set[str] = set()
+    for c in codes:
+        nm = _NAME_OF.get(c, "") if _NAME_OF else ""
+        if c.startswith("159") and any(kw in nm for kw in _HK_WIDE_KEYWORDS):
+            continue
+        out.add(c)
+    return out
 _FULL_DAILY = CACHE / "full_daily_2015_2026.json"
 
 _FULL: dict | None = None
@@ -119,7 +139,8 @@ def pool_as_of(ym: str, seed: set[str] | None = None,
                min_listing_days: int | None = None,
                min_avg_turnover: float | None = None,
                use_seed: bool | None = None,
-               drop_sector: bool | None = None) -> set[str]:
+               drop_sector: bool | None = None,
+               exclude_hk_wide: bool = False) -> set[str]:
     """返回 ym(如 '2024-06') 月末时点的规则动态池(去后缀 code 集合)。
 
     universe: 扫描范围(默认 full_daily 全部 405 只)。回测/聚宽应传入其实际宇宙
@@ -135,6 +156,7 @@ def pool_as_of(ym: str, seed: set[str] | None = None,
         universe = set(_FULL.keys())
     # ★进攻腿宇宙: 剔除防守类(国债/货币/红利/黄金-DEFENSE), 与防守腿严格分离
     universe = _attack_filter(universe)
+    universe = _hk_wide_filter(universe, exclude_hk_wide)
     me = _month_end(ym)
     med = date.fromisoformat(me)
     mld = R._MIN_LISTING_DAYS if min_listing_days is None else min_listing_days
@@ -178,6 +200,7 @@ def pool_as_of(ym: str, seed: set[str] | None = None,
 
 def month_pools_for_range(ym_start: str, ym_end: str,
                           universe: set[str] | None = None,
+                          exclude_hk_wide: bool = False,
                           **kw) -> dict[str, set[str]]:
     """生成 [ym_start, ym_end] 每月月末规则池。kw 透传给 pool_as_of(规则扫描用)。"""
     y, m = map(int, ym_start.split("-"))
@@ -185,7 +208,7 @@ def month_pools_for_range(ym_start: str, ym_end: str,
     out: dict[str, set[str]] = {}
     while (y, m) <= (ey, em):
         ym = f"{y}-{m:02d}"
-        out[ym] = pool_as_of(ym, universe=universe, **kw)
+        out[ym] = pool_as_of(ym, universe=universe, exclude_hk_wide=exclude_hk_wide, **kw)
         m += 1
         if m > 12:
             m = 1
