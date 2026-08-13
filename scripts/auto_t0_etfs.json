@@ -1,5 +1,15 @@
 [
   {
+    "code": "159131",
+    "name": "港股信息",
+    "sina_symbol": "sz159131"
+  },
+  {
+    "code": "159262",
+    "name": "科技HK",
+    "sina_symbol": "sz159262"
+  },
+  {
     "code": "159329",
     "name": "沙特ETF",
     "sina_symbol": "sz159329"
@@ -15,9 +25,24 @@
     "sina_symbol": "sz159513"
   },
   {
+    "code": "159519",
+    "name": "港股国企",
+    "sina_symbol": "sz159519"
+  },
+  {
+    "code": "159545",
+    "name": "港股红利",
+    "sina_symbol": "sz159545"
+  },
+  {
     "code": "159561",
     "name": "德国ETF",
     "sina_symbol": "sz159561"
+  },
+  {
+    "code": "159568",
+    "name": "港股互联",
+    "sina_symbol": "sz159568"
   },
   {
     "code": "159569",
@@ -50,9 +75,19 @@
     "sina_symbol": "sz159688"
   },
   {
+    "code": "159741",
+    "name": "港股科技",
+    "sina_symbol": "sz159741"
+  },
+  {
     "code": "159747",
     "name": "香港科技",
     "sina_symbol": "sz159747"
+  },
+  {
+    "code": "159750",
+    "name": "科技HK50",
+    "sina_symbol": "sz159750"
   },
   {
     "code": "159830",

@@ -25,11 +25,13 @@ from web.strategy.theme import fmt_dt, inject_css, status_badge_html
 def render_r3_detail():
     """R3 月度轮动 SHADOW 详情: 当前持仓 + 本地交易明细(journal) + 当前攻击池 + 结论.
 
-    R3 现已转本地 SHADOW 实跑 (scripts/t0_r3_monitor.py, --install-r3): 选股走月度轮动池,
-    仅写 r3_shadow_state.json / r3_journal.jsonl, 不下单, 不改实盘。聚宽仅用于历史验证。
+    R3 现已转本地 SHADOW 实跑 (scripts/t0_r3_monitor.py, --install-r3): 选股与聚宽
+    joinquant_unified_single.py 对齐 (regime 感知) —— 趋势/震荡→动量Top25滚动优质池,
+    中性→当月R3月度轮动宽池; 仅写 r3_shadow_state.json / r3_journal.jsonl, 不下单, 不改实盘。
+    聚宽仅用于历史验证。
     """
     st.subheader("R3 (月度轮动 SHADOW) 详情")
-    st.caption("本地 SHADOW 实跑 (scripts/t0_r3_monitor.py, --install-r3): 选股走月度轮动池, 仅记录不下单, 不改实盘")
+    st.caption("本地 SHADOW 实跑 (scripts/t0_r3_monitor.py, --install-r3): 选股与聚宽 A 版对齐 —— 14:40 锁领头羊(--pick) + 14:45 复核成交(--signal); 趋势/震荡→动量Top25, 中性→当月月池(缺失回退全并集), 仅记录不下单, 不改实盘")
     _by_id = load_registry().get("_by_id", {})
     s = _by_id.get("jq_r3_attack")
     if s:

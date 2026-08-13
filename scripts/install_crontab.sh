@@ -80,7 +80,8 @@ PAIR_SELL_CRON="55 14"     # 14:55 次日判定平仓(比值回归或≤MAX_DAYS
 # R3 月度轮动 SHADOW(本地实跑影子, 选股走月度轮动池, 不下单)
 R3_CMD="cd ${PROJECT_DIR} && ${PYTHON3} scripts/t0_r3_monitor.py"
 R3_LOG=">> ${HOME}/.tradingagents/rotation/r3_shadow.log 2>&1"
-R3_SIGNAL_CRON="45 14"   # 14:45 R3 月度轮动信号
+R3_SIGNAL_CRON="45 14"   # 14:45 R3 复核+成交信号
+R3_PICK_CRON="40 14"     # 14:40 R3 选股锁定领头羊(对齐聚宽A: 14:40选)
 R3_SELL_WATCH="40 9"     # 09:40 启动 TRIX(5,3)卖出监控 (09:40~11:05 每50秒循环)
 
 echo "=== 安装监控定时任务 ==="
@@ -165,7 +166,9 @@ case "${MODE}" in
         FILTERED="$(echo "${EXISTING}" | grep -v "t0_r3_monitor.py" || true)"
         {
             echo "${FILTERED}"
-            # 14:45 R3 月度轮动信号 (候选=月度轮动池 Top1≥3%)
+            # 14:40 R3 选股锁定领头羊 (对齐聚宽A: 14:40选)
+            echo "${R3_PICK_CRON} * * 1-5 ${R3_CMD} --pick ${R3_LOG}"
+            # 14:45 R3 复核+成交信号 (对齐聚宽A: 14:45复核)
             echo "${R3_SIGNAL_CRON} * * 1-5 ${R3_CMD} --signal ${R3_LOG}"
             # 09:40~11:05 核心 R3 的 TRIX(5,3)卖出监控 (每50秒循环, 11:05收盘fallback)
             echo "${R3_SELL_WATCH} * * 1-5 ${R3_CMD} --sell-loop ${R3_LOG}"
@@ -221,6 +224,7 @@ echo "仅卸载 R3 SHADOW:"
 echo "  crontab -l | grep -v t0_r3_monitor.py | crontab -"
 echo ""
 echo "R3 SHADOW 手动测试:"
+echo "  cd ${PROJECT_DIR} && python3 scripts/t0_r3_monitor.py --pick --dry-run"
 echo "  cd ${PROJECT_DIR} && python3 scripts/t0_r3_monitor.py --signal --dry-run"
 echo "  cd ${PROJECT_DIR} && python3 scripts/t0_r3_monitor.py --sell-check --dry-run"
 echo "  cd ${PROJECT_DIR} && python3 scripts/t0_r3_monitor.py --sell-loop --dry-run"
