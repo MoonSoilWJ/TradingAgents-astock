@@ -18,84 +18,28 @@ from web.strategy.registry_loader import get_strategy, load_cron_manifest, load_
 from web.strategy.state_reader import rotation_state, t0_state, walk_forward_state, state_file_info
 from web.strategy.t0_table import render_t0_trade_table
 from web.strategy.b_idle_shadow_table import render_b_idle_overview, render_b_idle_vs_live
+from web.strategy.r3_shadow_table import render_r3_overview, render_r3_conclusion
 from web.strategy.t0_journal import load_t0_trades, trades_to_table_rows
 from web.strategy.theme import fmt_dt, inject_css, status_badge_html
 
 
-def render_r3_detail():
-    """R3 月度轮动 SHADOW 详情: 当前持仓 + 本地交易明细(journal) + 当前攻击池 + 结论.
+def render_r3_attack_pool():
+    """R3 月度轮动 SHADOW — registry 信息 + 当前攻击池 (交易明细/持仓见 render_r3_overview).
 
     R3 现已转本地 SHADOW 实跑 (scripts/t0_r3_monitor.py, --install-r3): 选股与聚宽
     joinquant_unified_single.py 对齐 (regime 感知) —— 趋势/震荡→动量Top25滚动优质池,
     中性→当月R3月度轮动宽池; 仅写 r3_shadow_state.json / r3_journal.jsonl, 不下单, 不改实盘。
     聚宽仅用于历史验证。
     """
-    st.subheader("R3 (月度轮动 SHADOW) 详情")
-    st.caption("本地 SHADOW 实跑 (scripts/t0_r3_monitor.py, --install-r3): 选股与聚宽 A 版对齐 —— 14:40 锁领头羊(--pick) + 14:45 复核成交(--signal); 趋势/震荡→动量Top25, 中性→当月月池(缺失回退全并集), 仅记录不下单, 不改实盘")
     _by_id = load_registry().get("_by_id", {})
     s = _by_id.get("jq_r3_attack")
     if s:
+        st.subheader("R3 (月度轮动 SHADOW) — registry 信息")
         st.markdown(f"状态 `{s.get('status')}` · 脚本 `{s.get('script','')}` · 版本 `{s.get('version','')}`")
         rules = s.get("rules", {})
         st.markdown(f"**选股**: {rules.get('pick','')}")
         st.markdown(f"**买 / 卖**: {rules.get('buy','')} / {rules.get('sell','')}")
         st.markdown(f"**结论**: {s.get('conclusion','')}")
-    # 当前持仓 (本地 state)
-    _state_path = Path.home() / ".tradingagents/rotation/r3_shadow_state.json"
-    _pos = None
-    if _state_path.exists():
-        try:
-            _stt = json.loads(_state_path.read_text(encoding="utf-8"))
-            _pos = _stt.get("position")
-        except Exception:
-            pass
-    if _pos and not _pos.get("sold"):
-        st.markdown(f"**当前持仓**: {_pos.get('name')}({_pos.get('etf')}) 买@{_pos.get('buy_price')} "
-                    f"({_pos.get('buy_date')}) 信号涨幅{_pos.get('today_gain')}% [SHADOW]")
-    else:
-        st.info("当前无持仓 (SHADOW)")
-    # 交易明细 (本地 journal: signal 行 + sell 行 聚合成一笔交易)
-    _jpath = Path.home() / ".tradingagents/rotation/r3_journal.jsonl"
-    _rows = []
-    _signals = {}
-    if _jpath.exists():
-        for _line in _jpath.read_text(encoding="utf-8").splitlines():
-            _line = _line.strip()
-            if not _line:
-                continue
-            try:
-                _row = json.loads(_line)
-            except Exception:
-                continue
-            if "sell_date" in _row:
-                _key = (_row.get("etf"), _row.get("buy_date"))
-                _sig = _signals.get(_key, {})
-                _reason = _row.get("sell_reason")
-                _reason_label = {"trix_death_cross": "TRIX死叉", "trix_time_sell_1105": "11:05定时"}.get(_reason, _reason)
-                _rows.append({
-                    "买入日": _row.get("buy_date"),
-                    "信号时间": _row.get("signal_time") or _sig.get("signal_time"),
-                    "标的": _row.get("name"),
-                    "代码": _row.get("etf"),
-                    "类型": _row.get("leg"),
-                    "信号涨幅%": _sig.get("today_gain"),
-                    "买入价": _row.get("buy_price"),
-                    "卖出日": _row.get("sell_date"),
-                    "卖出时间": _row.get("sell_time"),
-                    "卖出原因": _reason_label,
-                    "卖出价": _row.get("sell_price"),
-                    "影子收益%": round(_row["return_pct"], 2) if _row.get("return_pct") is not None else None,
-                    "理论收益%": round(_row["theory_return_pct"], 2) if _row.get("theory_return_pct") is not None else None,
-                    "滑点pp": round(_row["slippage_pp"], 2) if _row.get("slippage_pp") is not None else None,
-                })
-            elif "signal_date" in _row:
-                _signals[(_row.get("etf"), _row.get("signal_date"))] = _row
-    if _rows:
-        _rows.sort(key=lambda r: (r.get("卖出日") or "", r.get("卖出时间") or ""), reverse=True)
-        st.markdown(f"**交易明细 ({len(_rows)} 笔 · SHADOW 影子, 非真实成交)**")
-        st.dataframe(_rows, use_container_width=True, hide_index=True)
-    else:
-        st.info("暂无交易明细 (R3 SHADOW 尚未成交记录)")
     # 当前攻击池 (取 <= 当前月的最后一个非空月份)
     pool_path = _PROJECT_ROOT / "scripts" / "jq_pools" / "jq_attack_R3.json"
     if pool_path.exists():
@@ -194,7 +138,9 @@ with tab_b:
     render_b_idle_vs_live(live_rows, days=60)
 
 with tab_r3:
-    render_r3_detail()
+    render_r3_overview(days=60)
+    render_r3_attack_pool()
+    render_r3_conclusion()
 
 # ── 运维状态 ──
 st.divider()

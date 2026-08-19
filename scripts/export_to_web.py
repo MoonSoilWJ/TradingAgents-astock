@@ -99,57 +99,162 @@ _STRATEGY_OOS_MAP = {
     },
 }
 
+# ─── 22-26 全4年回测数据: backtest_22_26.json (A/B/R3 统一窗口) ─
+# 顶层: {"window","trading_days","A":{"stats","trades"},"B":{...},"R3":{...}}
+# 由 scripts/backtest_r3_ab_2022_2026.py 生成 (无偏5min: tdx_5min_pre2024+tdx_5min_2y).
+_22_26_CANDIDATES = [
+    ROTATION_DIR / "backtest_22_26.json",
+    Path.home() / ".tradingagents" / "cache" / "t0_5min" / "backtest_22_26.json",
+]
+
+
+def _find_22_26_file() -> Path | None:
+    for cand in _22_26_CANDIDATES:
+        if cand.exists():
+            return cand
+    for p in (Path.home() / ".tradingagents").rglob("backtest_22_26*.json"):
+        return p
+    return None
+
+
+_22_26_CACHE: dict[str, Any] | None = None
+_22_26_CACHE_PATH: Path | None = None
+
+
+def _load_22_26() -> dict[str, Any] | None:
+    global _22_26_CACHE, _22_26_CACHE_PATH
+    if _22_26_CACHE is not None:
+        return _22_26_CACHE
+    found = _find_22_26_file()
+    if found is None:
+        print("  ! 警告: 未找到 backtest_22_26.json，回测曲线/逐笔将为空")
+        return None
+    _22_26_CACHE_PATH = found
+    try:
+        _22_26_CACHE = json.loads(found.read_text(encoding="utf-8"))
+        return _22_26_CACHE
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+# 策略 ID → 22-26 文件里的顶层键 (A/B/R3)
+_STRATEGY_22_26_MAP = {
+    "t0_baseline_trix": "A",
+    "t0_coreB_shadow": "B",
+    "t0_r3_shadow": "R3",
+}
+
+
+# ─── R3 聚宽真实成交回测数据 ─────────────────────────────────────────────────
+# 由 scripts/build_r3_jq_backtest.py 从聚宽导出的 transaction.csv 重建,
+# 与聚宽实盘回测同源 (曲线/逐笔/摘要一致), 非本地无偏重放.
+_R3_JQ_CANDIDATES = [
+    ROTATION_DIR / "r3_jq_backtest.json",
+    Path.home() / ".tradingagents" / "cache" / "t0_5min" / "r3_jq_backtest.json",
+]
+_R3_JQ_CACHE: dict[str, Any] | None = None
+
+
+def _load_r3_jq() -> dict[str, Any] | None:
+    global _R3_JQ_CACHE
+    if _R3_JQ_CACHE is not None:
+        return _R3_JQ_CACHE
+    for cand in _R3_JQ_CANDIDATES:
+        if cand.exists():
+            try:
+                _R3_JQ_CACHE = json.loads(cand.read_text(encoding="utf-8"))
+                return _R3_JQ_CACHE
+            except (json.JSONDecodeError, OSError):
+                return None
+    print("  ! 警告: 未找到 r3_jq_backtest.json (请先运行 build_r3_jq_backtest.py)")
+    return None
+
 
 def _backtest_summary(strategy_id: str) -> dict[str, Any]:
-    """从 OOS 回测文件读摘要."""
-    oos = _load_oos_backtest()
-    if not oos:
-        # fallback
+    """回测摘要.
+
+    R3 读聚宽真实成交重建文件 (r3_jq_backtest.json), 与聚宽同源;
+    A/B 读 22-26 本地无偏重放文件.
+    """
+    if strategy_id == "t0_r3_shadow":
+        jq = _load_r3_jq()
+        if not jq:
+            return {"totalReturn": 0, "tradeCount": 0, "winRate": 0,
+                    "maxDrawdown": 0, "sharpe": 0, "annualReturn": 0}
+        s = jq.get("stats", {})
+        return {
+            "totalReturn": round(float(s.get("totalReturn", 0)), 2),
+            "annualReturn": round(float(s.get("annualReturn", 0)), 2),
+            "tradeCount": int(s.get("tradeCount", 0)),
+            "winRate": round(float(s.get("winRate", 0)), 1),
+            "maxDrawdown": round(abs(float(s.get("maxDrawdown", 0) or 0)), 2),
+            "sharpe": 0.0,  # 聚宽明细未含 sharpe, 暂留 0
+        }
+    data = _load_22_26()
+    key = _STRATEGY_22_26_MAP.get(strategy_id)
+    if not data or not key or key not in data:
         return {"totalReturn": 0, "tradeCount": 0, "winRate": 0,
-                "maxDrawdown": 0, "sharpe": 0}
-    keys = _STRATEGY_OOS_MAP.get(strategy_id)
-    if not keys:
-        return {"totalReturn": 0, "tradeCount": 0, "winRate": 0,
-                "maxDrawdown": 0, "sharpe": 0}
-    s = oos.get(keys["summary_key"], {})
+                "maxDrawdown": 0, "sharpe": 0, "annualReturn": 0}
+    s = data[key].get("stats", {})
+    eq = float(s.get("equity_pct", 0)) / 100.0  # 转小数
+    days = int(data.get("trading_days", 900))
+    # 年化: (1+eq)^(365/days) - 1
+    annual = ((1.0 + eq) ** (365.0 / days) - 1.0) * 100.0 if days > 0 else 0.0
     return {
         "totalReturn": round(float(s.get("equity_pct", 0)), 2),
+        "annualReturn": round(annual, 2),
         "tradeCount": int(s.get("trades", 0)),
         "winRate": round(float(s.get("win_rate", 0)), 1),
         "maxDrawdown": round(abs(float(s.get("max_drawdown", 0) or 0)), 2),
-        "sharpe": 0.0,  # OOS 文件没有 sharpe, 暂留 0
+        "sharpe": 0.0,  # 22-26 文件未含 sharpe, 暂留 0
     }
 
 
 def _backtest_trades(strategy_id: str) -> list[dict[str, Any]]:
-    """从 OOS 回测文件读逐笔交易."""
-    oos = _load_oos_backtest()
-    if not oos:
+    """回测逐笔交易.
+
+    R3 读聚宽真实成交重建; A/B 读 22-26 本地无偏重放.
+    """
+    if strategy_id == "t0_r3_shadow":
+        jq = _load_r3_jq()
+        return jq.get("trades", []) if jq else []
+    data = _load_22_26()
+    if not data:
         return []
-    keys = _STRATEGY_OOS_MAP.get(strategy_id)
-    if not keys:
+    key = _STRATEGY_22_26_MAP.get(strategy_id)
+    if not key or key not in data:
         return []
-    return oos.get(keys["trades_key"], [])
+    return data[key].get("trades", [])
 
 
-def _backtest_start_end_dates() -> tuple[str, str]:
-    """从 OOS 文件读 start/end 日期."""
-    oos = _load_oos_backtest()
-    if not oos:
+def _backtest_start_end_dates(strategy_id: str = "t0_baseline_trix") -> tuple[str, str]:
+    """回测 start/end 日期 (R3 取自聚宽文件, A/B 取自 22-26)."""
+    if strategy_id == "t0_r3_shadow":
+        jq = _load_r3_jq()
+        if jq and jq.get("startDate"):
+            return jq.get("startDate", ""), jq.get("endDate", "")
         return "", ""
-    window = oos.get("window", "")  # "2024-12-20~2026-07-31"
+    data = _load_22_26()
+    if not data:
+        return "", ""
+    window = data.get("window", "")  # "2022-06-15~2026-07-31"
     if "~" in window:
         parts = window.split("~")
         return parts[0], parts[1]
     return "", ""
 
 
-def _backtest_days_count() -> int:
-    """回测覆盖天数."""
-    oos = _load_oos_backtest()
-    if oos:
-        return int(oos.get("trading_days", 390))
-    return 390
+def _backtest_days_count(strategy_id: str = "t0_baseline_trix") -> int:
+    """回测覆盖天数 (R3 取自聚宽文件, A/B 取自 22-26)."""
+    if strategy_id == "t0_r3_shadow":
+        jq = _load_r3_jq()
+        if jq and jq.get("trading_days"):
+            return int(jq.get("trading_days", 0))
+        return 0
+    data = _load_22_26()
+    if data:
+        return int(data.get("trading_days", 900))
+    return 900
 
 
 # ─── 文件读取 ────────────────────────────────────────────────────────────────
@@ -616,10 +721,10 @@ def build_live_strategy() -> dict[str, Any]:
 
     # 真实回测数据(从 OOS 文件读)
     wf = _backtest_summary("t0_baseline_trix")
-    backtest_days = _backtest_days_count()
+    backtest_days = _backtest_days_count("t0_baseline_trix")
     backtest_total = wf["totalReturn"]
     backtest_annual = _annualized(backtest_total, backtest_days)
-    bt_start, bt_end = _backtest_start_end_dates()
+    bt_start, bt_end = _backtest_start_end_dates("t0_baseline_trix")
 
     start_date = _start_date(closed)
 
@@ -691,10 +796,10 @@ def build_shadow_strategy() -> dict[str, Any]:
 
     # 真实回测数据: 从 OOS 文件读 shadow 的逐笔
     wf = _backtest_summary("t0_coreB_shadow")
-    backtest_days = _backtest_days_count()
+    backtest_days = _backtest_days_count("t0_coreB_shadow")
     backtest_total = wf["totalReturn"]
     backtest_annual = _annualized(backtest_total, backtest_days)
-    bt_start, bt_end = _backtest_start_end_dates()
+    bt_start, bt_end = _backtest_start_end_dates("t0_coreB_shadow")
 
     start_date = _start_date(closed)
 
@@ -730,6 +835,83 @@ def build_shadow_strategy() -> dict[str, Any]:
         "backtestCurve": _backtest_curve("t0_coreB_shadow"),
         "trades": _trades_for_export(all_trades),
         "backtestTrades": _backtest_trades_export("t0_coreB_shadow"),
+    }
+
+
+def build_r3_strategy() -> dict[str, Any]:
+    """构造 R3 月度轮动 SHADOW 策略数据.
+
+    R3 现转本地 SHADOW 实跑 (scripts/t0_r3_monitor.py, --install-r3):
+    选股与聚宽 A 版对齐 —— 14:40 锁领头羊(--pick) + 14:45 复核成交(--signal);
+    趋势/震荡→动量Top25滚动优质池, 中性→当月R3月度轮动宽池(缺失回退全并集);
+    次日 09:40~11:05 纯 TRIX(5,3) 死叉卖出, 仅记录不下单, 不改实盘.
+    聚宽仅用于历史验证 (canonical +1861% / MDD-23.5% / 夏普1.01).
+    """
+    journal_path = ROTATION_DIR / "r3_journal.jsonl"
+    state_path = ROTATION_DIR / "r3_shadow_state.json"
+    # R3 无 idle 腿, 全部展示
+    events = _read_jsonl(journal_path, skip_idle=False)
+    closed = _merge_trades(events)
+    rets = [float(c["returnPct"]) for c in closed if c.get("returnPct") is not None]
+
+    # 检查 state 文件是否有持仓中的交易
+    pos = _read_state_position(state_path)
+    open_trade = _build_open_trade_from_state(pos) if pos else None
+    if open_trade:
+        has_open = any(
+            t.get("status") == "open"
+            and t.get("etf") == open_trade["etf"]
+            and t.get("buyDate") == open_trade["buyDate"]
+            for t in closed
+        )
+        all_trades = [open_trade] + closed if not has_open else closed
+    else:
+        all_trades = closed
+
+    total_return = round(_compound(rets), 2) if rets else 0.0
+    running_days = _running_days(closed)
+    daily_return = round(total_return / running_days, 4) if running_days else 0.0
+    last_day = _last_day_return(closed)
+
+    # 回测摘要/曲线/逐笔 统一用聚宽真实成交重建 (build_r3_jq_backtest.py 从
+    # 聚宽 transaction.csv 生成 r3_jq_backtest.json), 与聚宽同源.
+    bt = _backtest_summary("t0_r3_shadow")
+    bt_days = _backtest_days_count("t0_r3_shadow")
+    bt_s, bt_e = _backtest_start_end_dates("t0_r3_shadow")
+    start_date = _start_date(closed)
+
+    return {
+        "id": "t0_r3_shadow",
+        "name": "R3 月度轮动 SHADOW",
+        "type": "动量",
+        "status": "running",
+        "description": (
+            "R3 月度轮动池(Top1≥3%, regime 感知: 趋势/震荡→动量Top25优质池, "
+            "中性→当月月池) + 次日 09:40~11:05 纯 TRIX(5,3) 死叉卖出。"
+            "与实盘平行运行、仅记录不下单(本地 SHADOW, 对齐聚宽 A 版选股)."
+        ),
+        "tags": ["T+0", "ETF", "TRIX", "shadow", "月度轮动"],
+        "backtest": {
+            "annualReturn": bt["annualReturn"],
+            "maxDrawdown": bt["maxDrawdown"],
+            "sharpeRatio": bt["sharpe"],
+            "winRate": bt["winRate"],
+            "totalReturn": bt["totalReturn"],
+            "backtestDays": bt_days,
+            "startDate": bt_s,
+            "endDate": bt_e,
+        },
+        "live": {
+            "dailyReturn": daily_return,
+            "lastDayReturn": last_day,
+            "totalReturn": total_return,
+            "runningDays": running_days,
+            "startDate": start_date,
+        },
+        "navCurve": _nav_curve(closed),
+        "backtestCurve": _backtest_curve("t0_r3_shadow"),
+        "trades": _trades_for_export(all_trades),
+        "backtestTrades": _backtest_trades_export("t0_r3_shadow"),
     }
 
 
@@ -785,8 +967,10 @@ def main() -> int:
     files = [
         ("t0_trade_journal.jsonl", "实盘交易日志"),
         ("b_idle_journal.jsonl", "Shadow 日志"),
+        ("r3_journal.jsonl", "R3 日志"),
         ("t0_monitor_state.json", "实盘状态(可选)"),
         ("b_idle_shadow_state.json", "Shadow 状态(可选)"),
+        ("r3_shadow_state.json", "R3 状态(可选)"),
     ]
     for name, label in files:
         p = ROTATION_DIR / name
@@ -797,7 +981,7 @@ def main() -> int:
         return 0
 
     print("\n构造策略数据...")
-    strategies = [build_live_strategy(), build_shadow_strategy()]
+    strategies = [build_live_strategy(), build_shadow_strategy(), build_r3_strategy()]
 
     out_path = args.out or _default_out_path()
     out_path.parent.mkdir(parents=True, exist_ok=True)

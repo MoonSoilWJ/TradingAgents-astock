@@ -412,11 +412,13 @@ def run_signal(dry_run: bool = False) -> int:
         # 杂交: 14:45 在 Top5 篮子里筛仍 ≥ MIN_GAIN 的, 取涨幅 Top1
         basket = state["pending_basket"]
         quotes = fetch_tencent_quotes([b["etf"] for b in basket])
+        ranked = rank_t0_by_today_gain(quotes, [{"code": b["etf"], "name": b["name"]} for b in basket])
+        by_code = {r["code"]: r for r in ranked}
         survivors = []
         for b in basket:
-            q = quotes.get(b["etf"])
-            gain_now = q.get("today_gain") if q else None
-            price_now = float(q.get("price", 0)) if q else 0
+            r = by_code.get(b["etf"])
+            gain_now = r["today_gain"] if r else None
+            price_now = float(r["price"]) if r else 0
             if gain_now is not None and gain_now >= MIN_GAIN and price_now > 0:
                 survivors.append((b, gain_now, price_now))
         if survivors:
@@ -428,19 +430,24 @@ def run_signal(dry_run: bool = False) -> int:
             print(f">>> [14:45] 篮子全部跌破 {MIN_GAIN:.1f}% → 空仓")
     elif pending:
         # A 逻辑: 14:40 锁定领头羊, 14:45 复核仍 ≥3% 才成交
-        q = fetch_tencent_quotes([pending["etf"]]).get(pending["etf"])
-        gain_now = q.get("today_gain") if q else None
-        price_now = float(q.get("price", 0)) if q else 0
+        # 注意: 腾讯实时行情原始 dict 只有 change_pct, today_gain 需经 rank_t0_by_today_gain 计算
+        quotes = fetch_tencent_quotes([pending["etf"]])
+        ranked = rank_t0_by_today_gain(quotes, [{"code": pending["etf"], "name": pending["name"]}])
+        r = ranked[0] if ranked else None
+        gain_now = r["today_gain"] if r else None
+        price_now = float(r["price"]) if r else 0
         if gain_now is not None and gain_now >= MIN_GAIN and price_now > 0:
             chosen = {
                 "code": pending["etf"], "name": pending["name"],
                 "price": price_now, "today_gain": gain_now,
             }
+            _pg = f"{pending['pick_gain']:+.2f}%" if isinstance(pending.get('pick_gain'), (int, float)) else "N/A"
             print(f">>> [14:45] 复核通过 {pending['name']} "
-                  f"(14:40锁 {pending['pick_gain']:+.2f}% → 14:45 {gain_now:+.2f}%)")
+                  f"(14:40锁 {_pg} → 14:45 {gain_now:+.2f}%)")
         else:
+            gain_str = f"{gain_now:+.2f}%" if isinstance(gain_now, (int, float)) else "N/A"
             print(f">>> [14:45] 复核否决 {pending['name']}({pending['etf']}) "
-                  f"14:45增益={gain_now:.2f}% → 空仓")
+                  f"14:45增益={gain_str} → 空仓")
     else:
         # 独立运行兜底(手动/未跑 --pick): 现时刻选股(等同 pick 与 confirm 同刻)
         top = pick_r3_candidate(etfs)
@@ -601,8 +608,13 @@ def run_sell_check(dry_run: bool = False) -> int:
         state["position"] = None
         save_state(state)
         append_journal({
-            "sell_date": today, "sell_time": sell_hm, "leg": pos.get("type"),
-            "signal_time": pos.get("signal_time", ""), "buy_time": pos.get("buy_time", ""),
+            # ★ R3 把买卖合并在一条 sell 记录, 显式写 signal_date/buy_date/today_gain
+            #   (WebUI r3_shadow.py loader 用 signal_date 做近N天 cutoff + 合并 key,
+            #   today_gain 作信号涨幅; 缺字段的旧记录无法被统计/对比)
+            "signal_date": pos.get("buy_date", ""), "sell_date": today, "sell_time": sell_hm,
+            "leg": pos.get("type"),
+            "signal_time": pos.get("signal_time", ""), "buy_date": pos.get("buy_date", ""),
+            "buy_time": pos.get("buy_time", ""), "today_gain": pos.get("today_gain", ""),
             "etf": etf, "name": pos["name"], "buy_price": buy_price,
             "sell_price": sell_price, "return_pct": ret_num, "sell_reason": reason,
             "theory_price": round(theory_price, 4), "theory_return_pct": theory_ret,
