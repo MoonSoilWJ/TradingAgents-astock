@@ -41,6 +41,9 @@ from typing import Any
 
 ROTATION_DIR = Path.home() / ".tradingagents" / "rotation"
 
+# 588000 日线 N12 结果簇 投票策略 的回测/信号 JSON (由 scripts/backtest_588000_n12.py 生成)
+STAR50_N12_FILE = ROTATION_DIR / "star50_n12_ensemble.json"
+
 # ─── OOS 回测数据: recent390_live_vs_b_idle.json (390天, 2024-12-20~2026-07-31) ─
 # 顶层:
 #   live_hybridA_confirm_trix   实盘汇总 {trades, equity_pct, win_rate, max_drawdown}
@@ -915,6 +918,70 @@ def build_r3_strategy() -> dict[str, Any]:
     }
 
 
+def build_588000_strategy() -> dict[str, Any] | None:
+    """构造 588000 科创50ETF 日线 N12 结果簇 投票策略.
+
+    数据由 scripts/backtest_588000_n12.py 生成 (与 compare_hybrid 同一套 sim,
+    信号当日收盘同价成交 + 0.05% 滑点). 6 个 N12 组合 [(10,9),(10,12),(12,9),
+    (12,12),(14,9),(14,12)] 多数(>0.5)金叉→次日持仓, 否则空仓.
+    """
+    if not STAR50_N12_FILE.exists():
+        print(f"  ! 警告: 未找到 {STAR50_N12_FILE}，跳过 588000 策略 (请先运行 backtest_588000_n12.py)")
+        return None
+    try:
+        data = json.loads(STAR50_N12_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    st = data.get("stats", {})
+    eq = data.get("equity_curve", [])
+    tr = data.get("trades", [])
+    total = float(st.get("equity_pct", 0))
+    days = int(data.get("trading_days", 900))
+
+    # ⚠️ 重要: 588000 目前只有回测 + 每日投票信号, 没有任何实盘执行流水 (无 journal).
+    # 前端契约: 回测页 = backtest/backtestCurve/backtestTrades; 实盘页 = live/navCurve/trades.
+    # 因此回测侧填真实数据, 实盘侧必须留空 —— 不可把回测数据塞进 live/navCurve/trades,
+    # 否则实盘页会和回测页长得一样 (之前就是这么错的).
+    return {
+        "id": "star50_n12_ensemble",
+        "name": "科创50ETF 日线N12投票",
+        "type": "趋势",
+        "status": "running",
+        "description": (
+            "科创50ETF(588000) 日线多参数 TRIX 投票: 6 个 N 向 12 集中的组合 "
+            "[(10,9),(10,12),(12,9),(12,12),(14,9),(14,12)] 各自做 TRIX(N) 金叉/死叉, "
+            "多数(>0.5)看多则次日持仓, 否则空仓. A股 T+1, 信号当日收盘生成、次日执行. "
+            "N=12 为该 ETF 滚动窗口上敏感度扫描的峰值甜区. "
+            "当前为纯回测/信号策略, 实盘尚未开始 (实盘页为空)."
+        ),
+        "tags": ["ETF", "TRIX", "日线", "投票", "STAR50", "588000", "趋势"],
+        "backtest": {
+            "annualReturn": float(st.get("annualReturn", 0)),
+            "maxDrawdown": float(st.get("max_drawdown", 0)),
+            "sharpeRatio": 0.0,
+            "winRate": float(st.get("win_rate", 0)),
+            "totalReturn": total,
+            "tradeCount": int(st.get("trades", 0)),
+            "backtestDays": days,
+            "startDate": data.get("startDate", ""),
+            "endDate": data.get("endDate", ""),
+        },
+        # 实盘: 尚未执行, 全部留空 (KPI 为 0, 曲线/逐笔为空); 前端会显示「暂无数据」
+        "live": {
+            "dailyReturn": 0.0,
+            "lastDayReturn": 0.0,
+            "totalReturn": 0.0,
+            "runningDays": 0,
+            "startDate": "",
+        },
+        "navCurve": [],
+        "backtestCurve": eq,
+        "trades": [],
+        "backtestTrades": tr,
+    }
+
+
 # ─── 输出 ────────────────────────────────────────────────────────────────────
 
 def _default_out_path() -> Path:
@@ -981,7 +1048,7 @@ def main() -> int:
         return 0
 
     print("\n构造策略数据...")
-    strategies = [build_live_strategy(), build_shadow_strategy(), build_r3_strategy()]
+    strategies = [build_live_strategy(), build_shadow_strategy(), build_r3_strategy(), build_588000_strategy()]
 
     out_path = args.out or _default_out_path()
     out_path.parent.mkdir(parents=True, exist_ok=True)
