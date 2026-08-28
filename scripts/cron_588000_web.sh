@@ -25,4 +25,8 @@ python3 "$SCRIPT_DIR/backtest_588000_n12.py" 2>&1 \
 echo "[$(date '+%F %T')] ==> 导出并上传 strategies.json"
 python3 "$SCRIPT_DIR/export_to_web.py" --out "$OUT_JSON" --scp "$SCP_TARGET"
 
-echo "[$(date '+%F %T')] ==> 完成。588000 信号已更新到 https://etf.duwenjie.site"
+echo "[$(date '+%F %T')] ==> 推送 14:55 信号到钉钉"
+python3 "$SCRIPT_DIR/push_588000_signal.py" 2>&1 \
+  || echo "  ! 钉钉推送失败, 不影响网站更新"
+
+echo "[$(date '+%F %T')] ==> 完成。588000 信号已更新到 https://etf.duwenjie.site 并推送钉钉"
