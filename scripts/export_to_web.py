@@ -918,6 +918,71 @@ def build_r3_strategy() -> dict[str, Any]:
     }
 
 
+def _build_588000_live(tr: list[dict[str, Any]], eq: list[list[float]],
+                       st: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], list[list[float]]]:
+    """用回测信号跟踪的『当前持仓』填充 588000 的 live 侧.
+
+    588000 是「信号手动跟车」策略(无自动下单机器人), 但用户实际按信号持有/空仓.
+    因此 live 侧只反映 *当前这一笔* 持仓状态:
+      - 存在 status=='open' 的交易 → live.trades=[该笔持仓中], navCurve=建仓以来的净值曲线
+      - 无 open 交易(空仓)        → live 全部留空
+    这样站点「实盘」页能直接看到 持仓中/空仓, 且不会把整段回测历史塞进 live(避免和回测页雷同).
+    """
+    open_pos = next((t for t in tr if t.get("status") == "open"), None)
+    if not open_pos:
+        return (
+            {"dailyReturn": 0.0, "lastDayReturn": 0.0, "totalReturn": 0.0,
+             "runningDays": 0, "startDate": ""},
+            [],
+            [],
+        )
+    buy_date = str(open_pos.get("buyDate", "") or "")
+    live_nav: list[list[float]] = []
+    if buy_date:
+        try:
+            buy_dt = datetime.strptime(buy_date, "%Y-%m-%d").date()
+            live_nav = [[ts, v] for ts, v in eq
+                        if datetime.fromtimestamp(ts / 1000).date() >= buy_dt]
+        except Exception:
+            live_nav = []
+    if not live_nav:
+        live_nav = eq[-1:] if eq else []
+    entry_v = live_nav[0][1] if live_nav else (eq[0][1] if eq else 1.0)
+    last_v = live_nav[-1][1] if live_nav else (eq[-1][1] if eq else 1.0)
+    hold_ret = (last_v / entry_v - 1.0) * 100.0 if entry_v else 0.0
+    # ⚠️ 实盘折线图须从 0% 起: 把净值重基为「建仓以来涨跌幅」(建仓日=0%)
+    if live_nav and entry_v:
+        live_nav = [[ts, round((v / entry_v - 1.0) * 100.0, 2)] for ts, v in live_nav]
+    running_days = 0
+    if buy_date:
+        try:
+            running_days = max(0, (datetime.now().date()
+                                   - datetime.strptime(buy_date, "%Y-%m-%d").date()).days)
+        except Exception:
+            running_days = 0
+    kpi = {
+        "dailyReturn": 0.0,
+        "lastDayReturn": float(st.get("dailyReturn", 0) or 0),
+        "totalReturn": round(hold_ret, 2),
+        "runningDays": int(running_days),
+        "startDate": buy_date,
+    }
+    return kpi, [open_pos], live_nav
+
+
+def _sort_588000_trades(tr: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """回测交易列表排序: 持仓中(open)置顶, 已平仓按平仓日倒序 —— 最新交易在最上面.
+
+    原始 star50_n12_ensemble.json 的 trades 是时间正序(最老在上), 前端按数组顺序展示,
+    因此需翻转为「最新在上」, 与 t0/shadow/r3 的 _backtest_trades_export 约定一致.
+    """
+    open_t = [t for t in tr if t.get("status") == "open"]
+    closed_t = [t for t in tr if t.get("status") != "open"]
+    open_t.sort(key=lambda t: str(t.get("buyDate", "")), reverse=True)
+    closed_t.sort(key=lambda t: str(t.get("sellDate") or ""), reverse=True)
+    return open_t + closed_t
+
+
 def build_588000_strategy() -> dict[str, Any] | None:
     """构造 588000 科创50ETF 日线 N12 结果簇 投票策略.
 
@@ -939,10 +1004,11 @@ def build_588000_strategy() -> dict[str, Any] | None:
     total = float(st.get("equity_pct", 0))
     days = int(data.get("trading_days", 900))
 
-    # ⚠️ 重要: 588000 目前只有回测 + 每日投票信号, 没有任何实盘执行流水 (无 journal).
+    # ⚠️ 重要: 588000 目前只有回测 + 每日投票信号, 没有任何自动下单机器人 (无 journal).
     # 前端契约: 回测页 = backtest/backtestCurve/backtestTrades; 实盘页 = live/navCurve/trades.
-    # 因此回测侧填真实数据, 实盘侧必须留空 —— 不可把回测数据塞进 live/navCurve/trades,
-    # 否则实盘页会和回测页长得一样 (之前就是这么错的).
+    # 回测侧填真实历史; 实盘侧用「信号跟踪的当前持仓」填充(只当前一笔 open 交易 + 建仓以来曲线),
+    # 不把整段回测历史塞进 live, 否则实盘页会和回测页长得一样 (之前就是这么错的).
+    live_kpi, live_trades, live_nav = _build_588000_live(tr, eq, st)
     return {
         "id": "star50_n12_ensemble",
         "name": "科创50ETF 日线N12投票",
@@ -967,18 +1033,15 @@ def build_588000_strategy() -> dict[str, Any] | None:
             "startDate": data.get("startDate", ""),
             "endDate": data.get("endDate", ""),
         },
-        # 实盘: 尚未执行, 全部留空 (KPI 为 0, 曲线/逐笔为空); 前端会显示「暂无数据」
-        "live": {
-            "dailyReturn": 0.0,
-            "lastDayReturn": 0.0,
-            "totalReturn": 0.0,
-            "runningDays": 0,
-            "startDate": "",
-        },
-        "navCurve": [],
+        # 实盘: 588000 为「信号手动跟车」策略(无自动下单机器人), 但用户实际按信号持有/空仓.
+        # 用回测信号跟踪的『当前持仓』填充 live 侧 —— 只填当前这一笔(open)持仓中交易 +
+        # 建仓以来的净值曲线, 不把整段回测历史塞进 live, 避免和回测页雷同.
+        # 当前持仓(open)→ 实盘页显示「持仓中」; 空仓时 live 留空 → 显示「空仓」.
+        "live": live_kpi,
+        "navCurve": live_nav,
         "backtestCurve": eq,
-        "trades": [],
-        "backtestTrades": tr,
+        "trades": live_trades,
+        "backtestTrades": _sort_588000_trades(tr),
     }
 
 
