@@ -1,0 +1,26 @@
+{
+  "window": "2021-01-04~2026-08-31",
+  "strategies": {
+    "S0": {
+      "total": 299.47,
+      "annual": 44.55,
+      "mdd": 20.21,
+      "idle_rate": 57.14,
+      "switches": 67
+    },
+    "A1": {
+      "total": 348.82,
+      "annual": 49.1,
+      "mdd": 19.13,
+      "idle_rate": 0.0,
+      "switches": 67
+    },
+    "defensive_rotation": {
+      "total": 407.08,
+      "annual": 54.02,
+      "mdd": 24.57,
+      "idle_rate": 0.0,
+      "switches": 208
+    }
+  }
+}

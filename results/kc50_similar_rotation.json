@@ -1,0 +1,95 @@
+{
+  "kc50_characteristics": {
+    "total_pct": 21.2,
+    "annual_pct": 5.2,
+    "vol_pct": 32.6,
+    "mdd_pct": -59.6,
+    "beta_hs300": 1.24,
+    "beta_zz1000": 0.1,
+    "corr_hs300": 0.7,
+    "corr_zz1000": 0.23,
+    "corr_bond": -0.19,
+    "up_pct": 47.9
+  },
+  "similar_top": [
+    {
+      "code": "159995",
+      "name": "芯片ETF华夏",
+      "corr": 0.77,
+      "beta": 0.59,
+      "vol": 42.7
+    },
+    {
+      "code": "512760",
+      "name": "芯片ETF",
+      "corr": 0.77,
+      "beta": 0.58,
+      "vol": 42.7
+    },
+    {
+      "code": "510500",
+      "name": "中证500ETF",
+      "corr": 0.76,
+      "beta": 1.1,
+      "vol": 22.4
+    },
+    {
+      "code": "515000",
+      "name": "科技ETF",
+      "corr": 0.71,
+      "beta": 0.63,
+      "vol": 36.6
+    },
+    {
+      "code": "510300",
+      "name": "沪深300ETF",
+      "corr": 0.7,
+      "beta": 1.24,
+      "vol": 18.3
+    },
+    {
+      "code": "512660",
+      "name": "军工ETF",
+      "corr": 0.65,
+      "beta": 0.7,
+      "vol": 30.2
+    },
+    {
+      "code": "515030",
+      "name": "新能源车ETF",
+      "corr": 0.64,
+      "beta": 0.63,
+      "vol": 33.2
+    },
+    {
+      "code": "515790",
+      "name": "光伏ETF",
+      "corr": 0.61,
+      "beta": 0.58,
+      "vol": 34.6
+    }
+  ],
+  "strategies": {
+    "S0": {
+      "total": 298.8,
+      "annual": 44.48,
+      "mdd": 20.21,
+      "idle_rate": 57.14,
+      "switches": 67
+    },
+    "A1": {
+      "total": 348.06,
+      "annual": 49.03,
+      "mdd": 19.13,
+      "idle_rate": 0.0,
+      "switches": 67
+    },
+    "regime_rotation": {
+      "total": 56.09,
+      "annual": 12.58,
+      "mdd": 38.53,
+      "idle_rate": 0.0,
+      "switches": 273
+    }
+  }
+}

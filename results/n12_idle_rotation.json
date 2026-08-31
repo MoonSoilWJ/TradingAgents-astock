@@ -1,0 +1,33 @@
+{
+  "window": "2021-01-04~2026-08-31",
+  "strategies": {
+    "S0 纯N12持币": {
+      "total": 271.36,
+      "annual": 41.81,
+      "mdd": 19.04,
+      "idle_rate": 57.11,
+      "switches": 67
+    },
+    "A1 N12+国债": {
+      "total": 318.92,
+      "annual": 46.43,
+      "mdd": 19.04,
+      "idle_rate": 0.0,
+      "switches": 67
+    },
+    "ROT N12+闲置轮动": {
+      "total": 150.48,
+      "annual": 27.69,
+      "mdd": 32.35,
+      "idle_rate": 7.08,
+      "switches": 241
+    },
+    "ROTB N12+轮动/债回退": {
+      "total": 139.71,
+      "annual": 26.21,
+      "mdd": 33.07,
+      "idle_rate": 0.0,
+      "switches": 241
+    }
+  }
+}
