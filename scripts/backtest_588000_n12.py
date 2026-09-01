@@ -136,6 +136,17 @@ def fetch_day(start_date="2020-11-16"):
     return s.reset_index()
 
 
+def _years(dates_index):
+    """回测年数: 用【自然日跨度】计算。
+
+    ⚠️ 2026-09 修复: 原实现写 d_n/365.0, 其中 d_n 是【交易日数】(如 1407),
+    除以 365 得到 3.85 年, 而实际跨度是 5.79 年 → 年化被系统性放大约 1.6 倍
+    (实测: 累计 655.8% 时, 错算年化 69.0%, 正确值约 42.0%)。
+    """
+    span = (dates_index[-1] - dates_index[0]).days
+    return max(span / 365.25, 1e-9)
+
+
 def _momentum(closes, win=20):
     """滚动 window 日收益率, 用于防御日挑选'最强动量'单标的。前 win 天为 NaN。"""
     n = len(closes)
@@ -269,7 +280,7 @@ def main():
     n12_closed = [t for t in n12_trades if t["status"] == "closed"]
     n12_wins = sum(1 for t in n12_closed if (t["returnPct"] or 0) > 0)
     n12_win_rate = (n12_wins / len(n12_closed) * 100) if n12_closed else 0.0
-    n12_years = n / 365.0
+    n12_years = _years(dates)
     n12_annual = ((1 + total) ** (1 / max(n12_years, 1e-9)) - 1) * 100 if total > -1 else -100.0
 
     # ===== 防御组轮动(主策略) =====
@@ -299,7 +310,7 @@ def main():
     rot_wins = sum(1 for t in rot_closed if (t["returnPct"] or 0) > 0)
     rot_win_rate = (rot_wins / len(rot_closed) * 100) if rot_closed else 0.0
 
-    d_years = d_n / 365.0
+    d_years = _years(d_dates)
     annual_d = ((1 + total_d) ** (1 / max(d_years, 1e-9)) - 1) * 100 if total_d > -1 else -100.0
 
     w_now = hold_spec[-1]

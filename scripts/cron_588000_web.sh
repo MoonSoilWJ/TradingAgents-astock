@@ -25,8 +25,11 @@ echo "[$(date '+%F %T')] ==> 14:55 重算 588000 N12 簇信号"
 echo "[$(date '+%F %T')] ==> 导出并上传 strategies.json"
 /usr/local/bin/python3 "$SCRIPT_DIR/export_to_web.py" --out "$OUT_JSON" --scp "$SCP_TARGET"
 
-echo "[$(date '+%F %T')] ==> 推送 14:55 信号到钉钉"
-/usr/local/bin/python3 "$SCRIPT_DIR/push_588000_signal.py" 2>&1 \
+echo "[$(date '+%F %T')] ==> 推送 14:55 防御组轮动信号到钉钉 (仅在换仓时推)"
+# 注意: 用 push_kc50_defensive_signal.py, 不再是 push_588000_signal.py。
+#   push_588000_signal.py 只推【纯 N12 基线】(持 588000 / 空仓), 没有防御组轮动,
+#   照它下单 = 跑 289.7% 那条线, 而非 655.8% 的主策略。该脚本已删除。
+/usr/local/bin/python3 "$SCRIPT_DIR/push_kc50_defensive_signal.py" 2>&1 \
   || echo "  ! 钉钉推送失败, 不影响网站更新"
 
 echo "[$(date '+%F %T')] ==> 完成。588000 信号已更新到 https://etf.duwenjie.site 并推送钉钉"
