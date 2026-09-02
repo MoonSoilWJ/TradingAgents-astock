@@ -1,7 +1,8 @@
 #!/bin/bash
 # 安装/更新监控定时任务
 #
-# 板块轮动: rotation_monitor.py（09:30/15:00，仅 --install-rotation 时写入）
+# 板块轮动: rotation_monitor.py —— 已于 2026-09-02 下线，crontab 中不再保留，
+#           且 --all 也不会再重装（如确需恢复用 --install-rotation）。
 # T+0 ETF:  14:45信号/14:50买 + 09:40~11:05每50秒5分K TRIX(5,3)卖出检查
 # 分钟K缓存: cache_min_data.py（15:10 小池子 + 15:35 全市场）
 # Walk-Forward: 每月首个工作日 9:00 复核参数（仅「可考虑切换」时钉钉推送）
@@ -10,8 +11,10 @@
 #
 # 用法:
 #   bash scripts/install_crontab.sh              # 只安装 T+0（推荐，不碰已有轮动）
-#   bash scripts/install_crontab.sh --all        # 同时重置板块轮动 + T+0
+#   bash scripts/install_crontab.sh --all        # 重置 T+0（不再包含板块轮动）
 #   bash scripts/install_crontab.sh --t0-only    # 同默认
+#   bash scripts/install_crontab.sh --uninstall-rotation  # 卸载板块轮动监控（下线用）
+#   bash scripts/install_crontab.sh --install-rotation    # 恢复板块轮动监控
 #   bash scripts/install_crontab.sh --install-walk-forward  # 追加每月 walk-forward 任务
 #   bash scripts/install_crontab.sh --install-b-idle-shadow # 追加 B+idle SHADOW（新策略影子, 不改实盘）
 #   bash scripts/install_crontab.sh --install-pair-shadow  # 追加 配对收敛薄补充腿 SHADOW（核心B腿熄火时非趋势期点缀, 不下单）
@@ -52,6 +55,8 @@ if [[ "${1:-}" == "--all" ]]; then
     MODE="all"
 elif [[ "${1:-}" == "--install-rotation" ]]; then
     MODE="rotation-only"
+elif [[ "${1:-}" == "--uninstall-rotation" ]]; then
+    MODE="rotation-uninstall"
 elif [[ "${1:-}" == "--install-walk-forward" ]]; then
     MODE="walk-forward-only"
 elif [[ "${1:-}" == "--install-b-idle-shadow" ]]; then
@@ -93,7 +98,7 @@ EXISTING="$(crontab -l 2>/dev/null || true)"
 
 case "${MODE}" in
     t0-only)
-        echo "保留已有 crontab（含 rotation_monitor），仅更新 t0_monitor.py 条目"
+        echo "保留已有 crontab（板块轮动条目不再维护），仅更新 t0_monitor.py 条目"
         FILTERED="$(echo "${EXISTING}" | grep -v "t0_monitor.py" | grep -v "t0_sell_watch.py" | grep -v "cache_min_data.py" || true)"
         {
             echo "${FILTERED}"
@@ -104,17 +109,21 @@ case "${MODE}" in
         } | sed '/^$/d' | crontab -
         ;;
     all)
-        echo "重置板块轮动 + T+0（移除旧 rotation/t0 条目后重装）"
+        echo "重置 T+0（移除旧 rotation/t0 条目后重装 T+0；板块轮动已下线，不重装）"
         FILTERED="$(echo "${EXISTING}" | grep -v "rotation_monitor.py" | grep -v "t0_monitor.py" | grep -v "t0_sell_watch.py" | grep -v "cache_min_data.py" || true)"
         {
             echo "${FILTERED}"
-            for sched in "${ROTATION_TIMES[@]}"; do
-                echo "${sched} * * 1-5 ${ROTATION_CMD}"
-            done
             echo "${T0_SELL_WATCH} * * 1-5 ${T0_WATCH_CMD}"
             echo "${T0_SIGNAL_CRON} * * 1-5 ${T0_CMD} --signal"
             echo "${T0_CACHE_CRON} * * 1-5 ${CACHE_CMD}"
             echo "${T0_CACHE_ALLMARKET_CRON} * * 1-5 ${CACHE_ALLMARKET_CMD}"
+        } | sed '/^$/d' | crontab -
+        ;;
+    rotation-uninstall)
+        echo "卸载板块轮动监控（移除 rotation_monitor.py 条目，其余保留）"
+        FILTERED="$(echo "${EXISTING}" | grep -v "rotation_monitor.py" || true)"
+        {
+            echo "${FILTERED}"
         } | sed '/^$/d' | crontab -
         ;;
     rotation-only)
@@ -203,6 +212,11 @@ echo "  bash scripts/install_crontab.sh --install-b-idle-shadow"
 echo ""
 echo "安装 配对收敛薄补充腿 SHADOW 定时:"
 echo "  bash scripts/install_crontab.sh --install-pair-shadow"
+echo ""
+echo "仅卸载 板块轮动监控（已下线）:"
+echo "  bash scripts/install_crontab.sh --uninstall-rotation"
+echo "恢复 板块轮动监控:"
+echo "  bash scripts/install_crontab.sh --install-rotation"
 echo ""
 echo "仅卸载 T+0 任务:"
 echo "  crontab -l | grep -v t0_monitor.py | grep -v t0_sell_watch.py | grep -v cache_min_data.py | crontab -"

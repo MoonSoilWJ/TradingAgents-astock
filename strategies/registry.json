@@ -5,9 +5,9 @@
       "id": "rotation_v6",
       "name": "板块轮动 v6",
       "category": "rotation",
-      "status": "live",
+      "status": "retired",
       "script": "scripts/rotation_monitor.py",
-      "schedule": "09:30, 15:00 工作日",
+      "schedule": "已下线（2026-09-02 从 crontab 移除，无定时运行）",
       "version": "v6_score_vol",
       "rules": {
         "pick": "3日涨幅 × 量价因子，ETF 优先排名 TOP1",

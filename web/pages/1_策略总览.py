@@ -105,7 +105,7 @@ for status in focus_statuses:
         render_strategy_card(strat, expanded=(status == "live"))
 
 with st.expander("研究与已否决策略"):
-    for status in ("research", "rejected", "deprecated"):
+    for status in ("research", "rejected", "deprecated", "retired"):
         items = get_strategies(status=status)
         if not items:
             continue

@@ -1,20 +1,6 @@
 {
   "jobs": [
     {
-      "id": "rotation_am",
-      "name": "板块轮动监控",
-      "cron": "30 09 * * 1-5",
-      "script": "scripts/rotation_monitor.py",
-      "strategy_id": "rotation_v6"
-    },
-    {
-      "id": "rotation_pm",
-      "name": "板块轮动监控",
-      "cron": "0 15 * * 1-5",
-      "script": "scripts/rotation_monitor.py",
-      "strategy_id": "rotation_v6"
-    },
-    {
       "id": "t0_sell_watch",
       "name": "T+0 卖出检查",
       "cron": "40 09 * * 1-5",

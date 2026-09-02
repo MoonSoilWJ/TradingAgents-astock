@@ -168,6 +168,7 @@ else:
 col_r, col_wf = st.columns(2)
 with col_r:
     st.subheader("板块轮动 v6")
+    st.caption("⏹ 已下线：2026-09-02 从 crontab 移除定时监控，以下为最后一次运行状态快照")
     rot = rotation_state()
     st.caption(f"状态文件: {rot['path']} · 更新 {fmt_dt(rot['mtime'])}")
     data = rot.get("data")

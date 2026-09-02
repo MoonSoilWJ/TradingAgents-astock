@@ -25,7 +25,7 @@ CRON_MANIFEST_PATH = PROJECT_ROOT / "strategies" / "cron_manifest.json"
 ROTATION_DIR = Path.home() / ".tradingagents" / "rotation"
 MIN_CACHE_DIR = ROTATION_DIR / "min_cache"
 
-STATUS_ORDER = ("live", "shadow", "candidate", "research", "rejected", "deprecated")
+STATUS_ORDER = ("live", "shadow", "candidate", "research", "rejected", "deprecated", "retired")
 STATUS_LABELS = {
     "live": "实盘 LIVE",
     "shadow": "旁路 SHADOW",
@@ -33,6 +33,7 @@ STATUS_LABELS = {
     "research": "研究 RESEARCH",
     "rejected": "已否决 REJECTED",
     "deprecated": "已废弃 DEPRECATED",
+    "retired": "已下线 RETIRED",
 }
 STATUS_COLORS = {
     "live": "#22c55e",
@@ -41,6 +42,7 @@ STATUS_COLORS = {
     "research": "#9ca3af",
     "rejected": "#ef4444",
     "deprecated": "#6b7280",
+    "retired": "#4b5563",
 }
 CATEGORY_LABELS = {
     "rotation": "板块轮动",
