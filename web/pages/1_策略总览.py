@@ -15,6 +15,7 @@ from web.strategy.artifact_scanner import min_cache_stats, scan_artifacts
 from web.strategy.paths import STATUS_LABELS, STATUS_ORDER
 from web.strategy.registry_loader import count_by_status, get_strategies, load_registry
 from web.strategy.state_reader import rotation_state, t0_state, walk_forward_state
+from web.strategy.structure_health_panel import render_structure_health
 from web.strategy.t0_journal import load_t0_trades, trades_to_table_rows
 from web.strategy.t0_table import TABLE_COLUMNS
 from web.strategy.theme import fmt_dt, inject_css, render_strategy_card
@@ -69,6 +70,9 @@ for (_sid, _role), _col in zip(_running, _rcols):
         st.markdown(f"<span style='color:#9aa0b5;font-size:0.78rem;'>{_role}</span>", unsafe_allow_html=True)
         st.markdown(f"状态: `{_s.get('status')}` · 脚本: `{_s.get('script','')}`")
         st.markdown(f"结论: {_s.get('conclusion','')}")
+
+st.divider()
+render_structure_health()
 
 st.divider()
 st.subheader("最近 T+0 成交")

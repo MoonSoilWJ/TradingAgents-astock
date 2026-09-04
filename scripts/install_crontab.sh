@@ -67,6 +67,8 @@ elif [[ "${1:-}" == "--install-r3" ]]; then
     MODE="r3-shadow-only"
 elif [[ "${1:-}" == "--install-pool-refresh" ]]; then
     MODE="pool-refresh-only"
+elif [[ "${1:-}" == "--install-structure-health" ]]; then
+    MODE="structure-health-only"
 fi
 
 BIDLE_CMD="cd ${PROJECT_DIR} && ${PYTHON3} scripts/t0_b_idle_shadow.py"
@@ -88,6 +90,13 @@ R3_LOG=">> ${HOME}/.tradingagents/rotation/r3_shadow.log 2>&1"
 R3_SIGNAL_CRON="45 14"   # 14:45 R3 复核+成交信号
 R3_PICK_CRON="40 14"     # 14:40 R3 选股锁定领头羊(对齐聚宽A: 14:40选)
 R3_SELL_WATCH="40 9"     # 09:40 启动 TRIX(5,3)卖出监控 (09:40~11:05 每50秒循环)
+
+# 结构健康度监控(两种结构的失效体温计, 每周六更新一次, 落盘供 WebUI 展示)
+# 指标一 隔夜动量(A/B/R3): 滚动60笔「上午溢价」 = 11:05收益 − 14:50收益
+# 指标二 趋势跟随(科创50): 滚动250日「动量IC」 = corr(过去20日, 未来20日)
+SHM_CMD="cd ${PROJECT_DIR} && ${PYTHON3} scripts/structure_health_monitor.py --days 250"
+SHM_LOG=">> ${HOME}/.tradingagents/rotation/structure_health.log 2>&1"
+SHM_CRON="0 10 * * 6"    # 每周六 10:00 (非交易日, 数据完整)
 
 echo "=== 安装监控定时任务 ==="
 echo ""
@@ -189,6 +198,14 @@ case "${MODE}" in
         {
             echo "${FILTERED}"
             echo "${POOL_CRON} ${POOL_CMD} ${POOL_LOG}"
+        } | sed '/^$/d' | crontab -
+        ;;
+    structure-health-only)
+        echo "追加 structure_health_monitor.py（结构健康度体温计，每周六更新，仅落盘不交易）"
+        FILTERED="$(echo "${EXISTING}" | grep -v "structure_health_monitor.py" || true)"
+        {
+            echo "${FILTERED}"
+            echo "${SHM_CRON} ${SHM_CMD} ${SHM_LOG}"
         } | sed '/^$/d' | crontab -
         ;;
 esac

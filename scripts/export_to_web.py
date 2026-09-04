@@ -1113,7 +1113,9 @@ def main() -> int:
         return 0
 
     print("\n构造策略数据...")
-    strategies = [build_live_strategy(), build_shadow_strategy(), build_r3_strategy(), build_588000_strategy()]
+    strategies = [build_live_strategy(), build_shadow_strategy(), build_r3_strategy(),
+                  build_588000_strategy()]
+    strategies = [s for s in strategies if s]
 
     out_path = args.out or _default_out_path()
     out_path.parent.mkdir(parents=True, exist_ok=True)
