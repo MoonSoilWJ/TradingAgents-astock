@@ -297,6 +297,25 @@ def elapsed_min(t: dtime) -> float:
 
 
 # ── 实时扫描 ────────────────────────────────────────────────────────────────
+def log_judgements(sigs: list[dict], now: datetime) -> None:
+    """AI 判定快照 → JSONL(校准闭环: 收盘后回填实际结果, 统计 prob 可靠度)。"""
+    try:
+        with open(STATE_DIR / "ai_judgements.jsonl", "a") as f:
+            for s in sigs:
+                a = s.get("ai") or {}
+                f.write(json.dumps({
+                    "ts": now.isoformat(timespec="seconds"),
+                    "code": s["code"], "name": s["name"],
+                    "action": a.get("action"), "prob": a.get("prob"),
+                    "reason": (a.get("reason") or "")[:120],
+                    "pct": round(float(s.get("pct", 0)) * 100, 2),
+                    "thr_pct": s.get("thr"),
+                    "amt_yi": s.get("amt_yi"), "vr": round(float(s.get("vr", 0)), 2),
+                }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def scan(api: TdxHq_API, pool: list[dict], progress: float,
          min_pct: float, min_vr: float, min_ratio: float = 0.6,
          hist: dict | None = None) -> tuple[list[dict], int]:
@@ -378,16 +397,13 @@ def scan(api: TdxHq_API, pool: list[dict], progress: float,
                 mv = fs * price / 1e8            # 流通市值(亿)
                 turn = amt / (fs * price) * 100  # 换手率(%)
 
-        # 硬排除: 高位板 / 盘子极端 / 换手爆表(出货)
+        # 极端样本不排除(判断权在 AI), 仅计数提示; 数据照常进入候选
         if streak is not None and streak >= 4:
             stat["x_high"] += 1
-            continue
         if mv is not None and (mv < 15 or mv > 800):
             stat["x_mv"] += 1
-            continue
         if turn is not None and turn > 45:
             stat["x_turn"] += 1
-            continue
 
         score = 0
         score += {0: 30, 1: 32, 2: 24, 3: 8}.get(streak, 12)   # 连板位置(首板/2板最优)
@@ -601,8 +617,18 @@ def main() -> int:
                         args.min_ratio, hist)
         print(f"[{now.strftime('%H:%M:%S')}] 有效 {st['got']:>4} | 涨停 {st['limit']:>3} | "
               f"封死 {st['sealed']:>3} | 一字 {st['yizi']} | 涨幅不足 {st['lowpct']} | "
-              f"量比不足 {st['lowvr']} | 排(高位{st['x_high']} 盘{st['x_mv']} "
+              f"量比不足 {st['lowvr']} | 标(高位{st['x_high']} 盘{st['x_mv']} "
               f"换手{st['x_turn']}) → **半路板 {len(sigs)} 只**")
+        # 行情自愈: 交易时段内 0 只有效 = 连接已死(get_security_quotes 静默返回空)
+        if st["got"] == 0 and in_session(now.time()):
+            print("[warn] 行情断流(有效 0), 强制重连 ...")
+            try:
+                api.disconnect()
+            except Exception:
+                pass
+            if not api.connect(TDX_HOST, TDX_PORT, time_out=5):
+                print("[warn] 重连失败, 下轮重试")
+            return
         for s in sigs[:10]:
             stk = s.get("streak")
             mv = f"{s['mv']:.0f}亿" if s.get("mv") else "—"
@@ -645,6 +671,7 @@ def main() -> int:
                 by = {d["code"]: d for d in decs}
                 for s in fresh:
                     s["ai"] = by.get(s["code"])
+                log_judgements(fresh, now)
                 for s in fresh:
                     a = s.get("ai") or {}
                     act = a.get("action", "无判定")
