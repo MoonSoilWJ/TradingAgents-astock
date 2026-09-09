@@ -163,7 +163,8 @@ def main() -> None:
     cur, prev_w = 1.0, pd.Series(dtype=float)
     eq = [1.0]
     turns = []
-    for d in df.index[61:]:
+    day_list = list(df.index[61:])
+    for j, d in enumerate(day_list):
         f = frac.loc[d]
         px, m20, m60, mm = df.loc[d], ma20.loc[d], ma60.loc[d], mom.loc[d]
         cands = [c for c in df.columns
@@ -173,14 +174,18 @@ def main() -> None:
             w = pd.Series(1 / len(top5), index=top5)
         else:
             w = pd.Series(dtype=float)
-        r = rets.loc[d, w.index].mean() if len(w) else 0.0
-        turn = sum(abs(w.get(c, 0.0) - prev_w.get(c, 0.0))
-                   for c in set(w.index) | set(prev_w.index))
-        cur *= (1 + r) * (1 - SLIP * turn)
+        # ★ 收益归属: d 日收盘信号 → 计 d 的【次日】收益(d收盘→d+1收盘)。
+        #   错误写法 rets.loc[d] 会把「选股前已发生的当日涨幅」计入 = 前视。
+        if j + 1 < len(day_list) and len(w):
+            nd = day_list[j + 1]
+            r = rets.loc[nd, w.index].mean()
+            turn = sum(abs(w.get(c, 0.0) - prev_w.get(c, 0.0))
+                       for c in set(w.index) | set(prev_w.index))
+            cur *= (1 + r) * (1 - SLIP * turn)
+            turns.append(turn)
         prev_w = w
-        turns.append(turn)
         eq.append(cur)
-    ser = pd.Series(eq, index=df.index[61:]).dropna()
+    ser = pd.Series(eq, index=df.index[60:]).dropna()
     total = (ser.iloc[-1] - 1) * 100
     yrs = (ser.index[-1] - ser.index[0]).days / 365.25
     ann = ((1 + total / 100) ** (1 / yrs) - 1) * 100
