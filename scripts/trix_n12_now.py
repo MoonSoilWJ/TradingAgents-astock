@@ -1,12 +1,17 @@
 # 查看 588000 日线 N12 簇 当前(最近一根日线) 的 TRIX / 信号线 / 金叉状态.
 # 盘中运行 -> 最后一根为当日近似收盘; 收盘后运行 -> 为当日定稿收盘.
+# 2026-09-09: pytdx 故障时自动降级 akshare 前复权(复用 n12_cluster_now.fetch_daily_robust).
 #
 # 用法:
 #   python3 scripts/trix_n12_now.py
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
-from pytdx.hq import TdxHq_API
-from pytdx.params import TDXParams
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from n12_cluster_now import fetch_daily_robust
 
 COMB_N12 = [(10, 9), (10, 12), (12, 9), (12, 12), (14, 9), (14, 12)]
 
@@ -22,22 +27,10 @@ def trix_series(c, N, M):
 
 
 def fetch_day(n=800):
-    api = TdxHq_API()
-    api.connect("180.153.18.170", 7709, time_out=5)
-    frames = []
-    for pg in range(20):
-        k = api.get_security_bars(TDXParams.KLINE_TYPE_DAILY, TDXParams.MARKET_SH, b"588000", pg * 700, 700)
-        if k is None:
-            break
-        d = api.to_df(k)
-        if d is None or len(d) == 0:
-            break
-        frames.append(d)
-        if len(d) < 700:
-            break
-    api.disconnect()
-    f = pd.concat(frames, ignore_index=True)
-    f["date"] = pd.to_datetime(f["datetime"]).dt.normalize()
+    f, mkt, src = fetch_daily_robust("588000")
+    if f is None:
+        raise SystemExit("拉取 588000 日线失败: pytdx 全服务器故障且 akshare 兜底也失败")
+    f["date"] = pd.to_datetime(f["date"]).dt.normalize()
     return f.sort_values("date").tail(n).reset_index(drop=True)
 
 

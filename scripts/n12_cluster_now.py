@@ -162,6 +162,107 @@ def fetch_daily(api, code):
     return None, None
 
 
+def _fetch_pytdx_server(code, ip, port):
+    """单服务器拉日线, 失败返回 None (含协议层拒返 get_security_bars=None 的情况)."""
+    api = TdxHq_API()
+    try:
+        if not api.connect(ip, port, time_out=4):
+            return None
+        primary = _guess_market(code)
+        for market in (primary, 1 - primary):
+            frames = []
+            try:
+                for pg in range(30):
+                    k = api.get_security_bars(TDXParams.KLINE_TYPE_DAILY, market,
+                                              code.encode(), pg * 700, 700)
+                    if not k:
+                        break
+                    d = api.to_df(k)
+                    if d is None or len(d) == 0:
+                        break
+                    frames.append(d)
+                    if len(d) < 700:
+                        break
+            except Exception:
+                continue
+            if frames:
+                f = pd.concat(frames, ignore_index=True)
+                f["date"] = pd.to_datetime(f["datetime"]).dt.normalize()
+                f = f.sort_values("date").drop_duplicates("date").reset_index(drop=True)
+                if len(f) >= 60:   # TRIX(14,12) 需足够预热
+                    return f, MARKET_TAG[market]
+        return None
+    except Exception:
+        return None
+    finally:
+        try:
+            api.disconnect()
+        except Exception:
+            pass
+
+
+def _fetch_akshare(code):
+    """兜底: akshare 日线 (股票/ETF/LOF). 东财前复权 → 新浪前复权 逐级降级. 返回 df 或 None."""
+    try:
+        import akshare as ak
+        is_fund = code[0] == "5" or code[:2] in ("15", "16")
+        mkt = "sh" if _guess_market(code) == 1 else "sz"
+        end = pd.Timestamp.now().strftime("%Y%m%d")
+        df = None
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            if is_fund:
+                try:   # 东财 ETF 前复权
+                    df = ak.fund_etf_hist_em(symbol=code, period="daily",
+                                             start_date="19900101", end_date=end, adjust="qfq")
+                except Exception:
+                    df = None
+                if df is None:  # 新浪 ETF(不复权, ETF 分红少可接受)
+                    try:
+                        df = ak.fund_etf_hist_sina(symbol=mkt + code)
+                    except Exception:
+                        df = None
+            else:
+                try:   # 东财 A股 前复权
+                    df = ak.stock_zh_a_hist(symbol=code, period="daily",
+                                            start_date="19900101", end_date=end, adjust="qfq")
+                except Exception:
+                    df = None
+                if df is None:  # 新浪 A股 前复权
+                    try:
+                        df = ak.stock_zh_a_daily(symbol=mkt + code, adjust="qfq")
+                    except Exception:
+                        df = None
+        if df is None:
+            return None
+        if "日期" in df.columns:   # 东财中文列
+            df = df.rename(columns={"日期": "date", "开盘": "open", "收盘": "close",
+                                    "最高": "high", "最低": "low"})
+        df["date"] = pd.to_datetime(df["date"])
+        cols = [c for c in ("date", "open", "high", "low", "close") if c in df.columns]
+        f = df[cols].sort_values("date").drop_duplicates("date").reset_index(drop=True)
+        return f if len(f) >= 60 else None
+    except Exception:
+        return None
+
+
+def fetch_daily_robust(code):
+    """取日线: 个股→前复权优先(akshare东财→新浪, pytdx垫底, 避免除权假跳空污染TRIX);
+    ETF/LOF→pytdx优先(项目口径), 全败再 akshare. 返回 (df, 市场标签, 数据源标签) 或 (None,None,None)."""
+    is_fund = code[0] == "5" or code[:2] in ("15", "16")
+    if not is_fund:
+        f = _fetch_akshare(code)
+        if f is not None:
+            return f, MARKET_TAG.get(_guess_market(code), "?"), "akshare(前复权)"
+    for ip, port in SERVERS:
+        r = _fetch_pytdx_server(code, ip, port)
+        if r is not None:
+            return r[0], r[1], "pytdx(%s)%s" % (ip, "(不复权)" if not is_fund else "")
+    f = _fetch_akshare(code)
+    if f is not None:
+        return f, MARKET_TAG.get(_guess_market(code), "?"), "akshare(前复权)"
+    return None, None, None
+
+
 def cluster_df(close):
     """返回 (bull_matrix[n,6], votes[n], ratio[n]) 基于 N12 簇."""
     bull = np.column_stack([trix_series(close, n, m)[0] > trix_series(close, n, m)[1]
@@ -177,16 +278,9 @@ def main():
     args = ap.parse_args()
 
     code, name, _ = resolve_symbol(args.symbol)
-    api = connect_tdx()
-    try:
-        f, mkt = fetch_daily(api, code)
-    finally:
-        try:
-            api.disconnect()
-        except Exception:
-            pass
+    f, mkt, src = fetch_daily_robust(code)
     if f is None:
-        print("拉取 %s 日线失败(退市/停牌过久/代码错误?)" % code)
+        print("拉取 %s 日线失败(pytdx 全服务器故障且 akshare 兜底也失败; 退市/代码错误?)" % code)
         raise SystemExit(1)
 
     label = "%s (%s)" % (name, code) if name else code
@@ -206,7 +300,7 @@ def main():
 
     # ---- 头部 ----
     print("=" * 66)
-    print("N12 结果簇 当前状态  标的: %s  [%s]" % (label, (mkt or "?")))
+    print("N12 结果簇 当前状态  标的: %s  [%s]  数据源: %s" % (label, (mkt or "?"), src))
     print("簇配置: %d 个 TRIX 组合 %s  看多阈值 > %.1f(= %d/6 看多)" %
           (len(COMB_N12), [list(c) for c in COMB_N12], THR, int(THR * len(COMB_N12)) + 1))
     print("K线数: %d   最后一根: %s   收盘(近似) %.3f   当日 %+.2f%%" %

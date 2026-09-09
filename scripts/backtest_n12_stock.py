@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from n12_cluster_now import COMB_N12, THR, connect_tdx, fetch_daily, resolve_symbol, trix_series
+from n12_cluster_now import COMB_N12, THR, fetch_daily_robust, resolve_symbol, trix_series
 
 
 def vote_target(close, combos=COMB_N12, thr=THR):
@@ -107,22 +107,17 @@ def main():
     args = ap.parse_args()
 
     code, name, _ = resolve_symbol(args.symbol)
-    api = connect_tdx()
-    try:
-        f, mkt = fetch_daily(api, code)
-    finally:
-        try:
-            api.disconnect()
-        except Exception:
-            pass
+    f, mkt, src = fetch_daily_robust(code)
     if f is None:
-        print("拉取 %s 日线失败" % code)
+        print("拉取 %s 日线失败(pytdx 全服务器故障且 akshare 兜底也失败; 退市/代码错误?)" % code)
         raise SystemExit(1)
 
     label = "%s(%s)" % (name, code) if name else code
     dates = pd.to_datetime(f["date"].values)
     close = f["close"].values.astype(float)
     opens = f["open"].values.astype(float)
+    if "high" not in f.columns or "low" not in f.columns:
+        f["high"], f["low"] = close, close  # akshare 兜底理应有, 双保险
 
     tgt, frac = vote_target(close)
     w = 100  # 预热起点
@@ -142,8 +137,8 @@ def main():
         return tots, ann(tots), mdds, sws
 
     print("=" * 78)
-    print("N12 结果簇 个股回测  标的: %s  [%s]   区间 %s ~ %s (%d 交易日, %.1f 年)" %
-          (label, mkt, d[0].date(), d[-1].date(), len(c), span_y))
+    print("N12 结果簇 个股回测  标的: %s  [%s]  数据源: %s   区间 %s ~ %s (%d 交易日, %.1f 年)" %
+          (label, mkt, src, d[0].date(), d[-1].date(), len(c), span_y))
     print("规则: 6组合TRIX簇投票>0.5持仓, 否则空仓 (同 588000 N12 口径)")
     print("=" * 78)
 
