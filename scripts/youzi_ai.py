@@ -391,7 +391,9 @@ _BENCH = {"9": (61.7, 1.18), "8": (52.6, 0.79)}
 
 def decide(sigs: list[dict], market: dict, now: datetime | None = None,
            api=None, verbose: bool = True, thr: float = 8.0,
-           min_prob: float = 75.0) -> tuple[list[dict], str]:
+           min_prob: float = 75.0,
+           report: str | None = None,
+           evidence: dict | None = None) -> tuple[list[dict], str]:
     """返回 (BUY列表, status)。status: ok=模型正常判定(可能全放弃) / failed=调用失败。"""
     if not sigs:
         return [], "ok"
@@ -401,27 +403,35 @@ def decide(sigs: list[dict], market: dict, now: datetime | None = None,
     own = None
     for i, s in enumerate(sigs):
         s["id"] = chr(ord("A") + i)
-        try:
-            s.update(enrich(s, date, api, thr_pct=s.get("thr", 10.0)))
-        except Exception:
-            pass
+        # evidence: 回测用 — 由历史数据预置证据(不调实时接口, 否则前视)
+        if evidence and s["code"] in evidence:
+            s.update(evidence[s["code"]])
+        else:
+            try:
+                s.update(enrich(s, date, api, thr_pct=s.get("thr", 10.0)))
+            except Exception:
+                pass
     if own is not None:
         try:
             own.disconnect()
         except Exception:
             pass
     prompt = build_prompt(sigs, snap, market, now, thr=thr)
-    # 校准闭环: 把 AI 自己的实盘成绩单注入提示词(无前视, 每日更新)
-    try:
-        rpt = (Path.home() / ".tradingagents" / "youzi"
-               / "ai_calibration_report.txt")
-        if rpt.exists() and rpt.stat().st_size > 50:
-            txt = rpt.read_text().strip()
-            if txt:
-                prompt += ("\n\n【你的历史判断成绩单(实盘校准, 每日更新) — "
-                           "据此校准你的 prob 标尺】\n" + txt[:800])
-    except Exception:
-        pass
+    # 校准闭环: 成绩单注入(只含 T 日之前的判定 — 实盘与回测同源, 非前视)
+    #   report=None → 读实盘成绩单文件
+    #   report=文本 → 回测用: 传"截至该回测日"滚动生成的成绩单
+    #   report=""   → 不注入(对照实验)
+    if report is None and not os.getenv("YOUZI_AI_NO_REPORT"):
+        try:
+            rpt = (Path.home() / ".tradingagents" / "youzi"
+                   / "ai_calibration_report.txt")
+            report = (rpt.read_text().strip()
+                      if rpt.exists() and rpt.stat().st_size > 50 else "")
+        except Exception:
+            report = ""
+    if report:
+        prompt += ("\n\n【你截至当前的历史判断成绩单 — 据此校准你的 prob 标尺】\n"
+                   + report[:800])
     _t0 = time.time()
     if verbose:
         n = len(sigs)
