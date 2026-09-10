@@ -43,6 +43,8 @@ ROTATION_DIR = Path.home() / ".tradingagents" / "rotation"
 
 # 588000 日线 N12 结果簇 投票策略 的回测/信号 JSON (由 scripts/backtest_588000_n12.py 生成)
 STAR50_N12_FILE = ROTATION_DIR / "star50_n12_ensemble.json"
+# 588000 实盘起始日(与 T0 策略对齐): 此日前的信号=回测, 此日后=实盘跟踪
+LIVE_START_588000 = "2026-07-16"
 
 # ─── OOS 回测数据: recent390_live_vs_b_idle.json (390天, 2024-12-20~2026-07-31) ─
 # 顶层:
@@ -920,54 +922,36 @@ def build_r3_strategy() -> dict[str, Any]:
 
 def _build_588000_live(tr: list[dict[str, Any]], eq: list[list[float]],
                        st: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], list[list[float]]]:
-    """用回测信号跟踪的『当前持仓』填充 588000 的 live 侧.
+    """588000 信号跟踪: live = 近 120 天窗口(空仓段=平线) + 全部交易明细。
 
-    588000 是「信号手动跟车」策略(无自动下单机器人), 但用户实际按信号持有/空仓.
-    因此 live 侧只反映 *当前这一笔* 持仓状态:
-      - 存在 status=='open' 的交易 → live.trades=[该笔持仓中], navCurve=建仓以来的净值曲线
-      - 无 open 交易(空仓)        → live 全部留空
-    这样站点「实盘」页能直接看到 持仓中/空仓, 且不会把整段回测历史塞进 live(避免和回测页雷同).
+    旧版只显示当前 open 持仓那一笔 + 建仓以来曲线:
+      · 新仓刚建 1 天 → 曲线只有单点, 前端画不出折线(视觉上"曲线丢失")
+      · 空仓 → live 全部清空(明细也消失)
+    改为固定窗口:
+      · 曲线: 最近 120 天 equity_curve, 重基为窗口首点=0%; 空仓段净值不变=平线
+      · 明细: 全部跟踪交易(最新在上) — 信号历史即实盘动作, 不应随持仓状态消失
+      · kpi: 与曲线窗口自洽
     """
-    open_pos = next((t for t in tr if t.get("status") == "open"), None)
-    if not open_pos:
+    if not tr or not eq:
         return (
             {"dailyReturn": 0.0, "lastDayReturn": 0.0, "totalReturn": 0.0,
              "runningDays": 0, "startDate": ""},
             [],
             [],
         )
-    buy_date = str(open_pos.get("buyDate", "") or "")
-    live_nav: list[list[float]] = []
-    if buy_date:
-        try:
-            buy_dt = datetime.strptime(buy_date, "%Y-%m-%d").date()
-            live_nav = [[ts, v] for ts, v in eq
-                        if datetime.fromtimestamp(ts / 1000).date() >= buy_dt]
-        except Exception:
-            live_nav = []
-    if not live_nav:
-        live_nav = eq[-1:] if eq else []
-    entry_v = live_nav[0][1] if live_nav else (eq[0][1] if eq else 1.0)
-    last_v = live_nav[-1][1] if live_nav else (eq[-1][1] if eq else 1.0)
-    hold_ret = (last_v / entry_v - 1.0) * 100.0 if entry_v else 0.0
-    # ⚠️ 实盘折线图须从 0% 起: 把净值重基为「建仓以来涨跌幅」(建仓日=0%)
-    if live_nav and entry_v:
-        live_nav = [[ts, round((v / entry_v - 1.0) * 100.0, 2)] for ts, v in live_nav]
-    running_days = 0
-    if buy_date:
-        try:
-            running_days = max(0, (datetime.now().date()
-                                   - datetime.strptime(buy_date, "%Y-%m-%d").date()).days)
-        except Exception:
-            running_days = 0
+    # 重基: 实盘起始日当天 = 0%(此后只反映实盘段表现; 空仓段净值不变=平线)
+    base = eq[0][1] or 1.0
+    live_nav = [[ts, round((v / base - 1.0) * 100.0, 2)] for ts, v in eq]
+    running_days = max(0, (datetime.now().date()
+                           - datetime.strptime(LIVE_START_588000, "%Y-%m-%d").date()).days)
     kpi = {
         "dailyReturn": 0.0,
         "lastDayReturn": float(st.get("dailyReturn", 0) or 0),
-        "totalReturn": round(hold_ret, 2),
+        "totalReturn": float(live_nav[-1][1]) if live_nav else 0.0,
         "runningDays": int(running_days),
-        "startDate": buy_date,
+        "startDate": LIVE_START_588000,
     }
-    return kpi, [open_pos], live_nav
+    return kpi, _sort_588000_trades(tr), live_nav
 
 
 def _sort_588000_trades(tr: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1001,14 +985,27 @@ def build_588000_strategy() -> dict[str, Any] | None:
     st = data.get("stats", {})
     eq = data.get("equity_curve", [])
     tr = data.get("trades", [])
-    total = float(st.get("equity_pct", 0))
-    days = int(data.get("trading_days", 900))
+    # ── 回测/实盘切分: 以实盘起始日为界, 时间上互斥 ──
+    start_ts = int(datetime.strptime(LIVE_START_588000, "%Y-%m-%d").timestamp() * 1000)
+    bt_tr = [t for t in tr if str(t.get("signalDate") or "") < LIVE_START_588000]
+    bt_eq = [p for p in eq if p[0] < start_ts]
+    lv_tr = [t for t in tr if str(t.get("signalDate") or "") >= LIVE_START_588000]
+    lv_eq = [p for p in eq if p[0] >= start_ts]
+    # 回测 KPI: 截止到实盘起始日(不含实盘段, 也不含当前持仓)
+    bt_total = round(float(bt_eq[-1][1]), 2) if bt_eq else 0.0
+    bt_days = len(bt_eq)
+    bt_ann = round(((1 + bt_total / 100) ** (250 / max(bt_days, 1)) - 1) * 100, 2)
+    bt_mdd = _curve_maxdd(bt_eq)
+    bt_win = round(sum(1 for t in bt_tr if float(t.get("returnPct") or 0) > 0)
+                   / max(len(bt_tr), 1) * 100, 1)
+    bt_end = (datetime.fromtimestamp(bt_eq[-1][0] / 1000).strftime("%Y-%m-%d")
+              if bt_eq else "")
 
     # ⚠️ 重要: 588000 目前只有回测 + 每日投票信号, 没有任何自动下单机器人 (无 journal).
     # 前端契约: 回测页 = backtest/backtestCurve/backtestTrades; 实盘页 = live/navCurve/trades.
     # 回测侧填真实历史; 实盘侧用「信号跟踪的当前持仓」填充(只当前一笔 open 交易 + 建仓以来曲线),
     # 不把整段回测历史塞进 live, 否则实盘页会和回测页长得一样 (之前就是这么错的).
-    live_kpi, live_trades, live_nav = _build_588000_live(tr, eq, st)
+    live_kpi, live_trades, live_nav = _build_588000_live(lv_tr, lv_eq, st)
     return {
         "id": "star50_n12_ensemble",
         "name": "科创50ETF N12+防御组轮动",
@@ -1025,15 +1022,15 @@ def build_588000_strategy() -> dict[str, Any] | None:
         ),
         "tags": ["ETF", "TRIX", "日线", "投票", "STAR50", "588000", "趋势", "轮动", "防御"],
         "backtest": {
-            "annualReturn": float(st.get("annualReturn", 0)),
-            "maxDrawdown": float(st.get("max_drawdown", 0)),
+            "annualReturn": bt_ann,
+            "maxDrawdown": bt_mdd,
             "sharpeRatio": 0.0,
-            "winRate": float(st.get("win_rate", 0)),
-            "totalReturn": total,
-            "tradeCount": int(st.get("trades", 0)),
-            "backtestDays": days,
+            "winRate": bt_win,
+            "totalReturn": bt_total,
+            "tradeCount": len(bt_tr),
+            "backtestDays": bt_days,
             "startDate": data.get("startDate", ""),
-            "endDate": data.get("endDate", ""),
+            "endDate": bt_end,
         },
         # 实盘: 588000 为「信号手动跟车」策略(无自动下单机器人), 但用户实际按信号持有/空仓.
         # 用回测信号跟踪的『当前持仓』填充 live 侧 —— 只填当前这一笔(open)持仓中交易 +
@@ -1041,9 +1038,183 @@ def build_588000_strategy() -> dict[str, Any] | None:
         # 当前持仓(open)→ 实盘页显示「持仓中」; 空仓时 live 留空 → 显示「空仓」.
         "live": live_kpi,
         "navCurve": live_nav,
-        "backtestCurve": eq,
+        "backtestCurve": bt_eq,
         "trades": live_trades,
-        "backtestTrades": _sort_588000_trades(tr),
+        "backtestTrades": _sort_588000_trades(bt_tr),
+    }
+
+
+# ─── 游资半路板(AI 六维决断) ─────────────────────────────────────────────────
+
+YOUZI_BT = Path.home() / ".tradingagents" / "youzi" / "ai_backtest.jsonl"
+YOUZI_JL = Path.home() / ".tradingagents" / "youzi" / "ai_judgements.jsonl"
+# 只含"配额内实际推送"的(线上展示); ai_judgements 含配额外的 BUY, 仅校准用
+YOUZI_PUSHED = Path.home() / ".tradingagents" / "youzi" / "ai_pushed.jsonl"
+
+
+def _read_any_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            pass
+    return out
+
+
+def _next_trade_day(d: str) -> str:
+    """T+1 卖出日(跳过周末; 节假日未处理, 仅用于展示)。"""
+    try:
+        dt = datetime.strptime(d, "%Y-%m-%d") + timedelta(days=1)
+    except ValueError:
+        return d
+    while dt.weekday() >= 5:
+        dt += timedelta(days=1)
+    return dt.strftime("%Y-%m-%d")
+
+
+def _curve_maxdd(curve: list[list[float]]) -> float:
+    peak, mdd = -1e9, 0.0
+    for _, cum in curve:
+        v = 1 + cum / 100
+        peak = max(peak, v)
+        mdd = min(mdd, (v / peak - 1) * 100)
+    return round(mdd, 2)
+
+
+def build_youzi_strategy() -> dict[str, Any] | None:
+    """游资半路板: 规则召回(8%未封板) → AI 六维决断 → prob≥70 放行 → 次日开盘卖。
+
+    backtest: AI 层滚动回测(60 交易日; 证据全部由历史数据重建, 无前视)
+    live:     实盘信号(判定后需 T+1 回填次日收益, 起步阶段可能为空)
+    """
+    rows = [r for r in _read_any_jsonl(YOUZI_BT)
+            if r.get("act") == "BUY" and (r.get("prob") or 0) >= 70
+            and r.get("ret") is not None]
+    if not rows:
+        return None
+
+    by_day: dict[str, list[float]] = {}
+    for r in rows:
+        by_day.setdefault(r["date"], []).append(float(r["ret"]))
+    curve, nav = [], 1.0
+    for d in sorted(by_day):
+        nav *= 1 + (sum(by_day[d]) / len(by_day[d])) / 100
+        try:
+            ts = int(datetime.strptime(d, "%Y-%m-%d").timestamp() * 1000)
+        except ValueError:
+            continue
+        curve.append([ts, (nav - 1) * 100])
+    days = len(by_day)
+    total = round((nav - 1) * 100, 2)
+    ann = round(((1 + total / 100) ** (250 / max(days, 1)) - 1) * 100, 2)
+    win = round(sum(1 for r in rows if float(r["ret"]) > 0) / len(rows) * 100, 1)
+    seal = round(sum(1 for r in rows if r.get("seal")) / len(rows) * 100, 1)
+
+    # 股票名称(代码不直观): 腾讯行情批量取一次, 失败退回代码
+    codes = sorted({str(r.get("code", "")) for r in rows if r.get("code")})
+    names: dict[str, str] = {}
+    try:
+        from tx_quote import snapshot as tx_snap
+        names = {c: str(v.get("name") or c) for c, v in tx_snap(codes).items()}
+    except Exception:
+        names = {}
+
+    trades = [{
+        "status": "closed",
+        "signalDate": r["date"], "buyDate": r["date"],
+        "sellDate": _next_trade_day(r["date"]),
+        "signalTime": r.get("slot", ""),
+        "etf": r.get("code", ""),
+        "name": names.get(str(r.get("code", "")), str(r.get("code", ""))),
+        "returnPct": round(float(r["ret"]), 2),
+        "sellReason": "次日开盘卖",
+        "note": (f"AI prob={r.get('prob')} | 当日"
+                 f"{'封板' if r.get('seal') else '未封板'}"),
+    } for r in sorted(rows, key=lambda x: x["date"])]
+
+    # 实盘: 只取【配额内实际推送】的(配额外的 BUY 只用于校准, 不该显示成持仓)
+    # ret/seal 回填在 ai_judgements 里, 按 (ts, code) 关联过来
+    _jl = {(str(r.get("ts")), str(r.get("code"))): r
+           for r in _read_any_jsonl(YOUZI_JL)}
+    live_rows = []
+    for r in _read_any_jsonl(YOUZI_PUSHED):
+        j = _jl.get((str(r.get("ts")), str(r.get("code"))), {})
+        live_rows.append({**r, "ret": j.get("ret"), "seal": j.get("seal")})
+    lcodes = sorted({str(r.get("code", "")) for r in live_rows
+                     if r.get("code")})
+    try:
+        from tx_quote import snapshot as tx_snap
+        names.update({c: str(v.get("name") or c)
+                      for c, v in tx_snap(lcodes).items()})
+    except Exception:
+        pass
+    live_trades, live_curve, nav2 = [], [], 1.0
+    for r in sorted(live_rows, key=lambda x: x["ts"]):
+        ret, hm = r.get("ret"), r["ts"][11:16]      # 信号时刻: 精确到分钟
+        code = str(r.get("code", ""))
+        live_trades.append({
+            "status": "closed" if ret is not None else "open",
+            "signalDate": r["ts"][:10], "buyDate": r["ts"][:10],
+            "sellDate": _next_trade_day(r["ts"][:10]) if ret is not None else "",
+            "signalTime": hm, "buyTime": hm,
+            "etf": code, "name": names.get(code, code),
+            "returnPct": round(float(ret), 2) if ret is not None else None,
+            "sellReason": "次日开盘卖" if ret is not None else "",
+            "note": (f"AI prob={r.get('prob')} | 当日"
+                     f"{'封板' if r.get('seal') else '未封板'}"),
+        })
+        if ret is None:
+            continue
+        nav2 *= 1 + float(ret) / 100
+        try:
+            ts = int(datetime.strptime(r["ts"][:10], "%Y-%m-%d").timestamp() * 1000)
+        except ValueError:
+            continue
+        live_curve.append([ts, (nav2 - 1) * 100])
+    live_trades.reverse()             # 实盘明细: 最新在上
+    live_total = round((nav2 - 1) * 100, 2)
+
+    return {
+        "id": "youzi_banlu_ai",
+        "name": "游资半路板 · AI 六维决断",
+        "type": "打板",
+        "status": "running",
+        "description": (
+            "沪深主板 涨幅≥8% 且未封板(盘口有卖单、买得到) → AI 扮演资金数亿的游资大佬, "
+            "按【盘口承接 / 资金面 / 题材联动 / 基本面 / 首触时段 / 位置情绪】六维自由权衡"
+            "(无硬性一票否决, 时段与市值只作参考数据), prob≥70 才放行, 每日最多 3 笔, "
+            "次日开盘卖出。规则层只负责召回(无差别买入笔均仅 +0.04%, 无 edge), "
+            "判断权全在 AI 层 —— 回测中它把封板率从 44% 提到 82%。每次判定入账, "
+            "收盘后回填实际结果生成『AI 自己的成绩单』并注入提示词, 实现自我校准。"
+        ),
+        "tags": ["游资", "半路板", "打板", "AI决断", "沪深主板", "次日开盘卖"],
+        "backtest": {
+            "annualReturn": ann,
+            "maxDrawdown": _curve_maxdd(curve),
+            "sharpeRatio": 0.0,
+            "winRate": win,
+            "totalReturn": total,
+            "tradeCount": len(rows),
+            "backtestDays": days,
+            "startDate": sorted(by_day)[0],
+            "endDate": sorted(by_day)[-1],
+        },
+        "live": {
+            "dailyReturn": round(live_total / max(len(live_curve), 1), 4),
+            "lastDayReturn": (round(float(live_rows[-1].get("ret") or 0), 2)
+                              if live_rows else 0.0),
+            "totalReturn": live_total,
+            "runningDays": len(live_curve),
+            "startDate": live_rows[0]["ts"][:10] if live_rows else "",
+        },
+        "navCurve": live_curve,
+        "backtestCurve": curve,
+        "trades": live_trades[-50:],      # 前端"实盘"列表读 trades
+        "backtestTrades": list(reversed(trades)),   # 回测明细: 最新在上
+        "extra": {"sealRate": seal, "probGate": 70, "maxPerDay": 3},
     }
 
 
@@ -1114,7 +1285,7 @@ def main() -> int:
 
     print("\n构造策略数据...")
     strategies = [build_live_strategy(), build_shadow_strategy(), build_r3_strategy(),
-                  build_588000_strategy()]
+                  build_588000_strategy(), build_youzi_strategy()]
     strategies = [s for s in strategies if s]
 
     out_path = args.out or _default_out_path()

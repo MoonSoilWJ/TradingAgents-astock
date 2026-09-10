@@ -56,6 +56,10 @@ def fetch_daily(api: TdxHq_API, code: str, n: int = 15):
 
 def backfill() -> int:
     """未回填记录 → 补当日封板状态; 次日数据已生成则补次日溢价。"""
+    # 盘中日K未定型(收盘价=当前价), 此时判定"是否封板"会污染数据 → 收盘后才回填
+    if datetime.now().hour < 15:
+        print("未收盘, 跳过回填(盘中封板判定会失真)")
+        return 0
     recs = load_recs()
     if not recs:
         print("无判定记录")
@@ -106,26 +110,70 @@ def backfill() -> int:
     return n_done
 
 
-def report() -> str:
-    """prob 分档 × 实际结果。同票同日多次判定取最后一次(时间最晚)。"""
-    recs = [r for r in load_recs() if r.get("filled")]
+def _dedup(rs: list[dict]) -> list[dict]:
     key: dict = {}
-    for r in recs:
+    for r in rs:
         k = (r["ts"][:10], r["code"])
         if k not in key or r["ts"] > key[k]["ts"]:
             key[k] = r
-    recs = sorted(key.values(), key=lambda r: r["ts"])
+    return sorted(key.values(), key=lambda r: r["ts"])
 
-    out = [f"AI 判断校准报告 (生成 {datetime.now():%Y-%m-%d %H:%M} | "
-           f"已回填 {len(recs)} 条判定)", ""]
+
+def _buckets() -> list:
+    return (("70+", 70, 101), ("65-70", 65, 70), ("60-65", 60, 65),
+            ("50-60", 50, 60), ("<50", 0, 50))
+
+
+def report() -> str:
+    """prob 分档 × 实际结果。同票同日多次判定取最后一次(时间最晚)。
+
+    分两段: 封板率(当日收盘即可回填, 不用等 T+1) / 次日收益(需 T+1)。
+    """
+    all_recs = load_recs()
+    sealed = _dedup([r for r in all_recs if r.get("seal") is not None])
+    recs = _dedup([r for r in all_recs if r.get("filled")])
+
+    out = [f"AI 判断校准报告 (生成 {datetime.now():%Y-%m-%d %H:%M})", ""]
+    if sealed:                       # 封板率: 当日收盘即可验证
+        out += [f"【封板率 · 当日验证 · {len(sealed)} 条】",
+                f"{'prob档':<8}{'笔数':>5}{'封板率':>9}"]
+        for name, lo, hi in _buckets():
+            sub = [r for r in sealed if lo <= float(r.get("prob") or 0) < hi]
+            if not sub:
+                continue
+            sr = sum(1 for r in sub if r.get("seal")) / len(sub) * 100
+            out.append(f"{name:<8}{len(sub):>5}{sr:>8.1f}%")
+        b = [r for r in sealed if r.get("action") == "BUY"]
+        if b:
+            out.append(f"BUY {len(b)} 笔封板率 "
+                       f"{sum(1 for r in b if r.get('seal')) / len(b) * 100:.1f}%")
+    else:
+        out += ["【封板率】暂无(需当日收盘后回填)"]
+    out.append("")
+
+    # ── 近期 BUY 案例回顾: 判断理由+实际结果, 供 AI 对照自己的推理模式 ──
+    buys_all = _dedup([r for r in all_recs if r.get("action") == "BUY"])
+    cases = [r for r in buys_all if r.get("ret") is not None][-5:]
+    if cases:
+        out.append("【近期 BUY 案例回顾 · 你的判断理由与实际结果】")
+        for r in cases:
+            res = (f"{'封板' if r.get('seal') else '未封板'}"
+                   f", 次日开盘 {r['ret']:+.2f}%")
+            out.append(f"  {r['ts'][:10]} {r.get('name') or r.get('code')} "
+                       f"prob={r.get('prob')} — {r.get('reason') or ''}"
+                       f" → 结果: {res}")
+        out.append("")
+    elif buys_all:
+        out += ["【近期 BUY 案例回顾】有 BUY 判定但尚未回填结果(需 T+1)", ""]
+
+    out.append(f"【次日收益 · {len(recs)} 条已回填】")
     if not recs:
-        out.append("暂无已回填数据(判定后需 1 个交易日才能回填次日结果)")
-        REPORT.write_text("\n".join(out))
-        return "\n".join(out)
-
+        out.append("  暂无 — 判定后需 1 个交易日才能回填次日开盘/收盘结果")
+        txt = "\n".join(out)
+        REPORT.write_text(txt)
+        return txt
     out.append(f"{'prob档':<8}{'笔数':>5}{'封板率':>8}{'次日开盘':>9}{'次日收盘':>9}")
-    for name, lo, hi in (("70+", 70, 101), ("65-70", 65, 70),
-                         ("60-65", 60, 65), ("50-60", 50, 60), ("<50", 0, 50)):
+    for name, lo, hi in _buckets():
         sub = [r for r in recs if lo <= float(r.get("prob") or 0) < hi]
         if not sub:
             out.append(f"{name:<8}{0:>5}{'—':>8}{'—':>9}{'—':>9}")

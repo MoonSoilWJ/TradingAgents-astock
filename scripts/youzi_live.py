@@ -39,6 +39,10 @@
 from __future__ import annotations
 
 import argparse
+# macOS 系统代理(Clash 等写入 127.0.0.1:7890)会被 urllib/requests 自动读取,
+# 代理不通时所有 HTTP(S) 调用失败(ProxyError) → 强制直连(实测直连可用)
+import os as _os
+_os.environ["no_proxy"] = _os.environ["NO_PROXY"] = "*"
 import json
 import sys
 import time
@@ -96,6 +100,42 @@ def _tdx_connect() -> TdxHq_API:
     raise RuntimeError("pytdx 连接失败")
 
 
+def _codes_fallback() -> list[tuple]:
+    """pytdx 代码列表不可用时的本地兜底: 主板日K缓存里的代码(不依赖外网)。"""
+    try:
+        d = pd.read_pickle(STATE_DIR / "mb_daily.pkl")
+        cs = sorted({str(c) for c in d["code"].unique()})
+        return [(TDXParams.MARKET_SH if c[0] in "56"
+                 else TDXParams.MARKET_SZ, c, "")
+                for c in cs if c.startswith(("60", "00"))]
+    except Exception:
+        return []
+
+
+def _quotes_fallback(codes: list[str]) -> list[dict]:
+    """TDX 快照失效时的回退: 腾讯行情(2026-09-10 起 pytdx 公共服务器集体失效)。
+
+    字段映射成 pytdx 快照格式, 调用方无需改动。
+    """
+    try:
+        from tx_quote import snapshot as tx_snap
+    except Exception:
+        return []
+    out = []
+    for c, v in tx_snap(codes).items():
+        nm = str(v.get("name") or "")
+        # ST/退市/次新/除权日: 涨跌幅失真(与主路径同口径)
+        if "ST" in nm or "退" in nm or nm.startswith(("N", "XD", "XR", "DR")):
+            continue
+        out.append({"code": c, "name": nm, "price": v["price"],
+                    "last_close": v["prev_close"], "open": v["open"],
+                    "high": v["high"], "low": v["low"],
+                    "amount": v["amount"], "vol": v["vol"],
+                    "ask1": v["ask1"], "bid1": v["bid1"],
+                    "ask_vol": v["ask1_vol"], "bid_vol": v["bid1_vol"]})
+    return out
+
+
 def build_pool(n: int = 600, use_cache: bool = True, strict_prev: bool = True):
     """pytdx 全市场快照 → 成交额最活跃的 n 只(非ST/主板+创业板)。
 
@@ -111,7 +151,10 @@ def build_pool(n: int = 600, use_cache: bool = True, strict_prev: bool = True):
         except Exception:
             pass
 
-    api = _tdx_connect()
+    try:
+        api = _tdx_connect()
+    except Exception:
+        api = None
     try:
         print("[池] 拉取全市场代码 ...", flush=True)
         codes = []
@@ -136,6 +179,10 @@ def build_pool(n: int = 600, use_cache: bool = True, strict_prev: bool = True):
                             ("N", "XD", "XR", "DR")):
                         continue
                     codes.append((market, code, name))
+        if not codes:                      # TDX 列表不可用 → 本地代码缓存
+            codes = _codes_fallback()
+            print(f"[池] TDX 列表不可用, 改用本地代码 {len(codes)} 只",
+                  flush=True)
         print(f"[池] 候选 {len(codes)} 只 → 拉实时快照排序 ...", flush=True)
 
         rows = {}
@@ -152,8 +199,19 @@ def build_pool(n: int = 600, use_cache: bool = True, strict_prev: bool = True):
                 if prev <= 0:
                     continue
                 rows[code] = (amt, prev, q)
+        if not rows:                       # TDX 快照失效 → 腾讯行情回退
+            print("[池] TDX 快照空, 回退腾讯行情源 ...", flush=True)
+            for q in _quotes_fallback([c for _, c, _ in codes]):
+                amt = float(q.get("amount") or 0)
+                prev = float(q.get("last_close") or 0)
+                if prev > 0:
+                    rows[str(q.get("code", ""))] = (amt, prev, q)
         if not rows:
-            raise RuntimeError("全市场快照为空(可能是非交易时段且服务器未保留行情)")
+            # 不再抛异常退出: 崩溃会被看门狗反复拉起一个必死的进程。
+            # 返回空池 → 主循环每轮重试重建, 行情恢复后自动接管。
+            print("[warn] 全市场快照为空(行情源不可用), 返回空池, 下轮重试",
+                  flush=True)
+            return []
 
         # 量比基准: 盘前快照 amount=上一交易日全额 → 直接用;
         #           盘中/收盘后 amount=当日累计 → 按时间进度折算为全天, 口径统一
@@ -297,9 +355,14 @@ def elapsed_min(t: dtime) -> float:
 
 
 # ── 实时扫描 ────────────────────────────────────────────────────────────────
-def log_judgements(sigs: list[dict], now: datetime) -> None:
-    """AI 判定快照 → JSONL(校准闭环: 收盘后回填实际结果, 统计 prob 可靠度)。"""
+def log_judgements(sigs: list[dict], now: datetime,
+                   market: dict | None = None) -> None:
+    """AI 判定快照 → JSONL(校准闭环: 收盘后回填实际结果, 统计 prob 可靠度)。
+
+    market: 当日基本盘(涨停家数/池大小/最高连板) — 将来可按市场环境分组校准。
+    """
     try:
+        m = market or {}
         with open(STATE_DIR / "ai_judgements.jsonl", "a") as f:
             for s in sigs:
                 a = s.get("ai") or {}
@@ -308,9 +371,32 @@ def log_judgements(sigs: list[dict], now: datetime) -> None:
                     "code": s["code"], "name": s["name"],
                     "action": a.get("action"), "prob": a.get("prob"),
                     "reason": (a.get("reason") or "")[:120],
-                    "pct": round(float(s.get("pct", 0)) * 100, 2),
+                    "pct": round(float(s.get("pct", 0)), 2),   # 已是百分数
                     "thr_pct": s.get("thr"),
                     "amt_yi": s.get("amt_yi"), "vr": round(float(s.get("vr", 0)), 2),
+                    "n_limit": m.get("n_limit"), "pool_n": m.get("pool_n"),
+                    "max_st": m.get("max_st"),
+                }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def log_pushed(sigs: list[dict], now: datetime) -> None:
+    """配额内、真正进入推送流程的 → ai_pushed.jsonl(线上展示用)。
+
+    与 ai_judgements.jsonl 的区别: 后者记全部判定(BUY/SKIP, 含配额满后未推送的
+    BUY), 用于校准; 本文件只记「实际会下单」的, 否则线上会显示一堆根本没买的
+    "持仓中"。
+    """
+    try:
+        with open(STATE_DIR / "ai_pushed.jsonl", "a") as f:
+            for s in sigs:
+                a = s.get("ai") or {}
+                f.write(json.dumps({
+                    "ts": now.isoformat(timespec="seconds"),
+                    "code": s["code"], "name": s["name"],
+                    "action": a.get("action"), "prob": a.get("prob"),
+                    "pct": round(float(s.get("pct", 0)), 2),
                 }, ensure_ascii=False) + "\n")
     except Exception:
         pass
@@ -338,6 +424,10 @@ def scan(api: TdxHq_API, pool: list[dict], progress: float,
                     quotes.extend(q)
             except Exception as exc:
                 print(f"[warn] 行情拉取失败: {exc}")
+    if not quotes:                      # TDX 失效 → 腾讯行情回退
+        quotes = _quotes_fallback([p["code"] for p in pool])
+        if quotes:
+            print(f"[行情] TDX 不可用, 本轮使用腾讯源 {len(quotes)} 只")
 
     meta = {p["code"]: p for p in pool}
     for q in quotes or []:
@@ -664,14 +754,15 @@ def main() -> int:
         if args.ai:
             try:
                 from youzi_ai import decide
-                decs, aist = decide(fresh, {"n_limit": st["limit"],
-                                            "pool_n": len(pool), "max_st": 3},
-                                    now, api=api, thr=args.min_pct,
+                mkt = {"n_limit": st["limit"], "pool_n": len(pool),
+                       "max_st": 3}
+                decs, aist = decide(fresh, mkt, now, api=api,
+                                    thr=args.min_pct,
                                     min_prob=args.min_prob)
                 by = {d["code"]: d for d in decs}
                 for s in fresh:
                     s["ai"] = by.get(s["code"])
-                log_judgements(fresh, now)
+                log_judgements(fresh, now, mkt)
                 for s in fresh:
                     a = s.get("ai") or {}
                     act = a.get("action", "无判定")
@@ -695,6 +786,7 @@ def main() -> int:
                     if len(fresh) > max(quota, 0):
                         fresh = fresh[:max(quota, 0)]
                     state["buy_today"] = int(state.get("buy_today", 0)) + len(fresh)
+                    log_pushed(fresh, now)      # 配额内=真正推送的, 线上展示用
                     print(f"    → AI 过滤: {before} → {len(fresh)} 只 "
                           f"(prob≥{args.min_prob:.0f}, 今日配额剩 "
                           f"{args.daily_max - int(state.get('buy_today', 0))})")

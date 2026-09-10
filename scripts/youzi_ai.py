@@ -10,6 +10,9 @@
 from __future__ import annotations
 
 import json
+# 同 youzi_live: 绕开 macOS 系统代理, 否则 LLM/东财等 HTTPS 调用 ProxyError
+import os as _os
+_os.environ["no_proxy"] = _os.environ["NO_PROXY"] = "*"
 import os
 import re
 import sys
@@ -145,7 +148,22 @@ def first_touch_block(api, code: str) -> str:
                         break
                 except Exception:
                     time.sleep(1)
-        if not bars:
+        if not bars:                       # TDX 失效 → 腾讯分时兜底
+            try:
+                from tx_quote import minute_bars as tx_min
+                from tx_quote import snapshot as tx_snap
+                dd = tx_min(code)
+                prev_c = float((tx_snap([code]).get(code) or {})
+                               .get("prev_close") or 0)
+                if dd is not None and len(dd) and prev_c > 0:
+                    row = dd[dd["datetime"] <= "1000"]
+                    p10 = (float(row["price"].iloc[-1]) / prev_c - 1
+                           if len(row)
+                           else float(dd["price"].iloc[0]) / prev_c - 1)
+                    return ("开盘半小时内已冲至9% (历史表现差组)"
+                            if p10 >= 0.09 else "10:00后走强至9% (历史表现优组)")
+            except Exception:
+                pass
             return ""
         d = api.to_df(bars)
         d["date"] = d["datetime"].str[:10]
@@ -176,8 +194,26 @@ def money_proxy_block(api, code: str) -> str:
         from pytdx.params import TDXParams
         m = TDXParams.MARKET_SH if code[0] in "569" else TDXParams.MARKET_SZ
         bars = api.get_security_bars(2, m, code.encode(), 0, 16)
-        if not bars:
-            return ""
+        if not bars:                       # TDX 失效 → 腾讯分时兜底
+            try:
+                from tx_quote import minute_bars as tx_min
+                from tx_quote import snapshot as tx_snap
+                dd = tx_min(code)
+                v = tx_snap([code]).get(code) or {}
+                if dd is None or len(dd) < 3:
+                    return ""
+                hi, lo = float(dd["price"].max()), float(dd["price"].min())
+                close = float(dd["price"].iloc[-1])
+                pos = (close - lo) / (hi - lo) if hi > lo else 0.5
+                vol = dd["vol"].astype(float)
+                vr30 = float(vol.tail(30).sum()) / max(
+                    float(vol.tail(60).head(30).sum()), 1e-9)
+                vwap = float(v.get("vwap") or 0)
+                vs = close / vwap - 1 if vwap > 0 else 0
+                return (f"收盘位置 {pos*100:.0f}% | 近30分量能 {vr30:.1f}x"
+                        f" | 相对均价 {vs*100:+.1f}%")
+            except Exception:
+                return ""
         d = api.to_df(bars)
         d["date"] = d["datetime"].str[:10]
         today = d["date"].iloc[-1]
@@ -206,10 +242,23 @@ def orderbook_block(api, code: str, thr_pct: float) -> str:
     try:
         from pytdx.params import TDXParams
         m = TDXParams.MARKET_SH if code[0] in "569" else TDXParams.MARKET_SZ
-        qs = api.get_security_quotes([(m, code)])
-        if not qs:
-            return ""
-        q = qs[0]
+        q = None
+        try:
+            if api is not None:
+                qs = api.get_security_quotes([(m, code)])
+                q = qs[0] if qs else None
+        except Exception:
+            q = None
+        if q is None:                      # TDX 失效 → 腾讯快照
+            try:
+                from tx_quote import snapshot as tx_snap
+                v = tx_snap([code]).get(code)
+            except Exception:
+                v = None
+            if not v:
+                return ""
+            q = {"price": v["price"], "last_close": v["prev_close"],
+                 "ask_vol": v["ask1_vol"], "bid_vol": v["bid1_vol"]}
         prev = float(q.get("last_close") or 0)
         price = float(q.get("price") or 0)
         if prev <= 0 or price <= 0:
@@ -221,15 +270,27 @@ def orderbook_block(api, code: str, thr_pct: float) -> str:
             bars = api.get_security_bars(8, m, code.encode(), 0, 240)
         except Exception:
             bars = None
+        highs = None
         if bars:
             d = api.to_df(bars)
             d["date"] = d["datetime"].str[:10]
             t = d[d["date"] == d["date"].iloc[-1]]
+            highs = t["high"].astype(float).tolist()
+        else:                              # 腾讯分时兜底(1分钟采样)
+            try:
+                from tx_quote import minute_bars as tx_min
+                dd = tx_min(code)
+                if dd is not None and len(dd):
+                    highs = dd["price"].astype(float).tolist()
+            except Exception:
+                highs = None
+        if highs:
             touches, in_touch = 0, False
-            for h in (t["high"].astype(float) >= limit_up - 0.001).tolist():
-                if h and not in_touch:
+            for h in highs:
+                hit = h >= limit_up - 0.001
+                if hit and not in_touch:
                     touches += 1
-                in_touch = h
+                in_touch = hit
             if touches:
                 parts.append(f"今日触板被砸 {touches} 次"
                              + ("(反复炸板,抛压重)" if touches >= 3
