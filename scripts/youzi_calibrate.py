@@ -166,6 +166,31 @@ def report() -> str:
     elif buys_all:
         out += ["【近期 BUY 案例回顾】有 BUY 判定但尚未回填结果(需 T+1)", ""]
 
+    # ── 维度子分校准: 各维度打分与封板率的关系 → 发现哪一维判断可靠 ──
+    scored = [r for r in sealed if isinstance(r.get("scores"), dict)
+              and r.get("scores")]
+    if len(scored) >= 8:
+        out += ["【维度子分校准 · 高分组 vs 低分组的封板率】",
+                "(子分≥7 = 该维度证据被你评为强; ≤4 = 评为弱; 样本<5 的维度不列)",
+                f"{'维度':<6}{'样本':>5}{'高分组封板率':>14}{'低分组封板率':>14}"]
+        for dim in ("盘口", "资金", "题材", "基本面", "首触", "位置"):
+            rs = [r for r in scored
+                  if r["scores"].get(dim) is not None]
+            if len(rs) < 5:
+                continue
+            hi = [r for r in rs if r["scores"][dim] >= 7]
+            lo = [r for r in rs if r["scores"][dim] <= 4]
+            hi_r = (f"{sum(1 for r in hi if r.get('seal'))/len(hi)*100:.0f}%"
+                    f"({len(hi)})" if hi else "—")
+            lo_r = (f"{sum(1 for r in lo if r.get('seal'))/len(lo)*100:.0f}%"
+                    f"({len(lo)})" if lo else "—")
+            out.append(f"{dim:<6}{len(rs):>5}{hi_r:>13}{lo_r:>13}")
+        out.append("  (若某维度高分组封板率显著高于低分组 → 该维度判断有效;"
+                   " 两档接近 → 该维度在瞎猜)")
+        out.append("")
+    elif scored:
+        out += [f"【维度子分校准】已有 {len(scored)} 条, 样本满 8 条后出报告", ""]
+
     out.append(f"【次日收益 · {len(recs)} 条已回填】")
     if not recs:
         out.append("  暂无 — 判定后需 1 个交易日才能回填次日开盘/收盘结果")

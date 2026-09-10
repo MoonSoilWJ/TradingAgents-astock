@@ -69,6 +69,7 @@ def snapshot(codes: Iterable[str], timeout: float = 8.0) -> dict:
                     "prev_close": _f(f[4]), "open": _f(f[5]),
                     "high": _f(f[33]), "low": _f(f[34]),
                     "vol": _f(f[36]),                    # 手
+                    "outer": _f(f[7]), "inner": _f(f[8]),  # 外盘/内盘(手)
                     "amount": _f(f[37]) * 1e4,          # 万元 → 元
                     "turn": _f(f[38]),                  # 换手率%
                     "float_mv": _f(f[44]),              # 流通市值(亿)

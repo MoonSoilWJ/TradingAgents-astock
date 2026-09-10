@@ -70,11 +70,17 @@ SYSTEM = """你是一位资金体量数亿的 A 股游资大佬, 深耕打板接
 
 【输出】严格 JSON, 对【每只候选】都给出判定(BUY 或 SKIP):
 [{"id":"A","action":"BUY","prob":80,
+  "scores":{"盘口":7,"资金":8,"题材":3,"基本面":5,"首触":8,"位置":6},
   "judgement":{"盘口":"...","资金":"...","题材":"...","基本面":"...","首触":"...","风险":"..."},
   "reason":"40字内结论"}]
-prob = 你对"今天封住板且明日有溢价"的真实概率估计(0-100)。
-你的每次判断都会被记录, 并在收盘后与实际结果(是否封板/次日溢价)比对 —
-给分必须经得起复盘, 不要为了措辞松紧而漂移。
+scores = 六个维度的子分(各 1-10 分, 按你对该维度证据的评估打分)。
+prob = 你对"今天封住板且明日有溢价"的真实概率估计(0-100), 是六维子分的综合。
+【prob 与子分必须自洽】维度间可以有主次与交互 — 某维度极强/极差可以主导判断,
+这是操盘直觉, 优于机械加权平均; 但组合必须能自圆其说:
+全部子分≥7 时 prob 不应低于 65; 多数子分≤4 时 prob 不应高于 55;
+若你认定某维度 decisive(如盘口承接极差), 允许它压低整体, 但要在 judgement 里写明。
+每次判断都会被记录, 收盘后与实际结果(封板/次日溢价)比对, 且子分会被单独校准 —
+哪个维度打分与结果相关性高, 哪个维度就会被采信; 给分必须经得起复盘。
 """
 
 
@@ -258,7 +264,8 @@ def orderbook_block(api, code: str, thr_pct: float) -> str:
             if not v:
                 return ""
             q = {"price": v["price"], "last_close": v["prev_close"],
-                 "ask_vol": v["ask1_vol"], "bid_vol": v["bid1_vol"]}
+                 "ask_vol": v["ask1_vol"], "bid_vol": v["bid1_vol"],
+                 "outer": v.get("outer"), "inner": v.get("inner")}
         prev = float(q.get("last_close") or 0)
         price = float(q.get("price") or 0)
         if prev <= 0 or price <= 0:
@@ -300,6 +307,14 @@ def orderbook_block(api, code: str, thr_pct: float) -> str:
             parts.append(f"买一/卖一委量 {bv / av:.1f}x")
         elif bv > 0:
             parts.append("卖一无委托(临近封板)")
+        # 内外盘比: 外盘=主动买成交, 内盘=主动卖成交(外盘>内盘=买方主动)
+        ob = q.get("active_buy") or q.get("outer")
+        ib = q.get("active_sell") or q.get("inner")
+        if ob and ib and float(ob) > 0 and float(ib) > 0:
+            ratio = float(ob) / float(ib)
+            parts.append(f"外盘/内盘 {ratio:.2f}"
+                         + ("(买方主动)" if ratio > 1.2
+                            else "(卖方主动)" if ratio < 0.8 else ""))
         return " | ".join(parts)
     except Exception:
         return ""
@@ -536,6 +551,7 @@ def decide(sigs: list[dict], market: dict, now: datetime | None = None,
                 "prob": float(d.get("prob", d.get("score", 0)) or 0),
                 "reason": str(d.get("reason", ""))[:120],
                 "judgement": d.get("judgement", {}),
+                "scores": d.get("scores", {}),   # 维度子分(校准用)
             })
         return out, "ok"
     except Exception as exc:

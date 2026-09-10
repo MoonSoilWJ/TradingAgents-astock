@@ -371,6 +371,7 @@ def log_judgements(sigs: list[dict], now: datetime,
                     "code": s["code"], "name": s["name"],
                     "action": a.get("action"), "prob": a.get("prob"),
                     "reason": (a.get("reason") or "")[:120],
+                    "scores": a.get("scores") or {},           # 维度子分(校准用)
                     "pct": round(float(s.get("pct", 0)), 2),   # 已是百分数
                     "thr_pct": s.get("thr"),
                     "amt_yi": s.get("amt_yi"), "vr": round(float(s.get("vr", 0)), 2),
@@ -768,6 +769,10 @@ def main() -> int:
                     act = a.get("action", "无判定")
                     head = (f"    [AI] {s['code']} {s['name']}: {act} "
                             f"prob={a.get('prob', '—')}")
+                    sc = a.get("scores") or {}
+                    if sc:
+                        head += "  [" + " ".join(
+                            f"{k}{v}" for k, v in sc.items()) + "]"
                     jm = a.get("judgement") or {}
                     if jm:
                         head += "\n        " + " | ".join(
