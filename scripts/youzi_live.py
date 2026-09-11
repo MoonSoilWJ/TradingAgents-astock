@@ -77,6 +77,12 @@ AM = (dtime(9, 30), dtime(11, 30))
 PM = (dtime(13, 0), dtime(15, 0))
 TOTAL_MIN = 240.0
 
+# 量比早盘失真保护: 开盘 EARLY_MIN 分钟内, 分母(昨日全天额×时间进度)极小,
+# 量比系统性虚高(2026-09-11 实测 09:31 云煤543x/中百181x/国光41x)。
+# 该窗口内量比钳到 VR_CAP 并标记 vr_na → 不参与评分、prompt 标注失真。
+EARLY_MIN = 15.0
+VR_CAP = 10.0
+
 EXCLUDE_KW = ("ST", "退", "N ", "*")
 
 
@@ -462,6 +468,10 @@ def scan(api: TdxHq_API, pool: list[dict], progress: float,
         amt = float(q.get("amount") or 0)
         exp_amt = p["prev_amt"] * max(progress, 1 / TOTAL_MIN)
         vr = amt / exp_amt if exp_amt > 0 else 0
+        # 早盘失真保护: 时间进度折算出的 vr 不可采信 → 钳制 + 标记
+        vr_na = progress * TOTAL_MIN < EARLY_MIN
+        if vr_na:
+            vr = min(vr, VR_CAP)
         if vr < min_vr:
             stat["lowvr"] += 1
             continue
@@ -506,13 +516,15 @@ def scan(api: TdxHq_API, pool: list[dict], progress: float,
                                                  (8 if 3 <= turn < 8 else 0))
         if dd is not None:
             score += 15 if dd <= 5 else (10 if dd <= 15 else (4 if dd <= 25 else 0))
-        score += 10 if vr >= 5 else (8 if vr >= 3 else 5)
+        # 早盘量比不可信 → 取中性档, 不因折算虚高给满分
+        score += 8 if vr_na else (10 if vr >= 5 else (8 if vr >= 3 else 5))
         if n20 is not None and n20 >= 2:
             score += 5                                          # 股性活跃加分
 
         sigs.append({
             "code": code, "name": p["name"], "price": price, "pct": pct * 100,
-            "vr": vr, "amt_yi": amt / 1e8, "ask1": ask1, "thr": thr * 100,
+            "vr": vr, "vr_na": vr_na, "amt_yi": amt / 1e8, "ask1": ask1,
+            "thr": thr * 100,
             "streak": streak, "mv": mv, "turn": turn, "dd": dd, "n20": n20,
             "score": score,
         })
@@ -620,6 +632,44 @@ def push(title: str, text: str, dry: bool = False) -> bool:
     return send_markdown(title, text, webhook=webhook, keyword=keyword)
 
 
+_LOCK_FP = None
+
+
+def _acquire_lock(force: bool = False) -> bool:
+    """单实例锁 — 防并发重复推送 (2026-09-11 事故修复)。
+
+    事故: 旧进程崩溃后 watchdog 拉起新实例, 两个进程并发扫描 → 同一只票 9 秒
+    内被推送两次(600184 光电股份), 当日配额 3 被超到 4 只, 网站出现两笔相同
+    持仓。用 fcntl.flock(LOCK_EX|LOCK_NB): 进程退出(含崩溃)时内核自动释放,
+    不会像 PID 文件那样留下死锁。
+    """
+    global _LOCK_FP
+    import fcntl
+    fp = None
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        fp = open(STATE_DIR / "youzi_live.lock", "w")
+        fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        if fp is not None:
+            try:
+                fp.close()
+            except Exception:
+                pass
+        if not force:
+            print("[锁] 已有 youzi_live 实例在运行 → 本次退出"
+                  "(防重复推送/超配额; 确需并发请加 --force)")
+            return False
+        print("[锁] ⚠ 已有实例运行, --force 强制启动(有重复推送风险)")
+        return True
+    except Exception:
+        return True                 # 锁不可用(非 POSIX) → 不阻断主流程
+    fp.write(f"{_os.getpid()} {datetime.now():%Y-%m-%d %H:%M:%S}\n")
+    fp.flush()
+    _LOCK_FP = fp                   # 保持引用, 否则被 GC 回收 → 锁失效
+    return True
+
+
 # ── 主流程 ──────────────────────────────────────────────────────────────────
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -649,7 +699,11 @@ def main() -> int:
     ap.add_argument("--no-cache", action="store_true", help="强制重建股票池")
     ap.add_argument("--no-prev-amt", action="store_true",
                     help="跳过昨日成交额基准拉取(快速测试用, 量比可能失真)")
+    ap.add_argument("--force", action="store_true",
+                    help="已有实例在运行时仍强制启动(有重复推送风险)")
     args = ap.parse_args()
+    if not _acquire_lock(force=args.force):
+        return 0
 
     # 每日运行日志: ~/.tradingagents/youzi/logs/YYYY-MM-DD.log
     LOG_DIR.mkdir(parents=True, exist_ok=True)

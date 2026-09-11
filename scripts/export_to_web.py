@@ -1084,13 +1084,51 @@ def _curve_maxdd(curve: list[list[float]]) -> float:
     return round(mdd, 2)
 
 
+# 并行回测分片(互补日期段, 2024-07-31~今) 的合并读取优先级链:
+#   seg450(24-07~11)→seg360(24-11~25-03)→seg270(25-03~07)→seg180(25-07~12)
+#   →seg90(25-12~26-04)→seg80→seg70→seg60→seg50→seg40→seg30→seg20→seg10
+#   →ai_backtest_min(最新段 26-08-12~)
+_BT_PRIORITY = ["ai_backtest_seg450.jsonl", "ai_backtest_seg360.jsonl",
+                "ai_backtest_seg270.jsonl", "ai_backtest_seg180.jsonl",
+                "ai_backtest_seg90.jsonl", "ai_backtest_seg80.jsonl",
+                "ai_backtest_seg70.jsonl", "ai_backtest_seg60.jsonl",
+                "ai_backtest_seg50.jsonl", "ai_backtest_seg40.jsonl",
+                "ai_backtest_seg30.jsonl", "ai_backtest_seg20.jsonl",
+                "ai_backtest_seg10.jsonl", "ai_backtest_min.jsonl"]
+
+
+def _read_youzi_backtest() -> list[dict[str, Any]]:
+    """游资策略回测记录, 按口径正确性分三级读取。
+
+    ① ai_backtest.jsonl        — 60 交易日滚动回测的标准输出(回测脚本日常更新)
+    ② ai_backtest_60d_backup.jsonl — 同口径备份(2026-09-10 快照)
+    ③ seg 分片合并              — 兜底保策略不消失; ⚠各分片窗口/口径不一,
+                                  合并数字会失真(2026-09-11: 年化1.88%/MDD-61.9%),
+                                  仅在①②都缺失时使用
+    """
+    for name in ("ai_backtest.jsonl", "ai_backtest_60d_backup.jsonl"):
+        rows = _read_any_jsonl(YOUZI_BT.parent / name)
+        if rows:
+            return rows
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for name in _BT_PRIORITY:
+        for r in _read_any_jsonl(YOUZI_BT.parent / name):
+            k = (str(r.get("date")), str(r.get("code")))
+            if k in seen:
+                continue
+            seen.add(k)
+            rows.append(r)
+    return rows
+
+
 def build_youzi_strategy() -> dict[str, Any] | None:
     """游资半路板: 规则召回(8%未封板) → AI 六维决断 → prob≥70 放行 → 次日开盘卖。
 
     backtest: AI 层滚动回测(60 交易日; 证据全部由历史数据重建, 无前视)
     live:     实盘信号(判定后需 T+1 回填次日收益, 起步阶段可能为空)
     """
-    rows = [r for r in _read_any_jsonl(YOUZI_BT)
+    rows = [r for r in _read_youzi_backtest()
             if r.get("act") == "BUY" and (r.get("prob") or 0) >= 75
             and r.get("ret") is not None]
     if not rows:
@@ -1140,8 +1178,21 @@ def build_youzi_strategy() -> dict[str, Any] | None:
     _jl = {(str(r.get("ts")), str(r.get("code"))): r
            for r in _read_any_jsonl(YOUZI_JL)}
     live_rows = []
-    for r in _read_any_jsonl(YOUZI_PUSHED):
-        j = _jl.get((str(r.get("ts")), str(r.get("code"))), {})
+    _seen_push: set[tuple[str, str]] = set()
+    # 去重: 同日同票只展示一笔。2026-09-11 因 youzi_live 双进程并发, 600184
+    # 光电股份 9 秒内被推送两次 → 网页出现两笔相同持仓, 且复利曲线被重复计入。
+    # 这里在导出侧兜底去重(无卖点的信号不会重复, 有卖点的也不该算两笔)。
+    for r in sorted(_read_any_jsonl(YOUZI_PUSHED),
+                    key=lambda x: str(x.get("ts") or "")):
+        ts = str(r.get("ts") or "")
+        if not ts:
+            continue
+        code = str(r.get("code", ""))
+        key = (ts[:10], code)
+        if key in _seen_push:
+            continue
+        _seen_push.add(key)
+        j = _jl.get((ts, code), {})
         live_rows.append({**r, "ret": j.get("ret"), "seal": j.get("seal")})
     lcodes = sorted({str(r.get("code", "")) for r in live_rows
                      if r.get("code")})
@@ -1175,7 +1226,9 @@ def build_youzi_strategy() -> dict[str, Any] | None:
         code = str(r.get("code", ""))
         sl = sold.get((r["ts"][:10], code))         # 已按纪律卖出?
         if sl is not None:
-            bp = pos_map.get((r["ts"][:10], code))
+            # 买入价优先取卖出记录自带的(清仓后 positions.json 已无此笔)
+            bp = (float(sl.get("buy_price") or 0)
+                  or pos_map.get((r["ts"][:10], code)))
             sell_px = float(sl.get("sell_price") or 0)
             ret = ((sell_px / bp - 1) * 100 if bp and bp > 0
                    else ret)

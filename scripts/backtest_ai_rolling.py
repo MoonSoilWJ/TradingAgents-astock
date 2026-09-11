@@ -20,6 +20,7 @@ AI 层是唯一的价值来源; 本脚本检验它到底有没有选股能力。
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import datetime
@@ -42,6 +43,15 @@ MIN30 = Path.home() / ".tradingagents" / "youzi" / "min30.pkl"
 OUT = Path.home() / ".tradingagents" / "youzi" / "ai_backtest.jsonl"
 COST = 0.002
 MINP = 65.0
+THR = 0.08                      # 召回阈值, 由命令行参数覆盖(5/6/7/8%)
+ST_MIN = 0.0                    # 资金强度阈值(预估全天换手率), 由 argv[4] 覆盖
+# 流通市值(元) → 资金强度 = 当日累计成交额/流通市值(换手率):
+#   用相对值而非绝对额, 否则茅台/宁德等大盘股永远霸榜(它们资金大但不会涨停)
+try:
+    FLOAT_MV = json.load(open(Path.home() / ".tradingagents" / "youzi"
+                              / "mb_float.json"))
+except Exception:
+    FLOAT_MV = {}
 LABEL = {1: "10:00", 2: "10:30", 3: "11:00", 4: "11:30",
          5: "13:30", 6: "14:00", 7: "14:30", 8: "15:00"}
 
@@ -72,15 +82,19 @@ def build_candidates() -> tuple[pd.DataFrame, pd.DataFrame]:
         lambda s: s.shift(1).rolling(5, min_periods=5).mean())
     daily["ma20"] = daily.groupby("code")["d_close"].transform(
         lambda s: s.shift(1).rolling(20, min_periods=20).mean())
+    # 过去5日均额(shift(1) 排除当日) → 量比基准; 用当日全天 d_amt 属前视
+    daily["ma5_amt"] = daily.groupby("code")["d_amt"].transform(
+        lambda s: s.shift(1).rolling(5, min_periods=3).mean())
 
     df = df.merge(daily[["code", "date", "prev", "d_amt", "is_limit",
                          "nxt_open", "nxt_close", "hi60", "n5", "ma5",
-                         "ma20"]], on=["code", "date"], how="left")
+                         "ma20", "ma5_amt"]], on=["code", "date"],
+                  how="left")
     df["pct"] = df["close"] / df["prev"] - 1
     df["limit_px"] = (df["prev"] * 1.10).round(2)
     df["sealed_now"] = df["close"] >= df["limit_px"] - 0.001
 
-    sig = df[(df["pct"] >= 0.08) & (~df["sealed_now"])].copy()
+    sig = df[(df["pct"] >= THR) & (~df["sealed_now"])].copy()
     sig = sig.sort_values(["code", "date", "idx"]).groupby(
         ["code", "date"]).head(1)                    # 每日每票首次触发
     return sig, df
@@ -147,10 +161,12 @@ def report_txt(hist: list[dict]) -> str:
 def main() -> int:
     days_n = int(sys.argv[1]) if len(sys.argv) > 1 else 60
     sample_n = int(sys.argv[2]) if len(sys.argv) > 2 else 8
-    # skip: 跳过最后 skip 个交易日(用于把长回测拆成多段并行, 大幅缩短总耗时)
-    skip = int(sys.argv[3]) if len(sys.argv) > 3 else 0
-    # argv[4]=="anon" → 匿名对照模式(送模型的 code 换成伪码, 结果仍按真实代码记录)
-    anon = len(sys.argv) > 4 and sys.argv[4] == "anon"
+    global THR, ST_MIN
+    THR = float(sys.argv[3]) / 100 if len(sys.argv) > 3 else 0.08
+    ST_MIN = float(sys.argv[4]) if len(sys.argv) > 4 else 0.0
+    # skip/anon 用 argv[5]/argv[6]: argv[3]=阈值 argv[4]=资金强度, 不能与 THR 复用
+    skip = int(sys.argv[5]) if len(sys.argv) > 5 else 0
+    anon = len(sys.argv) > 6 and sys.argv[6] == "anon"
     print("构建历史候选 ...", flush=True)
     sig, all_k = build_candidates()
     _all = sorted(sig["date"].unique())
@@ -182,13 +198,28 @@ def main() -> int:
         day = sig[sig["date"] == d]
         if len(day) == 0:
             continue
-        pick = day.sample(min(sample_n, len(day)), random_state=i)
+        # 资金强度【阈值过滤】(非 topN 排名 — 盘中无法知道"收盘时谁排前8", 排名即前视)
+        #   强度 = (累计成交额/流通市值)/当日进度 = 预估全天换手率, 盘中可实时算
+        #   达标者按【触发先后】取前 N(先触发先送 AI), 同样无前视
+        day = day.copy()
+        pg = day["idx"].map(lambda i: {1: 30, 2: 60, 3: 90, 4: 120, 5: 150,
+                                       6: 180, 7: 210, 8: 240}.get(int(i), 120) / 240)
+        if FLOAT_MV:
+            mv = day["code"].astype(str).map(FLOAT_MV).astype(float)
+            day["_st"] = (day["cum_amt"] / mv.replace(0, np.nan)) / pg
+        else:
+            day["_st"] = day["cum_amt"] / pg
+        day["_st"] = day["_st"].fillna(0.0)
+        day = day[day["_st"] >= ST_MIN]
+        pick = day.sort_values(["idx", "code"]).head(sample_n)
         sigs = []
         for _, r in pick.iterrows():
             prog = {1: 30, 2: 60, 3: 90, 4: 120, 5: 150, 6: 180,
                     7: 210, 8: 240}.get(int(r["idx"]), 120) / 240
-            vr = (float(r["cum_amt"]) / max(prog, 0.04)) / max(
-                float(r["d_amt"]), 1) if r["d_amt"] == r["d_amt"] else 0
+            # 量比 = 预估全天成交额 / 过去5日均额(无前视; 旧版用当日全天 d_amt)
+            m5a = float(r.get("ma5_amt") or 0)
+            vr = ((float(r["cum_amt"]) / max(prog, 0.04)) / m5a
+                  if m5a > 0 else 0)
             sigs.append({"code": r["code"], "name": "", "pct": float(r["pct"]),
                          "thr": 10.0, "mv": None, "turn": None,
                          "dd": (float(r["hi60"] - r["close"]) / r["hi60"] * 100
@@ -212,7 +243,8 @@ def main() -> int:
         try:
             decs, stt = decide(sigs, market,
                                now=datetime.combine(d, datetime.min.time()),
-                               thr=8.0, min_prob=MINP, report=rpt, evidence=ev,
+                               thr=THR * 100, min_prob=MINP, report=rpt,
+                               evidence=ev,
                                verbose=False)
         except Exception as exc:
             print(f"  {d} 调用失败: {type(exc).__name__} {str(exc)[:60]}")

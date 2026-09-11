@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""游资战法 · 封板跟踪卖出提醒 (v2)
+"""游资战法 · 卖出提醒 (v3 · 次日开盘卖)
 
-规则实证 (backtest, 2.2年):
-  A 固定次日收盘卖:  笔均 +1.49%  累计 +18,304%  回撤 -36.9%
-  B 封板持有·断板卖:  笔均 +1.90%  累计 +58,912%  回撤 -33.4%   ← 本脚本采用
-  持有分布: 81% 次日走 / 13% 拿2天 / 少数连板 3~5天, 平均 1.24 天
+★ 卖出纪律(2026-09-11 定): 【买入次日开盘卖】
+  与 AI 层回测口径严格一致 —— backtest_ai_rolling.py:
+    ret = nxt_open / close - 1 - COST    (docstring: 开盘卖 +0.28% > 收盘卖 +0.04%)
 
-状态机(每笔持仓, 买入日T收盘起逐日检查 dret ≥ 9.8%):
-  · 封板链未断            → HOLD      持有中
-  · 断板日 = 昨天          → SELL_TODAY 今日必须走
-  · 断板日更早(逾期)       → OVERDUE   立即处理
-  · 持有 ≥5 交易日         → FORCE     强制清仓
-  · 盘中: 昨封板+今炸板    → BREAK_NOW 纪律: 走
+【为什么废弃 v2 的"封板持有·断板卖"】
+  v2 依据的回测(B 方案 笔均+1.90% vs A 次日收盘+1.49%)是【规则层无差别买入】
+  口径, 从未与 AI 选股层叠加验证过。本策略的 edge 全部来自 AI 选股
+  (回测中把封板率从 44% 提到 82%), 卖出口径必须与其验证口径一致, 否则实盘
+  跑的是一个没被回测过的组合。封板信息仍计算, 但只作展示参考, 不作持有依据。
+
+状态机(简化):
+  · 买入当日(T)     → HOLD       "今日建仓 → 明日开盘走"
+  · 持有 ≥1 交易日   → SELL_TODAY "纪律: 次日开盘走"
+  · 无行情数据       → DATA_SHORT
 
 用法:
   python3 scripts/youzi_sell.py             # 推持仓状态
@@ -54,7 +57,7 @@ STATUS_ORDER = {"OVERDUE": 0, "SELL_TODAY": 1, "BREAK_NOW": 2,
                 "FORCE": 3, "HOLD": 4, "DATA_SHORT": 5}
 STATUS_CN = {"OVERDUE": "🔴逾期未卖", "SELL_TODAY": "🔴今日必走",
              "BREAK_NOW": "🟠盘中炸板", "FORCE": "🟠到期清仓",
-             "HOLD": "🟢封板持有", "DATA_SHORT": "⚪数据不足"}
+             "HOLD": "🟢今日建仓", "DATA_SHORT": "⚪数据不足"}
 
 
 def load_positions() -> list[dict]:
@@ -113,41 +116,30 @@ def fetch_daily(api, code: str, n: int = 15):
 
 def analyze(pos: dict, daily: pd.DataFrame, price: float = 0,
             high: float = 0) -> dict:
-    """单笔持仓状态。daily 需含 date/dclose/prev 列。"""
+    """单笔持仓状态。daily 需含 date/dclose/prev 列。
+
+    纪律 = 买入【次日开盘卖】(v3, 与 AI 层回测口径一致)。
+    封板情况仍计算, 但只进 msg 作参考展示, 不影响状态判定。
+    """
     bd = pd.Timestamp(pos["buy_date"]).date()
     s = daily[daily["date"] >= bd].reset_index(drop=True)
-    if len(s) < 2:
-        # 买入当日: 只有一根 → 判断"今天封板了吗"
-        if len(s) == 1 and s["prev"].iloc[0]:
-            sealed_today = (float(s["dclose"].iloc[0])
-                            / float(s["prev"].iloc[0]) - 1) >= SEALED
-            return {**pos, "days_held": 0,
-                    "status": "HOLD" if sealed_today else "WARN_TODAY",
-                    "msg": ("买入当日封板 → 持有中" if sealed_today
-                            else "买入当日未封板 → 明日开盘走(纪律)")}
+    if len(s) < 1:
         return {**pos, "status": "DATA_SHORT", "msg": "数据不足"}
-    chain = [r["dclose"] / r["prev"] - 1 >= SEALED for _, r in s.iterrows()]
-    days_held = len(s) - 1
-    broken = next((i for i, ok in enumerate(chain) if not ok), None)
-    yesterday_sealed = chain[-2] if len(chain) >= 2 else chain[-1]
-    # 盘中炸板: 今日曾触涨停, 现价明显回落
-    broke_intraday = False
-    if price > 0 and high > 0:
-        prev_c = s["prev"].iloc[-1]
-        if prev_c and high / prev_c - 1 >= SEALED and price / prev_c - 1 < 0.095:
-            broke_intraday = True
-
-    if broken is not None and broken < len(chain) - 1:
-        status, msg = "OVERDUE", f"断板已 {len(chain) - 1 - broken} 天, 立即卖"
-    elif not yesterday_sealed:
-        status, msg = "SELL_TODAY", "昨日断板 → 今日必须走"
-    elif days_held >= MAX_HOLD:
-        status, msg = "FORCE", f"持有 {days_held} 天 → 强制清仓"
-    elif broke_intraday:
-        status, msg = "BREAK_NOW", "今日炸板(封后回落) → 纪律: 走"
-    else:
-        status, msg = "HOLD", f"封板链 {sum(chain)}/{len(chain)} 天 → 持有中"
-    return {**pos, "status": status, "msg": msg, "days_held": days_held}
+    days_held = max(len(s) - 1, 0)
+    tag = ""                                  # 买入当日封板情况(仅参考)
+    try:
+        if s["prev"].iloc[0]:
+            sealed = (float(s["dclose"].iloc[0]) / float(s["prev"].iloc[0]) - 1
+                      >= SEALED)
+            tag = "封板" if sealed else "未封板"
+    except Exception:
+        tag = ""
+    if days_held >= 1:
+        return {**pos, "days_held": days_held, "status": "SELL_TODAY",
+                "msg": "纪律: 次日开盘走(与回测口径一致)"}
+    return {**pos, "days_held": 0, "status": "HOLD",
+            "msg": (f"买入当日{tag} → 明日开盘走" if tag
+                    else "买入当日 → 明日开盘走")}
 
 
 def main() -> int:
@@ -242,6 +234,10 @@ def main() -> int:
                         f.write(json.dumps({
                             "code": r.get("code"), "name": r.get("name"),
                             "buy_date": str(r.get("buy_date", "")),
+                            # buy_price 必须落盘: 清仓后该笔会从 positions.json
+                            # 移除, 网站再算收益就拿不到买入价 → 会一直显示
+                            # "持仓中"。卖出记录自带买入价, 不依赖持仓文件。
+                            "buy_price": float(r.get("entry") or 0),
                             "sell_date": datetime.now().strftime("%Y-%m-%d"),
                             "sell_price": float(r.get("price") or 0),
                             "status": r.get("status"),
@@ -249,6 +245,39 @@ def main() -> int:
                         }, ensure_ascii=False) + "\n")
         except Exception:
             pass
+
+    # ── 已卖出 → 从持仓移除(否则每天重复提醒"逾期未卖") ──
+    # 只在【尾盘 ≥14:50】那轮清仓: 09:31 那轮只提醒不移除 —— 否则"提示开盘卖"
+    # 之后持仓立刻消失, 用户若没及时卖就再也没有第二次提醒(尾盘兜底)。
+    _dry = getattr(args, "dry_run", False)
+    _now = datetime.now()
+    _settle = _now.hour * 60 + _now.minute >= 14 * 60 + 50
+    try:
+        raw = json.loads(POSITIONS.read_text(encoding="utf-8"))
+        removed = []
+        for r in rows:
+            if r.get("status") not in ("SELL_TODAY", "BREAK_NOW", "FORCE",
+                                       "OVERDUE"):
+                continue
+            day, code = str(r.get("buy_date", "")), str(r.get("code", ""))
+            if code in (raw.get(day) or {}):
+                removed.append(f"{r.get('name', code)}({code})")
+                if _settle:
+                    raw[day].pop(code)
+                    if not raw[day]:
+                        raw.pop(day, None)
+        if removed:
+            if _dry:
+                print(f"[dry-run] 将移出持仓: {', '.join(removed)}")
+            elif _settle:
+                POSITIONS.write_text(json.dumps(raw, ensure_ascii=False),
+                                     encoding="utf-8")
+                print(f"[清仓] 已移出持仓: {', '.join(removed)}")
+            else:
+                print(f"[待清仓] 今日应走, 尾盘再提醒一次后清仓: "
+                      f"{', '.join(removed)}")
+    except Exception as exc:
+        print(f"[warn] 持仓清理失败: {exc}")
 
     rows.sort(key=lambda r: STATUS_ORDER.get(r["status"], 9))
     now = datetime.now()
@@ -268,8 +297,8 @@ def main() -> int:
             f"　买入 {r.get('buy_date', '?')} @ {r.get('entry', '?')}"
             f"　持有 {r.get('days_held', '?')} 天\n"
             f"　**{r['msg']}**")
-    lines += ["", "> 封板链=买入日起每日收盘涨幅≥9.8%。断板日收盘卖, 最多持 5 天。",
-              "> 盘中炸板(封后回落)按纪律即时走, 不等收盘。"]
+    lines += ["", "> 卖出纪律: 买入【次日开盘卖】(与 AI 层回测口径一致)。",
+              "> 封板情况仅作参考, 不作为持有依据。"]
     text = "\n".join(lines)
     print("=" * 70)
     print(title)

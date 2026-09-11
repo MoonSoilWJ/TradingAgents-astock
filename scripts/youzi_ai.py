@@ -126,12 +126,43 @@ def finance_block(code: str) -> str:
         os.environ.update(saved)
 
 
-def first_touch_block(api, code: str) -> str:
+def _live_pct(code: str) -> float | None:
+    """实时快照涨幅(小数, 如 0.0929)。10:00 前的首触判定只能用它。"""
+    try:
+        from tx_quote import snapshot as tx_snap
+        v = (tx_snap([code]).get(code) or {})
+        prev = float(v.get("prev_close") or 0)
+        px = float(v.get("price") or 0)
+        if prev > 0 and px > 0:
+            return px / prev - 1
+    except Exception:
+        pass
+    return None
+
+
+def first_touch_block(api, code: str, now: datetime | None = None,
+                      cur_pct: float | None = None) -> str:
     """首触形态: 10:00 时是否已在 9% 上方。
 
     回测(609笔,【A】表): 开盘半小时内已冲到 9% 的票次日 +0.17% (差),
     10:00-10:30 间走强到 9% 的 +1.66% (好) — "早站稳"反而弱。
+
+    ⚠ 时点保护(2026-09-11 605188 事故): 10:00 之前, "10:00 时点涨幅"尚未
+    产生。原实现拿最新一根分时顶替, 而分时比实时快照慢一拍 → 正在急速冲板
+    的票被判成"10:00 后走强(优组)"并拿到高首触分, 实际它 1 分钟后就触板,
+    属历史最差的"开盘急拉"组。现在 10:00 前改为:
+      · 当前已 ≥9%  → 差组(已发生, 确凿)
+      · 当前 <9%    → 未定, 明确标注不可按优组计
     """
+    now = now or datetime.now()
+    if now.time() < dtime(10, 0):
+        pct = cur_pct if cur_pct is not None else _live_pct(code)
+        if pct is None:
+            return ""
+        if pct >= 0.09:
+            return "开盘半小时内已冲至9% (历史表现差组)"
+        return (f"未到10:00, 当前仅{pct * 100:.1f}% — 首触形态未定"
+                f"(尚未冲上9%, 不可按'10:00后走强'优组计)")
     try:
         # pytdx: MARKET_SH=1, MARKET_SZ=0 (此前写反导致沪市票拉不到数据)
         from pytdx.params import TDXParams
@@ -163,9 +194,9 @@ def first_touch_block(api, code: str) -> str:
                                .get("prev_close") or 0)
                 if dd is not None and len(dd) and prev_c > 0:
                     row = dd[dd["datetime"] <= "1000"]
-                    p10 = (float(row["price"].iloc[-1]) / prev_c - 1
-                           if len(row)
-                           else float(dd["price"].iloc[0]) / prev_c - 1)
+                    if len(row) == 0:
+                        return ""      # 已过10:00却无10:00前分时 → 缺失, 不猜
+                    p10 = float(row["price"].iloc[-1]) / prev_c - 1
                     return ("开盘半小时内已冲至9% (历史表现差组)"
                             if p10 >= 0.09 else "10:00后走强至9% (历史表现优组)")
             except Exception:
@@ -356,7 +387,8 @@ def market_snapshot(date: str) -> dict:
     return {"topics": topics}
 
 
-def enrich(sig: dict, date: str, api=None, thr_pct: float = 10.0) -> dict:
+def enrich(sig: dict, date: str, api=None, thr_pct: float = 10.0,
+           now: datetime | None = None) -> dict:
     """六维证据: 题材(已有) + 概念 + 资金流 + 财务 + 盘中站稳度。失败不阻断。"""
     code = sig["code"]
     info = {}
@@ -370,7 +402,12 @@ def enrich(sig: dict, date: str, api=None, thr_pct: float = 10.0) -> dict:
             if not api2.connect("180.153.18.170", 7709, time_out=5):
                 api2 = None
         if api2 is not None:
-            info["stance"] = first_touch_block(api2, code)
+            # cur_pct: 扫描时的实时涨幅(百分数→小数)。10:00 前首触判定必须
+            # 用它, 不能用慢一拍的分时(见 first_touch_block 时点保护说明)
+            info["stance"] = first_touch_block(
+                api2, code, now=now,
+                cur_pct=(float(sig.get("pct") or 0) / 100.0
+                         if sig.get("pct") is not None else None))
             info["mproxy"] = money_proxy_block(api2, code)   # 同连接, 趁活着
             info["obook"] = orderbook_block(api2, code, thr_pct)
         if own is not None:
@@ -446,10 +483,12 @@ def build_prompt(sigs: list[dict], snap: dict, market: dict,
         mv = f"{s['mv']:.0f}亿" if s.get("mv") else "?"
         tn = f"{s['turn']:.1f}%" if s.get("turn") else "?"
         dd = f"{s['dd']:.0f}%" if s.get("dd") is not None else "?"
+        vr_txt = (f"{(s.get('vr') or 0):.1f}(早盘折算失真, 不采信)"
+                  if s.get("vr_na") else f"{(s.get('vr') or 0):.1f}")
         lines.append(
             f"- {s['id']}: +{s['pct']:.1f}% 未封板 | {board} | 题材: "
             f"{str(snap.get('topics', {}).get(s['code'], '无标注'))[:36]}\n"
-            f"  市值 {mv} 换手 {tn} 距60日高 {dd} 量比 {(s.get('vr') or 0):.1f} "
+            f"  市值 {mv} 换手 {tn} 距60日高 {dd} 量比 {vr_txt} "
             f"额 {s['amt_yi']:.1f}亿\n"
             f"  盘口承接: {s.get('obook') or '缺失'}\n"
             f"  均线: {s.get('ma') or '缺失'}\n"
@@ -484,7 +523,8 @@ def decide(sigs: list[dict], market: dict, now: datetime | None = None,
             s.update(evidence[s["code"]])
         else:
             try:
-                s.update(enrich(s, date, api, thr_pct=s.get("thr", 10.0)))
+                s.update(enrich(s, date, api, thr_pct=s.get("thr", 10.0),
+                                now=now))
             except Exception:
                 pass
     if own is not None:
