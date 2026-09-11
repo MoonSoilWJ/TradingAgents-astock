@@ -41,17 +41,52 @@ def load_recs() -> list[dict]:
 
 
 def fetch_daily(api: TdxHq_API, code: str, n: int = 15):
-    m = TDXParams.MARKET_SH if code[0] in "569" else TDXParams.MARKET_SZ
+    """pytdx 优先, 失效回退新浪(date 列统一为字符串)。"""
     try:
+        m = TDXParams.MARKET_SH if code[0] in "569" else TDXParams.MARKET_SZ
         bars = api.get_security_bars(TDXParams.KLINE_TYPE_DAILY, m,
                                      code.encode(), 0, n)
-        if not bars:
+        if bars:
+            d = api.to_df(bars)
+            d["date"] = d["datetime"].str[:10]
+            return d.sort_values("date").reset_index(drop=True)
+    except Exception:
+        pass
+    try:
+        import requests
+        sym = ("sh" if code[0] in "569" else "sz") + code
+        u = (f"https://quotes.sina.cn/cn/api/json_v2.php/"
+             f"CN_MarketDataService.getKLineData?symbol={sym}"
+             f"&scale=240&ma=no&datalen={n}")
+        r = requests.get(u, headers={"User-Agent": "Mozilla/5.0",
+                                     "Referer": "https://finance.sina.com.cn"},
+                         timeout=10, proxies={"http": None, "https": None})
+        d = r.json()
+        if not isinstance(d, list) or not d:
             return None
-        d = api.to_df(bars)
-        d["date"] = d["datetime"].str[:10]
-        return d.sort_values("date").reset_index(drop=True)
+        df = pd.DataFrame(d).rename(columns={"day": "date"})
+        df["date"] = df["date"].astype(str)
+        return df.sort_values("date").reset_index(drop=True)
     except Exception:
         return None
+
+
+def tx_close(code: str) -> tuple[float, float]:
+    """腾讯实时收盘价/昨收 — 当日K线未更新(新浪收盘后延迟)时的封板判定兜底。
+
+    ⚠ 只能用于【当天】的记录: qt 返回的是最新收盘价, 对历史日期会误判。
+    """
+    pre = "sh" if code[0] in "569" else "sz"
+    try:
+        import requests
+        qt = (requests.get(
+            f"https://web.ifzq.gtimg.cn/appstock/app/day/query?code={pre}{code}",
+            headers={"User-Agent": "Mozilla/5.0"}, timeout=10,
+            proxies={"http": None, "https": None})
+            .json()["data"][f"{pre}{code}"]["qt"][f"{pre}{code}"])
+        return float(qt[3]), float(qt[4])       # 现价(收盘), 昨收
+    except Exception:
+        return 0.0, 0.0
 
 
 def backfill() -> int:
@@ -66,8 +101,8 @@ def backfill() -> int:
         return 0
     api = TdxHq_API()
     if not api.connect(*TDX, time_out=5):
-        print("行情连接失败")
-        return 0
+        print("! pytdx 不可用, 日K回退新浪源")
+        api = None
     cache: dict[str, object] = {}
     n_done = 0
     try:
@@ -75,6 +110,16 @@ def backfill() -> int:
             if r.get("filled"):
                 continue
             code, dt = r.get("code", ""), r["ts"][:10]
+            thr = float(r.get("thr_pct") or 10.0)
+            # 当天记录: 日K源(新浪)收盘后常延迟数小时甚至被限流 →
+            # 直接用腾讯实时收盘价判定, 最快最稳(且不受日K可用性影响)
+            if dt == datetime.now().strftime("%Y-%m-%d"):
+                px, pv = tx_close(code)
+                if px > 0 and pv > 0:
+                    r["seal"] = bool(px / pv - 1 >= thr / 100 - 0.002)
+                    r["seal_date"] = dt
+                    n_done += 1
+                continue
             if code not in cache:
                 cache[code] = fetch_daily(api, code)
             d = cache[code]
@@ -120,8 +165,10 @@ def _dedup(rs: list[dict]) -> list[dict]:
 
 
 def _buckets() -> list:
-    return (("70+", 70, 101), ("65-70", 65, 70), ("60-65", 60, 65),
-            ("50-60", 50, 60), ("<50", 0, 50))
+    """70 以上细分到 75/80: 75 是实盘门槛, 且回测显示 70-74 与 75-79
+    表现差异极大(同日 14% vs 75%), 合并显示会掩盖这个关键区分。"""
+    return (("80+", 80, 101), ("75-79", 75, 80), ("70-74", 70, 75),
+            ("65-69", 65, 70), ("60-64", 60, 65), ("<60", 0, 60))
 
 
 def report() -> str:
@@ -142,7 +189,9 @@ def report() -> str:
             if not sub:
                 continue
             sr = sum(1 for r in sub if r.get("seal")) / len(sub) * 100
-            out.append(f"{name:<8}{len(sub):>5}{sr:>8.1f}%")
+            flag = "*" if len(sub) < 5 else " "     # 小样本标注, 防噪声误导
+            out.append(f"{name + flag:<8}{len(sub):>5}{sr:>8.1f}%")
+        out.append("  *样本<5, 仅供参考(勿据此改判)")
         b = [r for r in sealed if r.get("action") == "BUY"]
         if b:
             out.append(f"BUY {len(b)} 笔封板率 "

@@ -809,7 +809,10 @@ def main() -> int:
             if slot != "ALL":
                 fired.append(key)
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            STATE_FILE.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            # 只在这里写一次且必须带 encoding: 之前循环内有一次无 encoding 的写入,
+            # 抛异常后中断 → sent/buy_today 都未落盘 → 冷却失效(同票重复推) + 配额超发
+            STATE_FILE.write_text(json.dumps(state, ensure_ascii=False),
+                                  encoding="utf-8")
             if ok:                                   # 记录持仓 → 次日卖出提醒
                 pos = load_json(POSITIONS)
                 day = now.strftime("%Y-%m-%d")

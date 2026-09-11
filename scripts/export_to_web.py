@@ -1091,7 +1091,7 @@ def build_youzi_strategy() -> dict[str, Any] | None:
     live:     实盘信号(判定后需 T+1 回填次日收益, 起步阶段可能为空)
     """
     rows = [r for r in _read_any_jsonl(YOUZI_BT)
-            if r.get("act") == "BUY" and (r.get("prob") or 0) >= 70
+            if r.get("act") == "BUY" and (r.get("prob") or 0) >= 75
             and r.get("ret") is not None]
     if not rows:
         return None
@@ -1151,18 +1151,48 @@ def build_youzi_strategy() -> dict[str, Any] | None:
                       for c, v in tx_snap(lcodes).items()})
     except Exception:
         pass
+    # 买入价(positions.json 的 entry) — 配合真实卖出价算实际收益
+    pos_map = {}
+    try:
+        _pf = json.loads((Path.home() / ".tradingagents" / "youzi"
+                          / "positions.json").read_text(encoding="utf-8"))
+        for _day, _holds in _pf.items():
+            for _c, _m in _holds.items():
+                pos_map[(_day, _c)] = float(_m.get("entry") or 0)
+    except Exception:
+        pos_map = {}
+    # 真实卖出记录(youzi_sell 落盘): 买入日+代码 → 卖出价/日期, 优先于回填
+    sold = {}
+    try:
+        for _s in _read_any_jsonl(Path.home() / ".tradingagents" / "youzi"
+                                  / "youzi_sold.jsonl"):
+            sold[(str(_s.get("buy_date")), str(_s.get("code")))] = _s
+    except Exception:
+        sold = {}
     live_trades, live_curve, nav2 = [], [], 1.0
     for r in sorted(live_rows, key=lambda x: x["ts"]):
         ret, hm = r.get("ret"), r["ts"][11:16]      # 信号时刻: 精确到分钟
         code = str(r.get("code", ""))
+        sl = sold.get((r["ts"][:10], code))         # 已按纪律卖出?
+        if sl is not None:
+            bp = pos_map.get((r["ts"][:10], code))
+            sell_px = float(sl.get("sell_price") or 0)
+            ret = ((sell_px / bp - 1) * 100 if bp and bp > 0
+                   else ret)
+            if ret is not None:
+                ret = round(float(ret), 2)
         live_trades.append({
             "status": "closed" if ret is not None else "open",
             "signalDate": r["ts"][:10], "buyDate": r["ts"][:10],
-            "sellDate": _next_trade_day(r["ts"][:10]) if ret is not None else "",
+            "sellDate": (str(sl.get("sell_date")) if sl is not None
+                         else (_next_trade_day(r["ts"][:10])
+                               if ret is not None else "")),
             "signalTime": hm, "buyTime": hm,
             "etf": code, "name": names.get(code, code),
+            "sellPrice": (sl.get("sell_price") if sl is not None else None),
             "returnPct": round(float(ret), 2) if ret is not None else None,
-            "sellReason": "次日开盘卖" if ret is not None else "",
+            "sellReason": (str(sl.get("msg")) if sl is not None
+                           else ("次日开盘卖" if ret is not None else "")),
             "note": (f"AI prob={r.get('prob')} | 当日"
                      f"{'封板' if r.get('seal') else '未封板'}"),
         })
@@ -1185,7 +1215,7 @@ def build_youzi_strategy() -> dict[str, Any] | None:
         "description": (
             "沪深主板 涨幅≥8% 且未封板(盘口有卖单、买得到) → AI 扮演资金数亿的游资大佬, "
             "按【盘口承接 / 资金面 / 题材联动 / 基本面 / 首触时段 / 位置情绪】六维自由权衡"
-            "(无硬性一票否决, 时段与市值只作参考数据), prob≥70 才放行, 每日最多 3 笔, "
+            "(无硬性一票否决, 时段与市值只作参考数据), prob≥75 才放行, 每日最多 3 笔, "
             "次日开盘卖出。规则层只负责召回(无差别买入笔均仅 +0.04%, 无 edge), "
             "判断权全在 AI 层 —— 回测中它把封板率从 44% 提到 82%。每次判定入账, "
             "收盘后回填实际结果生成『AI 自己的成绩单』并注入提示词, 实现自我校准。"
@@ -1208,13 +1238,13 @@ def build_youzi_strategy() -> dict[str, Any] | None:
                               if live_rows else 0.0),
             "totalReturn": live_total,
             "runningDays": len(live_curve),
-            "startDate": live_rows[0]["ts"][:10] if live_rows else "",
+            "startDate": (live_rows[0]["ts"][:10] if live_rows else ""),
         },
         "navCurve": live_curve,
         "backtestCurve": curve,
         "trades": live_trades[-50:],      # 前端"实盘"列表读 trades
         "backtestTrades": list(reversed(trades)),   # 回测明细: 最新在上
-        "extra": {"sealRate": seal, "probGate": 70, "maxPerDay": 3},
+        "extra": {"sealRate": seal, "probGate": 75, "maxPerDay": 3},
     }
 
 

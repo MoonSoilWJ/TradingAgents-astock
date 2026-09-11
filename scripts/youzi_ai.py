@@ -449,7 +449,7 @@ def build_prompt(sigs: list[dict], snap: dict, market: dict,
         lines.append(
             f"- {s['id']}: +{s['pct']:.1f}% 未封板 | {board} | 题材: "
             f"{str(snap.get('topics', {}).get(s['code'], '无标注'))[:36]}\n"
-            f"  市值 {mv} 换手 {tn} 距60日高 {dd} 量比 {s['vr']:.1f} "
+            f"  市值 {mv} 换手 {tn} 距60日高 {dd} 量比 {(s.get('vr') or 0):.1f} "
             f"额 {s['amt_yi']:.1f}亿\n"
             f"  盘口承接: {s.get('obook') or '缺失'}\n"
             f"  均线: {s.get('ma') or '缺失'}\n"

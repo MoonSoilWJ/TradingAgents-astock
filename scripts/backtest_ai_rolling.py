@@ -147,9 +147,31 @@ def report_txt(hist: list[dict]) -> str:
 def main() -> int:
     days_n = int(sys.argv[1]) if len(sys.argv) > 1 else 60
     sample_n = int(sys.argv[2]) if len(sys.argv) > 2 else 8
+    # skip: 跳过最后 skip 个交易日(用于把长回测拆成多段并行, 大幅缩短总耗时)
+    skip = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+    # argv[4]=="anon" → 匿名对照模式(送模型的 code 换成伪码, 结果仍按真实代码记录)
+    anon = len(sys.argv) > 4 and sys.argv[4] == "anon"
     print("构建历史候选 ...", flush=True)
     sig, all_k = build_candidates()
-    days = sorted(sig["date"].unique())[-days_n:]
+    _all = sorted(sig["date"].unique())
+    days = (_all[-(skip + days_n):len(_all) - skip] if skip
+            else _all[-days_n:])
+    # 输出文件: 匿名对照用独立文件名, 避免与正常版互相覆盖
+    out = OUT.with_name(f"ai_backtest_seg{skip}"
+                        f"{'_anon' if anon else ''}.jsonl")
+    # 断点续跑: 已判定过的日期直接跳过(重跑时零额外消耗)
+    _seg = out
+    if _seg.exists():
+        try:
+            _done = {json.loads(l).get("date") for l
+                     in _seg.read_text(encoding="utf-8").splitlines()
+                     if l.strip()}
+            if _done:
+                days = [d for d in days if str(d) not in _done]
+                print(f"[续跑] 跳过已完成 {len(_done)} 天, 本次跑 {len(days)} 天",
+                      flush=True)
+        except Exception:
+            pass
     print(f"候选 {len(sig):,} 笔 | 回测 {len(days)} 个交易日 "
           f"({days[0]} ~ {days[-1]}) | 每日送 AI {sample_n} 只", flush=True)
 
@@ -176,6 +198,14 @@ def main() -> int:
                          "amt_yi": float(r["cum_amt"]) / 1e8,
                          "streak": None, "price": float(r["close"])})
         ev = {r["code"]: evidence_of(r, all_k) for _, r in pick.iterrows()}
+        # ── 匿名对照(第4项检验): 隐去真实代码, 防 LLM 凭记忆认出历史牛股 ──
+        rev = {}
+        if anon:
+            fmap = {s["code"]: f"Z{9000 + i}" for i, s in enumerate(sigs)}
+            rev = {v: k for k, v in fmap.items()}
+            for s in sigs:
+                s["code"] = fmap[s["code"]]
+            ev = {fmap.get(k, k): v for k, v in ev.items()}
         n_limit = int(day["is_limit"].sum()) if "is_limit" in day else 0
         market = {"n_limit": n_limit + 20, "pool_n": 3000, "max_st": 3}
         rpt = report_txt(hist)
@@ -190,11 +220,13 @@ def main() -> int:
         by = {x["code"]: x for x in decs}
         for s in sigs:
             a = by.get(s["code"]) or {}
-            src = pick[pick["code"] == s["code"]].iloc[0]
+            # 匿名对照: 判定依据伪码取回, 记录时写回真实代码(结果回填需要)
+            real = rev.get(s["code"], s["code"]) if anon else s["code"]
+            src = pick[pick["code"] == real].iloc[0]   # real: 匿名模式下的真实代码
             ret = (float(src["nxt_open"]) / float(src["close"]) - 1 - COST
                    if src["nxt_open"] == src["nxt_open"] else np.nan)
             seal = bool(src["is_limit"])
-            rec = {"date": str(d), "code": s["code"],
+            rec = {"date": str(d), "code": real,
                    "act": a.get("action", "?"), "prob": a.get("prob", 0),
                    "ret": None if ret != ret else round(ret * 100, 2),
                    "seal": seal, "slot": LABEL.get(int(src["idx"]), "?")}
@@ -211,8 +243,22 @@ def main() -> int:
               f"  [{i}/{len(days)}] {d} 候选{len(sigs)} → BUY {len(buys)}",
               flush=True)
 
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    with open(OUT, "w") as f:
+    # ⚠ 所有分段(含 skip=0)一律写 seg 文件 — 此前 skip=0 写主文件被后续合并覆盖,
+    #    导致该段数据丢失(2026-09-10 事故)
+    out = OUT.with_name(f"ai_backtest_seg{skip}.jsonl")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # 合并已有结果(断点续跑: 只跑未完成的日期, 已跑部分不重复消耗)
+    if out.exists():
+        try:
+            old = [json.loads(l) for l
+                   in out.read_text(encoding="utf-8").splitlines()
+                   if l.strip()]
+            have = {r.get("date") for r in old}
+            out_rows = old + [r for r in out_rows
+                              if r.get("date") not in have]
+        except Exception:
+            pass
+    with open(out, "w") as f:
         for r in rows:
             f.write(__import__("json").dumps(r, ensure_ascii=False) + "\n")
 
