@@ -41,7 +41,8 @@ def load_recs() -> list[dict]:
 
 
 def fetch_daily(api: TdxHq_API, code: str, n: int = 15):
-    """pytdx 优先, 失效回退新浪(date 列统一为字符串)。"""
+    """pytdx 优先, 失效回退新浪, 再兜底腾讯日K(2026-09-14: 新浪限流导致
+    历史日封板判定漏回填 40%, 校准数据残缺 → 加第三级兜底)。"""
     try:
         m = TDXParams.MARKET_SH if code[0] in "569" else TDXParams.MARKET_SZ
         bars = api.get_security_bars(TDXParams.KLINE_TYPE_DAILY, m,
@@ -63,8 +64,27 @@ def fetch_daily(api: TdxHq_API, code: str, n: int = 15):
                          timeout=10, proxies={"http": None, "https": None})
         d = r.json()
         if not isinstance(d, list) or not d:
-            return None
+            raise RuntimeError("sina empty")
         df = pd.DataFrame(d).rename(columns={"day": "date"})
+        df["date"] = df["date"].astype(str)
+        return df.sort_values("date").reset_index(drop=True)
+    except Exception:
+        pass
+    # 三级兜底: 腾讯日K(稳定, 字段: [date, open, close, high, low, volume])
+    try:
+        import requests
+        pre = "sh" if code[0] in "569" else "sz"
+        u = (f"https://web.ifzq.gtimg.cn/appstock/app/kline/kline"
+             f"?param={pre}{code},day,,,{n},qfq")
+        r = requests.get(u, headers={"User-Agent": "Mozilla/5.0"},
+                         timeout=10, proxies={"http": None, "https": None})
+        node = r.json()["data"][f"{pre}{code}"]
+        rows = node.get("qfqday") or node.get("day") or []
+        if not rows:
+            return None
+        df = pd.DataFrame([{"date": x[0], "open": x[1], "close": x[2],
+                            "high": x[3], "low": x[4], "volume": x[5]}
+                           for x in rows])
         df["date"] = df["date"].astype(str)
         return df.sort_values("date").reset_index(drop=True)
     except Exception:

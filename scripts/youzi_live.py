@@ -909,8 +909,19 @@ def main() -> int:
                              and float((s.get("ai") or {}).get("prob", 0) or 0)
                              >= args.min_prob]
                     quota = args.daily_max - int(state.get("buy_today", 0))
+                    # ── 配额择优(P2, 2026-09-14): 10:00 前只用 daily_max-1 个配额,
+                    #    保留 1 个给 10:00 后(历史统计: 早盘急拉组次日溢价最差,
+                    #    09-11 实盘: 09:38 先到先得占了配额, 挡掉后面更好的票) ──
+                    if now.time() < dtime(10, 0) and quota > 1:
+                        quota -= 1
+                        print(f"    (早盘保留 1 配额给 10:00 后信号, 本轮可用 {quota})")
                     if len(fresh) > max(quota, 0):
-                        fresh = fresh[:max(quota, 0)]
+                        # 同轮多笔: 按 prob 降序取(同轮内择优, 不再先到先得)
+                        fresh = sorted(
+                            fresh,
+                            key=lambda s: float(
+                                (s.get("ai") or {}).get("prob", 0) or 0),
+                            reverse=True)[:max(quota, 0)]
                     state["buy_today"] = int(state.get("buy_today", 0)) + len(fresh)
                     log_pushed(fresh, now)      # 配额内=真正推送的, 线上展示用
                     print(f"    → AI 过滤: {before} → {len(fresh)} 只 "
