@@ -82,6 +82,13 @@ TOTAL_MIN = 240.0
 # 该窗口内量比钳到 VR_CAP 并标记 vr_na → 不参与评分、prompt 标注失真。
 EARLY_MIN = 15.0
 VR_CAP = 10.0
+# 资金强度下限(预估全天换手率): 回测 30 天对照, 加此过滤 AI 增益 +0.06%→+1.47%
+MIN_STRENGTH = 0.10
+# ── 2026-09-14 实盘149笔复盘定档, 试运行两周(至2026-09-28): ──
+# 量比≥4:  封板率 14%(vr<2)→46%(vr>8) 单调升, 低量比段拦掉
+# 成交额上限: 判定时已成交>12亿 封板率仅13%(全场明牌/抛压最大) — 反直觉但数据硬
+# 复盘要点: ①被拦的BUY封板率是否仍低(是=过滤正确) ②通过的封板率应≈45% ③prob区分度
+MAX_AMT_YI = 12.0          # 成交额上限(亿); 0=关闭
 
 EXCLUDE_KW = ("ST", "退", "N ", "*")
 
@@ -361,6 +368,33 @@ def elapsed_min(t: dtime) -> float:
 
 
 # ── 实时扫描 ────────────────────────────────────────────────────────────────
+def log_blocked(blocked: list[dict], now: datetime) -> None:
+    """被规则层拦截的候选 → jsonl(两周复盘用: 回填其当日封板状态,
+    验证「被拦的确实差」; 若被拦的封板率高 = 误杀, 需撤过滤)。"""
+    if not blocked:
+        return
+    try:
+        f = STATE_DIR / "blocked_log.jsonl"
+        seen_today = set()
+        if f.exists():
+            for line in f.read_text(encoding="utf-8").splitlines():
+                try:
+                    o = json.loads(line)
+                    if o.get("ts", "").startswith(now.strftime("%Y-%m-%d")):
+                        seen_today.add(o["code"])
+                except Exception:
+                    pass
+        with open(f, "a", encoding="utf-8") as fp:
+            for b in blocked:
+                if b["code"] in seen_today:
+                    continue                    # 同日同票只记首次拦截
+                seen_today.add(b["code"])
+                b["ts"] = now.isoformat(timespec="seconds")
+                fp.write(json.dumps(b, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def log_judgements(sigs: list[dict], now: datetime,
                    market: dict | None = None) -> None:
     """AI 判定快照 → JSONL(校准闭环: 收盘后回填实际结果, 统计 prob 可靠度)。
@@ -415,7 +449,8 @@ def scan(api: TdxHq_API, pool: list[dict], progress: float,
     """拉实时报价 → 返回 (信号列表, 池内涨停家数)。"""
     sigs, n_limit = [], 0
     stat = {"got": 0, "limit": 0, "sealed": 0, "lowpct": 0, "lowvr": 0, "yizi": 0,
-            "x_high": 0, "x_mv": 0, "x_turn": 0}
+            "lowst": 0, "hiamt": 0, "x_high": 0, "x_mv": 0, "x_turn": 0}
+    blocked = []                    # 被规则层拦截的候选(复盘用: 验证拦截是否正确)
     groups: dict[int, list] = {}
     for p in pool:
         m = TDXParams.MARKET_SH if p["code"][0] in "56" else TDXParams.MARKET_SZ
@@ -474,6 +509,35 @@ def scan(api: TdxHq_API, pool: list[dict], progress: float,
             vr = min(vr, VR_CAP)
         if vr < min_vr:
             stat["lowvr"] += 1
+            blocked.append({"code": code, "name": p.get("name"),
+                            "why": f"lowvr({vr:.1f})", "pct": round(pct*100, 2),
+                            "vr": round(vr, 2), "amt_yi": round(amt/1e8, 2)})
+            continue
+        # ── 资金强度过滤(回测验证: 8%全量增益+0.06% vs +资金过滤+1.47%) ──
+        # 预估全天换手率 = 当日累计成交额 / (流通股本×现价) / 时间进度
+        # 回测口径: ≥10%(p88分位)才送 AI; 盘中实时可算, 无前视
+        fs = float(p.get("float_shares") or 0)
+        if fs > 0 and progress > 0.06:
+            est_turn = amt / (fs * price) / progress
+            if est_turn < MIN_STRENGTH:
+                stat["lowst"] += 1
+                blocked.append({"code": code, "name": p.get("name"),
+                                "why": f"lowst({est_turn*100:.1f}%)",
+                                "pct": round(pct*100, 2),
+                                "vr": round(vr, 2),
+                                "amt_yi": round(amt/1e8, 2)})
+                continue
+        # ── 成交额上限(实盘149笔: 12亿+ 封板率仅13% — 全场明牌, 抛压最大) ──
+        if MAX_AMT_YI > 0 and amt / 1e8 > MAX_AMT_YI:
+            stat["hiamt"] += 1
+            blocked.append({"code": code, "name": p.get("name"),
+                            "why": f"hiamt({amt/1e8:.1f}亿)",
+                            "pct": round(pct*100, 2), "vr": round(vr, 2),
+                            "amt_yi": round(amt/1e8, 2)})
+            continue
+        # ── 成交额上限(实盘149笔: 12亿+ 封板率仅13% — 全场明牌, 抛压最大) ──
+        if MAX_AMT_YI > 0 and amt / 1e8 > MAX_AMT_YI:
+            stat["hiamt"] += 1
             continue
         # ── 游资五维评分(把"无脑选涨幅"升级为有结构的选股) ──
         streak = n20 = None
@@ -529,7 +593,7 @@ def scan(api: TdxHq_API, pool: list[dict], progress: float,
             "score": score,
         })
     sigs.sort(key=lambda x: -x["score"])
-    return sigs, {"limit": n_limit, **stat}
+    return sigs, {"limit": n_limit, "blocked": blocked, **stat}
 
 
 class Tee:
@@ -684,7 +748,7 @@ def main() -> int:
     ap.add_argument("--min-pct", type=float, default=8.0, help="最小涨幅(%)")
     ap.add_argument("--min-ratio", type=float, default=0.0,
                     help="涨停幅度比例阈值(0=禁用, 主板统一10%)")
-    ap.add_argument("--min-vr", type=float, default=0.0,
+    ap.add_argument("--min-vr", type=float, default=4.0,
                     help="最小量比(默认0=不过滤, 已验证为前视无效条件)")
     # 触发时点依据"首次触及9%"分时统计(2888笔): 10:30(+1.66%)/11:00(+1.90%)
     # 两段最优且笔均不降; 开盘半小时内首触仅+0.17%(强势未确认), 尾盘14:00后失效
@@ -760,9 +824,12 @@ def main() -> int:
         prog = elapsed_min(now.time()) / TOTAL_MIN
         sigs, st = scan(api, pool, prog, args.min_pct / 100, args.min_vr,
                         args.min_ratio, hist)
+        log_blocked(st.get("blocked") or [], now)   # 拦截日志(复盘用)
         print(f"[{now.strftime('%H:%M:%S')}] 有效 {st['got']:>4} | 涨停 {st['limit']:>3} | "
               f"封死 {st['sealed']:>3} | 一字 {st['yizi']} | 涨幅不足 {st['lowpct']} | "
-              f"量比不足 {st['lowvr']} | 标(高位{st['x_high']} 盘{st['x_mv']} "
+              f"量比不足 {st['lowvr']} | 强度不足 {st['lowst']} "
+              f"额超 {st['hiamt']} | "
+              f"标(高位{st['x_high']} 盘{st['x_mv']} "
               f"换手{st['x_turn']}) → **半路板 {len(sigs)} 只**")
         # 行情自愈: 交易时段内 0 只有效 = 连接已死(get_security_quotes 静默返回空)
         if st["got"] == 0 and in_session(now.time()):

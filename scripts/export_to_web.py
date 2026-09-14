@@ -33,6 +33,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+# macOS 系统代理(Clash 等)会被 requests 自动继承, 代理不通时 tx_quote 取名失败
+# → 网站标的只剩代码无名称(2026-09-14 发现)。强制直连, 实测直连可用。
+os.environ["no_proxy"] = os.environ["NO_PROXY"] = "*"
 import subprocess
 import sys
 from datetime import date, datetime, timedelta
@@ -1122,6 +1125,31 @@ def _read_youzi_backtest() -> list[dict[str, Any]]:
     return rows
 
 
+def _stock_names(codes: list[str]) -> dict[str, str]:
+    """股票代码→名称: 腾讯行情优先, 失败退 pool.json 本地缓存(不依赖网络)。"""
+    names: dict[str, str] = {}
+    try:
+        from tx_quote import snapshot as tx_snap
+        names = {c: str(v.get("name") or c)
+                 for c, v in tx_snap(codes).items()}
+    except Exception:
+        pass
+    missing = [c for c in codes if not names.get(c) or names.get(c) == c]
+    if missing:
+        try:
+            _pf = Path.home() / ".tradingagents" / "youzi" / "pool.json"
+            _d = json.loads(_pf.read_text(encoding="utf-8"))
+            _pool = _d if isinstance(_d, list) else _d.get("pool", [])
+            _m = {str(p.get("code")): str(p.get("name"))
+                  for p in _pool if p.get("code") and p.get("name")}
+            for c in missing:
+                if _m.get(c):
+                    names[c] = _m[c]
+        except Exception:
+            pass
+    return names
+
+
 def build_youzi_strategy() -> dict[str, Any] | None:
     """游资半路板: 规则召回(8%未封板) → AI 六维决断 → prob≥70 放行 → 次日开盘卖。
 
@@ -1151,14 +1179,9 @@ def build_youzi_strategy() -> dict[str, Any] | None:
     win = round(sum(1 for r in rows if float(r["ret"]) > 0) / len(rows) * 100, 1)
     seal = round(sum(1 for r in rows if r.get("seal")) / len(rows) * 100, 1)
 
-    # 股票名称(代码不直观): 腾讯行情批量取一次, 失败退回代码
+    # 股票名称(代码不直观): 腾讯行情批量取, 失败退 pool.json 本地缓存
     codes = sorted({str(r.get("code", "")) for r in rows if r.get("code")})
-    names: dict[str, str] = {}
-    try:
-        from tx_quote import snapshot as tx_snap
-        names = {c: str(v.get("name") or c) for c, v in tx_snap(codes).items()}
-    except Exception:
-        names = {}
+    names: dict[str, str] = _stock_names(codes)
 
     trades = [{
         "status": "closed",
@@ -1196,12 +1219,7 @@ def build_youzi_strategy() -> dict[str, Any] | None:
         live_rows.append({**r, "ret": j.get("ret"), "seal": j.get("seal")})
     lcodes = sorted({str(r.get("code", "")) for r in live_rows
                      if r.get("code")})
-    try:
-        from tx_quote import snapshot as tx_snap
-        names.update({c: str(v.get("name") or c)
-                      for c, v in tx_snap(lcodes).items()})
-    except Exception:
-        pass
+    names.update(_stock_names(lcodes))
     # 买入价(positions.json 的 entry) — 配合真实卖出价算实际收益
     pos_map = {}
     try:
@@ -1221,6 +1239,7 @@ def build_youzi_strategy() -> dict[str, Any] | None:
     except Exception:
         sold = {}
     live_trades, live_curve, nav2 = [], [], 1.0
+    _by_day: dict[str, list[float]] = {}
     for r in sorted(live_rows, key=lambda x: x["ts"]):
         ret, hm = r.get("ret"), r["ts"][11:16]      # 信号时刻: 精确到分钟
         code = str(r.get("code", ""))
@@ -1251,9 +1270,13 @@ def build_youzi_strategy() -> dict[str, Any] | None:
         })
         if ret is None:
             continue
-        nav2 *= 1 + float(ret) / 100
+        # 收益先按日聚合(当日多笔=等权分仓), 曲线/总收益按【日】复利 —
+        # 逐笔连乘会把同日并行的 3 笔当成 3 次满仓, 亏损放大数倍(2026-09-14 修正)
+        _by_day.setdefault(r["ts"][:10], []).append(float(ret))
+    for _d in sorted(_by_day):
+        nav2 *= 1 + (sum(_by_day[_d]) / len(_by_day[_d])) / 100
         try:
-            ts = int(datetime.strptime(r["ts"][:10], "%Y-%m-%d").timestamp() * 1000)
+            ts = int(datetime.strptime(_d, "%Y-%m-%d").timestamp() * 1000)
         except ValueError:
             continue
         live_curve.append([ts, (nav2 - 1) * 100])

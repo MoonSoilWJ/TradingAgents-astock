@@ -89,12 +89,54 @@ def tx_close(code: str) -> tuple[float, float]:
         return 0.0, 0.0
 
 
+def backfill_blocked() -> int:
+    """被规则层拦截的候选(blocked_log.jsonl) → 回填当日封板状态。
+
+    两周复盘(2026-09-28)的核心数据: 验证「被拦的确实差」——
+    若被拦票封板率接近/超过通过的, 说明过滤误杀, 应撤。
+    """
+    bf = STATE / "blocked_log.jsonl"
+    if not bf.exists():
+        return 0
+    recs = []
+    for line in bf.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            o = json.loads(line)
+            if isinstance(o, dict) and o.get("code"):
+                recs.append(o)
+        except Exception:
+            pass
+    if not recs:
+        return 0
+    n = 0
+    for r in recs:
+        if r.get("seal") is not None:
+            continue
+        code, dt = r.get("code", ""), r["ts"][:10]
+        if dt >= datetime.now().strftime("%Y-%m-%d"):
+            continue            # 当天的收盘后再判
+        px, pv = tx_close(code)
+        if px > 0 and pv > 0:
+            # 拦截记录无 thr_pct, 主板默认10%; pct 字段是判定时涨幅
+            r["seal"] = bool(px / pv - 1 >= 0.098)
+            n += 1
+    if n:
+        bf.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n"
+                              for r in recs))
+    return n
+
+
 def backfill() -> int:
     """未回填记录 → 补当日封板状态; 次日数据已生成则补次日溢价。"""
     # 盘中日K未定型(收盘价=当前价), 此时判定"是否封板"会污染数据 → 收盘后才回填
     if datetime.now().hour < 15:
         print("未收盘, 跳过回填(盘中封板判定会失真)")
         return 0
+    nb = backfill_blocked()
+    if nb:
+        print(f"拦截记录回填封板状态: {nb} 条")
     recs = load_recs()
     if not recs:
         print("无判定记录")

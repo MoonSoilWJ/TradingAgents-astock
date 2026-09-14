@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -198,56 +198,90 @@ def main() -> int:
         day = sig[sig["date"] == d]
         if len(day) == 0:
             continue
-        # 资金强度【阈值过滤】(非 topN 排名 — 盘中无法知道"收盘时谁排前8", 排名即前视)
-        #   强度 = (累计成交额/流通市值)/当日进度 = 预估全天换手率, 盘中可实时算
-        #   达标者按【触发先后】取前 N(先触发先送 AI), 同样无前视
+        # ── 模式2: 按 30 分钟槽位分批(忠实实盘节奏) ──
+        # ST_MIN>0 → 资金强度阈值过滤(旧模式); ST_MIN=0 → 全量, 无前视
         day = day.copy()
         pg = day["idx"].map(lambda i: {1: 30, 2: 60, 3: 90, 4: 120, 5: 150,
                                        6: 180, 7: 210, 8: 240}.get(int(i), 120) / 240)
-        if FLOAT_MV:
-            mv = day["code"].astype(str).map(FLOAT_MV).astype(float)
-            day["_st"] = (day["cum_amt"] / mv.replace(0, np.nan)) / pg
-        else:
-            day["_st"] = day["cum_amt"] / pg
-        day["_st"] = day["_st"].fillna(0.0)
-        day = day[day["_st"] >= ST_MIN]
-        pick = day.sort_values(["idx", "code"]).head(sample_n)
-        sigs = []
-        for _, r in pick.iterrows():
-            prog = {1: 30, 2: 60, 3: 90, 4: 120, 5: 150, 6: 180,
-                    7: 210, 8: 240}.get(int(r["idx"]), 120) / 240
-            # 量比 = 预估全天成交额 / 过去5日均额(无前视; 旧版用当日全天 d_amt)
-            m5a = float(r.get("ma5_amt") or 0)
-            vr = ((float(r["cum_amt"]) / max(prog, 0.04)) / m5a
-                  if m5a > 0 else 0)
-            sigs.append({"code": r["code"], "name": "", "pct": float(r["pct"]),
-                         "thr": 10.0, "mv": None, "turn": None,
-                         "dd": (float(r["hi60"] - r["close"]) / r["hi60"] * 100
-                                if r["hi60"] == r["hi60"] and r["hi60"] > 0
-                                else None),
-                         "vr": float(vr),
-                         "amt_yi": float(r["cum_amt"]) / 1e8,
-                         "streak": None, "price": float(r["close"])})
-        ev = {r["code"]: evidence_of(r, all_k) for _, r in pick.iterrows()}
+        if ST_MIN > 0:
+            if FLOAT_MV:
+                mv = day["code"].astype(str).map(FLOAT_MV).astype(float)
+                day["_st"] = (day["cum_amt"] / mv.replace(0, np.nan)) / pg
+            else:
+                day["_st"] = day["cum_amt"] / pg
+            day["_st"] = day["_st"].fillna(0.0)
+            day = day[day["_st"] >= ST_MIN]
+        day = day.sort_values(["idx", "code"])
+        if sample_n > 0:                       # sample_n=0 → 每槽全量(不再截断)
+            # ⚠ 不能用 groupby.apply — 它会把 idx 吸进索引导致后续 KeyError
+            day = day.groupby("idx", group_keys=False)[
+                [c for c in day.columns]].head(sample_n)
+        # 逐 30 分钟槽位一批送 AI(实盘是 1 分钟一轮 trickle, 回测 30 分钟近似)
+        batches = [(int(ix), g) for ix, g in day.groupby("idx")]
+        day_sigs, day_ev = [], {}
+        for _ix, pick in batches:
+            sigs = []
+            for _, r in pick.iterrows():
+                prog = {1: 30, 2: 60, 3: 90, 4: 120, 5: 150, 6: 180,
+                        7: 210, 8: 240}.get(int(r["idx"]), 120) / 240
+                # 量比 = 预估全天成交额 / 过去5日均额(无前视)
+                m5a = float(r.get("ma5_amt") or 0)
+                vr = ((float(r["cum_amt"]) / max(prog, 0.04)) / m5a
+                      if m5a > 0 else 0)
+                sigs.append({"code": r["code"], "name": "", "pct": float(r["pct"]),
+                             "thr": 10.0, "mv": None, "turn": None,
+                             "dd": (float(r["hi60"] - r["close"]) / r["hi60"] * 100
+                                    if r["hi60"] == r["hi60"] and r["hi60"] > 0
+                                    else None),
+                             "vr": float(vr),
+                             "amt_yi": float(r["cum_amt"]) / 1e8,
+                             "streak": None, "price": float(r["close"])})
+                day_ev[r["code"]] = evidence_of(r, all_k)
+            day_sigs.extend(sigs)
+        pick = day                              # 记录用全量
+        sigs = day_sigs
         # ── 匿名对照(第4项检验): 隐去真实代码, 防 LLM 凭记忆认出历史牛股 ──
+        # 注意: 映射须在 idx_of(用真实code)之后做, slot 分组才不至 KeyError
         rev = {}
+        idx_of = {str(r["code"]): int(r["idx"]) for _, r in day.iterrows()}
         if anon:
             fmap = {s["code"]: f"Z{9000 + i}" for i, s in enumerate(sigs)}
             rev = {v: k for k, v in fmap.items()}
             for s in sigs:
                 s["code"] = fmap[s["code"]]
-            ev = {fmap.get(k, k): v for k, v in ev.items()}
+            day_ev = {fmap.get(k, k): v for k, v in day_ev.items()}
+            idx_of = {fmap.get(k, k): v for k, v in idx_of.items()}
         n_limit = int(day["is_limit"].sum()) if "is_limit" in day else 0
         market = {"n_limit": n_limit + 20, "pool_n": 3000, "max_st": 3}
         rpt = report_txt(hist)
-        try:
-            decs, stt = decide(sigs, market,
-                               now=datetime.combine(d, datetime.min.time()),
-                               thr=THR * 100, min_prob=MINP, report=rpt,
-                               evidence=ev,
-                               verbose=False)
-        except Exception as exc:
-            print(f"  {d} 调用失败: {type(exc).__name__} {str(exc)[:60]}")
+        # ── 模�2: 每个 30 分钟槽位一次 decide(回测30分钟一批, 实盘1分钟一批近似) ──
+        decs = []
+        for _n, _ix in enumerate(sorted(set(idx_of.values())), 1):
+            t0 = __import__("time").time()
+            slot_sigs = [s for s in sigs if idx_of.get(str(s["code"])) == int(_ix)]
+            if not slot_sigs:
+                continue
+            slot_ev = {s["code"]: day_ev[s["code"]] for s in slot_sigs
+                       if s["code"] in day_ev}
+            try:
+                # 匿名模式连日期一起藏(2000年起的相对日期, 防凭日期+特征认出牛股)
+                _now = (datetime.combine(
+                    datetime(2000, 1, 3) + timedelta(days=list(days).index(d)),
+                    datetime.min.time()) if anon
+                    else datetime.combine(d, datetime.min.time()))
+                sd, _stt = decide(slot_sigs, market,
+                                  now=_now,
+                                  thr=THR * 100, min_prob=MINP, report=rpt,
+                                  evidence=slot_ev, verbose=False)
+                decs.extend(sd)
+                _buy = sum(1 for x in sd if x.get("action") == "BUY")
+                print(f"    槽{_ix}({LABEL.get(int(_ix), '?')}): "
+                      f"{len(slot_sigs)}只 {__import__('time').time()-t0:.0f}s "
+                      f"→ BUY {_buy}", flush=True)
+            except Exception as exc:
+                print(f"  {d} 槽{_ix} 调用失败: {type(exc).__name__}",
+                      flush=True)
+        if not decs:
             continue
         by = {x["code"]: x for x in decs}
         for s in sigs:
