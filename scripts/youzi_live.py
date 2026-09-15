@@ -451,6 +451,7 @@ def scan(api: TdxHq_API, pool: list[dict], progress: float,
     stat = {"got": 0, "limit": 0, "sealed": 0, "lowpct": 0, "lowvr": 0, "yizi": 0,
             "lowst": 0, "hiamt": 0, "x_high": 0, "x_mv": 0, "x_turn": 0}
     blocked = []                    # 被规则层拦截的候选(复盘用: 验证拦截是否正确)
+    limit_codes = []                # 今日实时涨停列表 → 情绪指标(次日算溢价)
     groups: dict[int, list] = {}
     for p in pool:
         m = TDXParams.MARKET_SH if p["code"][0] in "56" else TDXParams.MARKET_SZ
@@ -487,6 +488,7 @@ def scan(api: TdxHq_API, pool: list[dict], progress: float,
         if pct >= thr:                      # 已涨停
             n_limit += 1
             stat["limit"] += 1
+            limit_codes.append(code)
             continue
         op = float(q.get("open") or 0)
         if op > 0 and op / prev - 1 >= thr:  # 一字开盘(虽未封但不该追)
@@ -593,7 +595,62 @@ def scan(api: TdxHq_API, pool: list[dict], progress: float,
             "score": score,
         })
     sigs.sort(key=lambda x: -x["score"])
-    return sigs, {"limit": n_limit, "blocked": blocked, **stat}
+    return sigs, {"limit": n_limit, "blocked": blocked,
+                  "limit_codes": limit_codes, **stat}
+
+
+def save_limit_list(codes: list[str], now: datetime) -> None:
+    """今日涨停代码列表落盘(增量合并) — 次日 emotion_block 用它算
+    「昨日涨停今日平均溢价」= 打板接力赚钱效应(情绪核心指标)。"""
+    if not codes:
+        return
+    try:
+        f = STATE_DIR / f"limits_{now.strftime('%Y-%m-%d')}.json"
+        old: list[str] = []
+        if f.exists():
+            try:
+                old = json.loads(f.read_text(encoding="utf-8"))
+            except Exception:
+                old = []
+        merged = sorted(set(old) | set(codes))
+        if len(merged) != len(old):
+            f.write_text(json.dumps(merged), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def emotion_block(now: datetime) -> str:
+    """打板接力赚钱效应 → 注入 AI prompt(证据维度, 非硬规则)。
+
+    指标: 昨日涨停股今日平均溢价。冰点(<-2%)= 接力必亏, 修复(>2%)= 情绪回暖。
+    缓存 5 分钟(盘中每轮算会拖慢节奏); 无昨日数据返回空串。
+    """
+    yd = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    f = STATE_DIR / f"limits_{yd}.json"
+    if not f.exists():
+        return ""
+    try:
+        codes = json.loads(f.read_text(encoding="utf-8"))
+        if not codes:
+            return ""
+        from tx_quote import snapshot as tx_snap
+        q = tx_snap(codes)
+        prems = []
+        for c in codes:
+            v = q.get(c)
+            if not v or not v.get("price") or not v.get("prev_close"):
+                continue
+            prems.append(v["price"] / v["prev_close"] - 1)
+        if len(prems) < 10:                 # 样本太少不可信
+            return ""
+        prem = sum(prems) / len(prems) * 100
+        n_up = sum(1 for x in prems if x > 0)
+        mood = ("冰点, 接力普遍亏损" if prem < -2
+                else "回暖, 封板次日有溢价" if prem > 2 else "中性")
+        return (f"昨日涨停{len(codes)}只, 今日平均溢价 {prem:+.1f}% "
+                f"(红盘率 {n_up}/{len(prems)}) — 打板接力赚钱效应{mood}")
+    except Exception:
+        return ""
 
 
 class Tee:
@@ -825,6 +882,7 @@ def main() -> int:
         sigs, st = scan(api, pool, prog, args.min_pct / 100, args.min_vr,
                         args.min_ratio, hist)
         log_blocked(st.get("blocked") or [], now)   # 拦截日志(复盘用)
+        save_limit_list(st.get("limit_codes") or [], now)  # 涨停列表(次日情绪指标)
         print(f"[{now.strftime('%H:%M:%S')}] 有效 {st['got']:>4} | 涨停 {st['limit']:>3} | "
               f"封死 {st['sealed']:>3} | 一字 {st['yizi']} | 涨幅不足 {st['lowpct']} | "
               f"量比不足 {st['lowvr']} | 强度不足 {st['lowst']} "
@@ -877,7 +935,8 @@ def main() -> int:
             try:
                 from youzi_ai import decide
                 mkt = {"n_limit": st["limit"], "pool_n": len(pool),
-                       "max_st": 3}
+                       "max_st": 3,
+                       "emotion": emotion_block(now)}   # 接力赚钱效应(证据维度)
                 decs, aist = decide(fresh, mkt, now, api=api,
                                     thr=args.min_pct,
                                     min_prob=args.min_prob)
@@ -909,12 +968,21 @@ def main() -> int:
                              and float((s.get("ai") or {}).get("prob", 0) or 0)
                              >= args.min_prob]
                     quota = args.daily_max - int(state.get("buy_today", 0))
-                    # ── 配额择优(P2, 2026-09-14): 10:00 前只用 daily_max-1 个配额,
-                    #    保留 1 个给 10:00 后(历史统计: 早盘急拉组次日溢价最差,
-                    #    09-11 实盘: 09:38 先到先得占了配额, 挡掉后面更好的票) ──
-                    if now.time() < dtime(10, 0) and quota > 1:
-                        quota -= 1
-                        print(f"    (早盘保留 1 配额给 10:00 后信号, 本轮可用 {quota})")
+                    # ── 配额择优(P2, 2026-09-14): 10:00 前累计最多用 daily_max-1 个
+                    #    配额, 保留 1 个给 10:00 后(早盘急拉组次日溢价最差)。
+                    #    ⚠ 旧版 bug: 只看当前轮 quota>1, 第三轮 quota=1 时放行,
+                    #    10点前照样烧满 3 发(2026-09-15 实际发生) → 改按累计数判断
+                    if now.time() < dtime(10, 0):
+                        am_cap = args.daily_max - 1      # 早盘累计上限
+                        used = int(state.get("buy_today", 0))
+                        if used + len(fresh) > am_cap:
+                            fresh = sorted(
+                                fresh,
+                                key=lambda s: float(
+                                    (s.get("ai") or {}).get("prob", 0) or 0),
+                                reverse=True)[:max(am_cap - used, 0)]
+                            print(f"    (早盘累计上限 {am_cap}, "
+                                  f"保留 1 配额给 10:00 后)")
                     if len(fresh) > max(quota, 0):
                         # 同轮多笔: 按 prob 降序取(同轮内择优, 不再先到先得)
                         fresh = sorted(

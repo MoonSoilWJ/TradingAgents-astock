@@ -484,8 +484,12 @@ def build_prompt(sigs: list[dict], snap: dict, market: dict,
              f"【市场情绪】涨停 {market.get('n_limit', '?')} 只 / "
              f"扫描 {market.get('pool_n', '?')} 只 | 最高连板 "
              f"{market.get('max_st', '?')}",
-             f"【今日热门题材】{hot}",
-             "", "【候选标的】(均为涨幅≥{t}% 未封板, 盘口有卖单可成交)".format(t=f"{thr:g}"), ""]
+             f"【今日热门题材】{hot}"]
+    emo = str(market.get("emotion") or "")
+    if emo:
+        lines.append(f"【接力赚钱效应】{emo} — 这是封板次日溢价最直接的温度计: "
+                     "冰点时封板次日普遍低开, 修复时高开; 权衡权重由你定")
+    lines += ["", "【候选标的】(均为涨幅≥{t}% 未封板, 盘口有卖单可成交)".format(t=f"{thr:g}"), ""]
     for s in sigs:
         stk = s.get("streak")
         board = "首板候选" if stk == 0 else (f"{stk}板后" if stk else "?")
