@@ -18,7 +18,7 @@ import re
 import sys
 import time
 from collections import Counter
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -59,12 +59,18 @@ SYSTEM = """你是一位资金体量数亿的 A 股游资大佬, 深耕打板接
 1. 盘口承接: 距涨停距离(越近越主动)、今日触板被砸次数
    (0-1次=抛压轻, ≥3次=反复炸板抛压重)、买一/卖一委量比(买方主导易封)、
    现价相对分时均价(上方=承接强, 下方=回落中)
-2. 资金面: 主力/超大单净流入方向与持续性; 超大单主导买入 vs 中小单为主
+2. 资金面: 主力/超大单净流入方向与持续性; 超大单主导买入 vs 中小单为主;
+   龙虎榜: 近期上榜净买/净卖方向与机构席位动向(机构净卖出+游资接力
+   = 聪明钱出逃, 重大负证据)
 3. 题材联动: 主线还是杂毛? 同题材当日几只涨停(有合力 vs 孤板)? 龙头还是末位跟风?
-4. 基本面: 涨停原因(业绩/政策/概念/无)、盈亏状况、负债水平
+4. 基本面: 涨停原因(业绩/政策/概念/无)、盈亏状况、负债水平;
+   公司公告: 异常波动/风险提示/澄清公告 — 公司亲自否认核心炒作逻辑
+   (如"相关业务未产生营收") = 炒作根基被自己打脸, 重大负证据
 5. 首触形态与时段: 【当前时间】附有各时段历史统计均值 — 它描述平均规律,
    不代表当下这只票, 结合个股证据自行权衡其权重
-6. 位置与情绪: 连板高度与梯队、流通市值、均线形态、距60日高、大盘涨停家数
+6. 位置与情绪: 连板高度与梯队、流通市值、均线形态、距60日高、大盘涨停家数;
+   高位减分项(RSI>80 / 5日涨幅>15% / 10日涨幅>25%) = 超买+乖离红灯,
+   触发越多, 炸板与次日兑现压力越大, prob 应显著下调
 
 【数据缺失】某维度缺失时降低整体置信度, 聚焦可得的维度判断, 不因此单独否决。
 
@@ -133,6 +139,116 @@ def finance_block(code: str) -> str:
         return ""
     finally:
         os.environ.update(saved)
+
+
+# ── 公告/龙虎榜风险证据(2026-09-15 超声电子教训: 公司两次澄清否认核心炒作
+#    逻辑 + 机构龙虎榜出货 1.68亿, 系统当时完全失明 → 接入三类负证据输入) ──
+RISK_KW = ("异常波动", "风险提示", "澄清", "否认", "不实", "减持", "立案",
+           "警示", "问询", "处罚", "诉讼", "仲裁", "质押")
+_RISK_CACHE: dict = {"day": None, "notice": {}, "lhb": None, "inst": None}
+
+
+def _risk_tables() -> dict:
+    """全市场公告(近8自然日) + 龙虎榜(近14日) + 机构席位(近30日), 每日拉一次。
+
+    盘中逐候选拉外部接口会拖垮节奏且限频 → 每日首轮一次性建内存索引,
+    之后同日全部查缓存。任一表失败置 None/空不阻断(enrich 兜底)。
+    首轮一次约 10 个请求(~15s), 仅发生在当日第一次有候选进 AI 层时。
+    """
+    day = datetime.now().strftime("%Y-%m-%d")
+    if _RISK_CACHE["day"] == day:
+        return _RISK_CACHE
+    saved = {k: os.environ.pop(k) for k in list(os.environ)
+             if "proxy" in k.lower()}
+    notice: dict[str, list] = {}
+    lhb = inst = None
+    try:
+        import akshare as ak
+        # 公告: 东财按日全市场 → 按代码索引(周末/节假日返回空, 跳过)
+        for off in range(8):
+            d = (datetime.now() - timedelta(days=off)).strftime("%Y%m%d")
+            try:
+                df = ak.stock_notice_report(symbol="全部", date=d)
+            except Exception:
+                continue
+            if df is None or not len(df):
+                continue
+            for _, r in df.iterrows():
+                c = str(r.get("代码") or "").zfill(6)
+                if c:
+                    notice.setdefault(c, []).append((
+                        str(r.get("公告日期") or "")[:10],
+                        str(r.get("公告标题") or ""),
+                        str(r.get("公告类型") or "")))
+        end = datetime.now().strftime("%Y%m%d")
+        start14 = (datetime.now() - timedelta(days=14)).strftime("%Y%m%d")
+        start30 = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
+        try:
+            lhb = ak.stock_lhb_detail_em(start_date=start14, end_date=end)
+        except Exception:
+            lhb = None
+        try:
+            inst = ak.stock_lhb_jgmmtj_em(start_date=start30, end_date=end)
+        except Exception:
+            inst = None
+    except Exception:
+        pass
+    finally:
+        os.environ.update(saved)
+    _RISK_CACHE.update({"day": day, "notice": notice, "lhb": lhb,
+                        "inst": inst})
+    return _RISK_CACHE
+
+
+def notice_block(code: str) -> str:
+    """公告/异动风险: 近7日公告命中风险关键词 → 列出。
+    公司否认核心炒作逻辑(如"未产生相关营收")是复盘中最致命的负证据。"""
+    try:
+        rows = _risk_tables()["notice"].get(str(code).zfill(6)) or []
+        if not rows:
+            return ""
+        hits = [f"{d[5:]} {t[:36]}" for d, t, _ty in rows
+                if any(k in t for k in RISK_KW)]
+        if hits:
+            return f"⚠ 风险公告{len(hits)}条: " + " | ".join(hits[:3])
+        return f"近7日公告{len(rows)}条, 无风险关键词"
+    except Exception:
+        return ""
+
+
+def lhb_block(code: str) -> str:
+    """龙虎榜方向: 近14日上榜+净买额, 近30日机构席位净买卖。
+    机构净卖出+游资接力 = 聪明钱出逃的结构性负证据。"""
+    try:
+        t = _risk_tables()
+        code6 = str(code).zfill(6)
+        parts = []
+        d = t.get("lhb")
+        if d is not None and len(d):
+            sub = d[d["代码"].astype(str).str.zfill(6) == code6]
+            if len(sub):
+                sub = sub.sort_values("上榜日")
+                last = sub.iloc[-1]
+                seg = f"近14日上榜{len(sub)}次(最近{last['上榜日']})"
+                try:
+                    net = float(last["龙虎榜净买额"]) / 1e8
+                    seg += f" 净买{net:+.2f}亿"
+                except Exception:
+                    pass
+                parts.append(seg)
+        i = t.get("inst")
+        if i is not None and len(i):
+            sub = i[i["代码"].astype(str).str.zfill(6) == code6]
+            if len(sub):
+                g = sub.groupby("上榜日期", as_index=False).last()
+                net = float(pd.to_numeric(g["机构买入净额"],
+                                          errors="coerce").sum()) / 1e8
+                nsell = int(g["卖方机构数"].max())
+                parts.append(f"机构近30日净{'买' if net >= 0 else '卖'}"
+                             f"{abs(net):.2f}亿(单日卖方机构最多{nsell}家)")
+        return " | ".join(parts) if parts else ""
+    except Exception:
+        return ""
 
 
 def _live_pct(code: str) -> float | None:
@@ -453,6 +569,11 @@ def enrich(sig: dict, date: str, api=None, thr_pct: float = 10.0,
         info["fund"] = f"[本地代理指标] {info['mproxy']}"
     info["fin"] = finance_block(code)
     info["ma"] = ma_block(code)
+    try:                            # 公告/异动 + 龙虎榜方向(每日一次索引)
+        info["notice"] = notice_block(code)
+        info["lhb"] = lhb_block(code)
+    except Exception:
+        pass
     return info
 
 
@@ -507,7 +628,20 @@ def build_prompt(sigs: list[dict], snap: dict, market: dict,
             f"  均线: {s.get('ma') or '缺失'}\n"
             f"  基本面: {s.get('fin') or '缺失'}\n"
             f"  资金面: {str(s.get('fund'))[:200] or '缺失'}\n"
-            f"  首触形态: {s.get('stance') or '缺失'}")
+            f"  首触形态: {s.get('stance') or '缺失'}\n"
+            f"  公告异动: {s.get('notice') or '缺失'}\n"
+            f"  龙虎榜: {s.get('lhb') or '近两周未上榜(或数据缺失)'}")
+        rsi, p5, p10 = s.get("rsi"), s.get("pct5"), s.get("pct10")
+        ded = []
+        if rsi is not None and rsi > 80:
+            ded.append(f"RSI14={rsi:.0f}>80")
+        if p5 is not None and p5 > 15:
+            ded.append(f"5日涨{p5:+.0f}%>15%")
+        if p10 is not None and p10 > 25:
+            ded.append(f"10日涨{p10:+.0f}%>25%")
+        lines.append("  高位减分: " + ("⚠ " + "、".join(ded)
+                     + " — 超买+乖离极端, 炸板/兑现压力大"
+                       if ded else "无"))
         lines.append("")
     lines.append("任务: 对每只候选都输出判定(BUY 或 SKIP), 每项都附 judgement 与 reason。")
     return "\n".join(lines)
@@ -598,13 +732,30 @@ def decide(sigs: list[dict], market: dict, now: datetime | None = None,
             cid = id2code.get(str(d.get("id", "")).upper(), "")
             if not cid:
                 continue
+            prob = float(d.get("prob", d.get("score", 0)) or 0)
+            sc = d.get("scores", {}) or {}
+            # ── P1 封顶的代码强制(2026-09-15): 提示词规则 LLM 会概率性违反
+            #    (骏亚科技单日 4 次 76 分违反题材≤4→封顶72), 放行层机械执行。
+            #    子分仍是 AI 打的(判断权在 AI), 此处只执行已校准的封顶规则,
+            #    性质与 min_prob 门槛相同 ──
+            cap_note = []
+            try:
+                if float(sc.get("题材", 10)) <= 4:
+                    prob = min(prob, 72.0)
+                    cap_note.append("题材≤4封顶72")
+                if float(sc.get("盘口", 10)) <= 4:
+                    prob = min(prob, 70.0)
+                    cap_note.append("盘口≤4封顶70")
+            except Exception:
+                pass
             out.append({
                 "code": cid,
                 "action": str(d.get("action", "SKIP")).upper(),
-                "prob": float(d.get("prob", d.get("score", 0)) or 0),
+                "prob": prob,
+                "capped": cap_note,                  # 被封顶记录(校准用)
                 "reason": str(d.get("reason", ""))[:120],
                 "judgement": d.get("judgement", {}),
-                "scores": d.get("scores", {}),   # 维度子分(校准用)
+                "scores": sc,                        # 维度子分(校准用)
             })
         return out, "ok"
     except Exception as exc:

@@ -544,6 +544,7 @@ def scan(api: TdxHq_API, pool: list[dict], progress: float,
         # ── 游资五维评分(把"无脑选涨幅"升级为有结构的选股) ──
         streak = n20 = None
         mv = turn = dd = None
+        pct5 = pct10 = rsi14 = None
         h = hist.get(code) if hist else None
         if h is not None and len(h) >= 20:
             cl = h["close"].values.astype(float)
@@ -559,6 +560,17 @@ def scan(api: TdxHq_API, pool: list[dict], progress: float,
             n20 = int(sum(lim[-20:]))            # 近20日涨停次数(股性)
             high60 = float(h["high"].values[-60:].max())
             dd = (high60 - price) / high60 * 100 if high60 > 0 else None
+            # 高位减分项原料(截至昨日收盘, 无前视): 5日/10日涨幅 + RSI14
+            # 2026-09-15 超声电子教训: 7天+56%妖股, AI 层当时完全看不到超买证据
+            if len(cl) >= 11:
+                pct5 = (cl[-1] / cl[-6] - 1) * 100
+                pct10 = (cl[-1] / cl[-11] - 1) * 100
+            if len(cl) >= 15:
+                c15 = cl[-15:]
+                diffs = [c15[k + 1] - c15[k] for k in range(14)]
+                gains = sum(x for x in diffs if x > 0) / 14.0
+                losses = sum(-x for x in diffs if x < 0) / 14.0
+                rsi14 = 100.0 if losses <= 0 else 100 - 100 / (1 + gains / losses)
             fs = float(p.get("float_shares") or 0)
             if fs > 0:
                 mv = fs * price / 1e8            # 流通市值(亿)
@@ -592,6 +604,7 @@ def scan(api: TdxHq_API, pool: list[dict], progress: float,
             "vr": vr, "vr_na": vr_na, "amt_yi": amt / 1e8, "ask1": ask1,
             "thr": thr * 100,
             "streak": streak, "mv": mv, "turn": turn, "dd": dd, "n20": n20,
+            "pct5": pct5, "pct10": pct10, "rsi": rsi14,
             "score": score,
         })
     sigs.sort(key=lambda x: -x["score"])
@@ -674,6 +687,14 @@ class Tee:
             self.f.flush()
         except Exception:
             pass
+
+
+def parse_hhmm(s: str) -> dtime | None:
+    try:
+        hh, mm = s.strip().split(":")
+        return dtime(int(hh), int(mm))
+    except Exception:
+        return None
 
 
 def nearest_slot(now: datetime, times: str, tol: int = 4) -> str | None:
@@ -811,6 +832,9 @@ def main() -> int:
     # 两段最优且笔均不降; 开盘半小时内首触仅+0.17%(强势未确认), 尾盘14:00后失效
     ap.add_argument("--trigger-times", default="",
                     help="触发时点(逗号分隔); 空=全天")
+    ap.add_argument("--start-time", default="",
+                    help="起始推送时点(HH:MM); 之前判定照常记录但不推送/不占配额"
+                         "(2026-09-15 复盘: 09:30-09:40 桶全面最差)")
     ap.add_argument("--ai", action="store_true", help="启用 AI 判断层(否决/确认)")
     ap.add_argument("--min-prob", type=float, default=65.0,
                     help="AI 放行硬阈值: prob≥此值才推送(回测基线封板率63.4%)")
@@ -920,12 +944,20 @@ def main() -> int:
             print(f"    (时点 {slot} 今日已触发)")
             return
 
-        # 冷却去重
+        # 冷却去重 + 结构性SKIP当日拉黑(2026-09-15: 骏亚科技单日被重复判54次,
+        # 其中50次SKIP理由全是"无题材+基本面暴雷"——结构性问题盘中不会变, 重判纯浪费)
         fresh = []
+        skip_bl = state.setdefault("skip_blacklist", {}).setdefault(
+            now.strftime("%Y-%m-%d"), {})
+        for _old in [k for k in state["skip_blacklist"]
+                     if k != now.strftime("%Y-%m-%d")]:
+            del state["skip_blacklist"][_old]   # 只留当日, 防 state 膨胀
         for s in sigs:
             last = state["sent"].get(s["code"])
             if last and (now - datetime.fromisoformat(last)).total_seconds() < args.cooldown * 60:
                 continue
+            if s["code"] in skip_bl:
+                continue                        # 结构性拒绝已判过, 当日不再重判
             fresh.append(s)
         if not fresh:
             return
@@ -943,6 +975,17 @@ def main() -> int:
                 by = {d["code"]: d for d in decs}
                 for s in fresh:
                     s["ai"] = by.get(s["code"])
+                # 结构性拒绝 → 当日拉黑(理由含"无题材/暴雷/孤板"等盘中不变因素;
+                # 盘口类临时性拒绝不拉黑——委量比等盘口证据分钟级可翻转)
+                _STRUCT = ("无题材", "暴雷", "暴亏", "孤板", "杂毛",
+                           "孤立", "无联动", "业绩暴")
+                for d in decs:
+                    if d.get("action") != "SKIP":
+                        continue
+                    rs = str(d.get("reason", "")) + str(
+                        (d.get("judgement") or {}).get("题材", ""))
+                    if any(k in rs for k in _STRUCT):
+                        skip_bl[d["code"]] = d.get("reason", "")[:60]
                 log_judgements(fresh, now, mkt)
                 for s in fresh:
                     a = s.get("ai") or {}
@@ -967,6 +1010,13 @@ def main() -> int:
                              if (s.get("ai") or {}).get("action") == "BUY"
                              and float((s.get("ai") or {}).get("prob", 0) or 0)
                              >= args.min_prob]
+                    # ── 起始推送时点(2026-09-15 复盘: 09:30-09:40 桶最差):
+                    #    判定/日志照常落盘(校准数据不缺), 只是不推送不占配额 ──
+                    st_t = parse_hhmm(args.start_time)
+                    if st_t and now.time() < st_t:
+                        print(f"    → 未到起始推送时点 {args.start_time} "
+                              f"(判定已记录, 不推送/不占配额)")
+                        return
                     quota = args.daily_max - int(state.get("buy_today", 0))
                     # ── 配额择优(P2, 2026-09-14): 10:00 前累计最多用 daily_max-1 个
                     #    配额, 保留 1 个给 10:00 后(早盘急拉组次日溢价最差)。
@@ -1000,6 +1050,10 @@ def main() -> int:
                     fresh = []
             except Exception as exc:
                 print(f"    [AI] 异常, 降级为规则: {exc}")
+        st_t = parse_hhmm(args.start_time)
+        if st_t and now.time() < st_t and fresh:
+            print(f"    → 未到起始推送时点 {args.start_time}, 仅记录")
+            return
         if fresh and do_push:
             title, text = fmt(fresh, st["limit"], now)
             ok = push(title, text)
