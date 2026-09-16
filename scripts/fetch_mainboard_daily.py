@@ -132,12 +132,26 @@ def main() -> int:
     ap.add_argument("--start", default="2022-01-01")
     ap.add_argument("--limit", type=int, default=0, help="只拉前 N 只(测试)")
     ap.add_argument("--offset", type=int, default=0, help="跳过前 N 只(续传)")
+    ap.add_argument("--force", action="store_true",
+                    help="强制重拉全部(不跳过已有), 合并时以东财真实值覆盖估算值")
     ap.add_argument("--out", default="", help="输出 pkl 路径(默认 mb_daily.pkl)")
     args = ap.parse_args()
 
     ssl._create_default_https_context = ssl._create_unverified_context
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     out_pkl = Path(args.out) if args.out else DAILY_PKL
+
+    # 累加式: 载入既有 pkl 中已完成的标的, 本轮只补拉缺失的, 末尾合并写回
+    # (东财限频下每轮只能拉到一部分, 整体覆盖会丢失此前进度 → 必须累加)
+    existing_df = None
+    existing_codes: set = set()
+    if out_pkl.exists() and not args.offset:
+        try:
+            existing_df = pd.read_pickle(out_pkl)
+            existing_codes = set(existing_df["code"].unique())
+            print(f"[基线] 既有 pkl 含 {len(existing_codes)} 只, 本轮补拉缺失标的")
+        except Exception:
+            existing_df = None
 
     api = connect()
     try:
@@ -178,8 +192,12 @@ def main() -> int:
     api = connect()
     frames, t0 = [], time.time()
     consec_fail = 0
+    skip = 0
     try:
         for i, (m, code, name) in enumerate(uni):
+            if code in existing_codes and not args.force:  # 已完成且非强制 → 跳过
+                skip += 1
+                continue
             try:
                 d = fetch_one_em(code, args.start)
                 consec_fail = 0
@@ -218,13 +236,20 @@ def main() -> int:
         except Exception:
             pass
 
-    df = pd.concat(frames, ignore_index=True)
-    df.to_pickle(out_pkl)
+    if not frames:
+        print("\n[跳过] 本轮无新增成功, 不写盘(保留既有 pkl)")
+    else:
+        if existing_df is not None:        # 合并既有 + 本轮新增
+            frames = [existing_df] + frames
+        df = pd.concat(frames, ignore_index=True).drop_duplicates(
+            ["code", "date"])
+        df.to_pickle(out_pkl)
+        print(f"\n[完成] 本轮新拉 {len(frames) - (1 if existing_df is not None else 0)}"
+              f" 只(跳过已有 {skip} 只) → 合并后 {df['code'].nunique()} 只 | "
+              f"{len(df):,} 行 | {df['date'].min().date()}~{df['date'].max().date()}")
     fj = FLOAT_JSON if not args.offset else FLOAT_JSON.with_suffix(
         f".{args.offset}.json")
     fj.write_text(json.dumps(floats), encoding="utf-8")
-    print(f"\n[完成] {len(frames)} 只 | {len(df):,} 行 | "
-          f"{df['date'].min().date()}~{df['date'].max().date()}")
     print(f"  日K  → {out_pkl}")
     print(f"  流通股本 {len(floats)} 只 → {fj}")
     part = out_pkl.with_suffix(".part.pkl")

@@ -1040,6 +1040,23 @@ def main() -> int:
                             key=lambda s: float(
                                 (s.get("ai") or {}).get("prob", 0) or 0),
                             reverse=True)[:max(quota, 0)]
+                    # ── 推送前二次校验(2026-09-16 新增): 实时价已达涨停价=已封死,
+                    #    半路打板必须封板前介入, 封死后散户买不到 → 推送纯浪费每日配额
+                    #    → 直接跳过且不占配额(查询失败=未知则不拦截, 避免误杀正常票)
+                    if fresh and do_push:
+                        _q = {q["code"]: q for q in _quotes_fallback(
+                            [s["code"] for s in fresh])}
+                        _sc = {s["code"] for s in fresh
+                               if (q := _q.get(s["code"])) is not None
+                               and float(q["price"]) >= float(
+                                   q["last_close"]) * 1.1 - 0.005}
+                        if _sc:
+                            for s in fresh:
+                                if s["code"] in _sc:
+                                    print(f"    → 已封死(涨停价 "
+                                          f"{float(_q[s['code']]['price']):.2f}), "
+                                          f"跳过 {s['code']} {s['name']} 不占配额")
+                            fresh = [s for s in fresh if s["code"] not in _sc]
                     state["buy_today"] = int(state.get("buy_today", 0)) + len(fresh)
                     log_pushed(fresh, now)      # 配额内=真正推送的, 线上展示用
                     print(f"    → AI 过滤: {before} → {len(fresh)} 只 "
