@@ -84,6 +84,11 @@ EARLY_MIN = 15.0
 VR_CAP = 10.0
 # 资金强度下限(预估全天换手率): 回测 30 天对照, 加此过滤 AI 增益 +0.06%→+1.47%
 MIN_STRENGTH = 0.10
+PROGRESS_CAP = 0.33        # 进度封顶(2026-09-16): vr/est_turn 均 ÷progress, 午后progress≈0.85
+                         # 把等效门槛抬到不可达→午后0候选进AI; 封顶后上午(progress<cap)不变,
+                         # 午后等效门槛降到约"1.3倍昨日量", 活票可进AI被判(推送仍由模型把关)
+AI_BATCH_CAP = 8            # 模型单批判定上限(2026-09-16): decide 单shot返回全部候选JSON,
+                         # 候选过多→生成超时/限流→整批丢判定(实测午后14只→全None); 主推优先, 观测按分截断
 # ── 2026-09-14 实盘149笔复盘定档, 试运行两周(至2026-09-28): ──
 # 量比≥4:  封板率 14%(vr<2)→46%(vr>8) 单调升, 低量比段拦掉
 # 成交额上限: 判定时已成交>12亿 封板率仅13%(全场明牌/抛压最大) — 反直觉但数据硬
@@ -422,6 +427,40 @@ def log_judgements(sigs: list[dict], now: datetime,
         pass
 
 
+def log_obs_judgements(sigs: list[dict], now: datetime,
+                       market: dict | None = None,
+                       push_min_pct: float = 8.0) -> None:
+    """观测带(6%~push_min_pct)判定快照 → ai_obs_judgements.jsonl(独立校准用)。
+
+    与 ai_judgements.jsonl 同源同格式, 仅过滤 pct<push_min_pct 的 borderline 票,
+    便于两周后单独统计"模型对 6~8% 票判定 vs 次日实际"的可靠度, 不污染主推校准。
+    ai_judgements.jsonl 仍记全量(主推+观测), 本文件是其中的观测带切片。
+    """
+    try:
+        obs = [s for s in sigs
+               if float(s.get("pct", 0) or 0) < push_min_pct]
+        if not obs:
+            return
+        m = market or {}
+        with open(STATE_DIR / "ai_obs_judgements.jsonl", "a") as f:
+            for s in obs:
+                a = s.get("ai") or {}
+                f.write(json.dumps({
+                    "ts": now.isoformat(timespec="seconds"),
+                    "code": s["code"], "name": s["name"],
+                    "action": a.get("action"), "prob": a.get("prob"),
+                    "reason": (a.get("reason") or "")[:120],
+                    "scores": a.get("scores") or {},
+                    "pct": round(float(s.get("pct", 0)), 2),
+                    "thr_pct": s.get("thr"),
+                    "amt_yi": s.get("amt_yi"), "vr": round(float(s.get("vr", 0)), 2),
+                    "n_limit": m.get("n_limit"), "pool_n": m.get("pool_n"),
+                    "max_st": m.get("max_st"),
+                }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def log_pushed(sigs: list[dict], now: datetime) -> None:
     """配额内、真正进入推送流程的 → ai_pushed.jsonl(线上展示用)。
 
@@ -451,6 +490,10 @@ def scan(api: TdxHq_API, pool: list[dict], progress: float,
     stat = {"got": 0, "limit": 0, "sealed": 0, "lowpct": 0, "lowvr": 0, "yizi": 0,
             "lowst": 0, "hiamt": 0, "x_high": 0, "x_mv": 0, "x_turn": 0}
     blocked = []                    # 被规则层拦截的候选(复盘用: 验证拦截是否正确)
+    # 进度封顶(2026-09-16): vr/est_turn 均 ÷progress, 午后 progress≈0.85 把等效门槛
+    # 抬到不可达(正常节奏票 vr≈1 过不了 min_vr)→ 午后0候选进AI。封顶到 PROGRESS_CAP:
+    # 上午(progress<cap)不变, 午后等效门槛≈降到"1.3倍昨日量", 活票可进AI被判。
+    progress_eff = min(progress, PROGRESS_CAP)
     limit_codes = []                # 今日实时涨停列表 → 情绪指标(次日算溢价)
     groups: dict[int, list] = {}
     for p in pool:
@@ -503,7 +546,7 @@ def scan(api: TdxHq_API, pool: list[dict], progress: float,
             stat["lowpct"] += 1
             continue
         amt = float(q.get("amount") or 0)
-        exp_amt = p["prev_amt"] * max(progress, 1 / TOTAL_MIN)
+        exp_amt = p["prev_amt"] * max(progress_eff, 1 / TOTAL_MIN)
         vr = amt / exp_amt if exp_amt > 0 else 0
         # 早盘失真保护: 时间进度折算出的 vr 不可采信 → 钳制 + 标记
         vr_na = progress * TOTAL_MIN < EARLY_MIN
@@ -519,8 +562,8 @@ def scan(api: TdxHq_API, pool: list[dict], progress: float,
         # 预估全天换手率 = 当日累计成交额 / (流通股本×现价) / 时间进度
         # 回测口径: ≥10%(p88分位)才送 AI; 盘中实时可算, 无前视
         fs = float(p.get("float_shares") or 0)
-        if fs > 0 and progress > 0.06:
-            est_turn = amt / (fs * price) / progress
+        if fs > 0 and progress_eff > 0.06:
+            est_turn = amt / (fs * price) / progress_eff
             if est_turn < MIN_STRENGTH:
                 stat["lowst"] += 1
                 blocked.append({"code": code, "name": p.get("name"),
@@ -823,7 +866,15 @@ def main() -> int:
     # 默认口径来自 backtest_banlu_intraday.py 的验证结论:
     #   10:30 时点 + 涨幅≥9% 且未涨停 → 年化 +225%(0.2%成本), 1%滑点下仍 +35%
     #   量比条件已证伪(前视且无效) → 默认关闭
-    ap.add_argument("--min-pct", type=float, default=8.0, help="最小涨幅(%)")
+    ap.add_argument("--min-pct", type=float, default=6.0,
+                    help="扫描最小涨幅(%): 校准期降到6以扩大分析样本(打开+6~8%盲区)")
+    ap.add_argument("--push-min-pct", type=float, default=8.0,
+                    help="推送最低涨幅(%): 扫描阈值可更低(扩分析样本), "
+                         "但仅≥此涨幅的 BUY 才进入推送(保护实盘质量)")
+    ap.add_argument("--obs-low", type=float, default=6.0,
+                    help="观测带下沿(%): 扫描下限, 独立于push-min-pct。 "
+                         "[obs-low,push-min-pct)区间的票进'观测带'——仅AI判定+记录, "
+                         "不推送/不占配额, 用于两周后校准分析(解决--min-pct被设高时盲区)")
     ap.add_argument("--min-ratio", type=float, default=0.0,
                     help="涨停幅度比例阈值(0=禁用, 主板统一10%)")
     ap.add_argument("--min-vr", type=float, default=4.0,
@@ -840,7 +891,9 @@ def main() -> int:
                     help="AI 放行硬阈值: prob≥此值才推送(回测基线封板率63.4%)")
     ap.add_argument("--daily-max", type=int, default=3,
                     help="每日最多推送笔数(全仓纪律: 分散≤3只)")
-    ap.add_argument("--cooldown", type=int, default=20, help="同票推送间隔(分钟)")
+    ap.add_argument("--cooldown", type=int, default=10,
+                    help="同票AI判定间隔(分钟): 仅去重防刷屏(骏亚式54次), "
+                         "不冻结——超过该间隔的SKIP→BUY翻转(如603276隔11分钟)仍会重判")
     ap.add_argument("--no-cache", action="store_true", help="强制重建股票池")
     ap.add_argument("--no-prev-amt", action="store_true",
                     help="跳过昨日成交额基准拉取(快速测试用, 量比可能失真)")
@@ -856,7 +909,8 @@ def main() -> int:
     sys.stdout = Tee(log_path)
     print(f"───── youzi_live 启动 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
           f"(interval={args.interval}s, 触发={args.trigger_times or '全天'}, "
-          f"阈值={args.min_pct}%, prob≥{args.min_prob}, 配额={args.daily_max}) ─────")
+          f"扫描{args.obs_low}%/推送{args.push_min_pct}%, 观测带{args.obs_low}~{args.push_min_pct}%(不推送), "
+          f"prob≥{args.min_prob}, 配额={args.daily_max}) ─────")
 
     pool = build_pool(args.pool, use_cache=not args.no_cache,
                       strict_prev=not args.no_prev_amt)
@@ -873,8 +927,10 @@ def main() -> int:
     hist: dict = {}
     if MB_DAILY.exists():        # 全市场日K: 连板数/距60日高/换手率指标底座
         try:
-            h = pd.read_pickle(MB_DAILY)[["code", "date", "close", "high",
-                                          "amount"]].sort_values(["code", "date"])
+            h = pd.read_pickle(MB_DAILY)
+            h["date"] = pd.to_datetime(h["date"])   # 兼容字符串日期(pkl 存为 str)
+            h = h[["code", "date", "close", "high",
+                   "amount"]].sort_values(["code", "date"])
             hist = {c: g for c, g in h.groupby("code")}
             last_d = h["date"].max().date()
             fresh = "OK" if last_d >= date.today() - timedelta(days=4) else "⚠过期, 建议跑 scripts/fetch_mainboard_daily.py"
@@ -884,6 +940,7 @@ def main() -> int:
     elif POOL_DAILY.exists():
         try:
             h = pd.read_pickle(POOL_DAILY)
+            h["date"] = pd.to_datetime(h["date"])   # 同上, 兼容字符串日期
             hist = {c: g.sort_values("date").reset_index(drop=True)
                     for c, g in h.groupby("code")}
             print(f"[池] 载入池内日K {len(hist)} 只 (降级)")
@@ -903,16 +960,25 @@ def main() -> int:
             pool.extend(build_pool(args.pool, use_cache=False))
             return
         prog = elapsed_min(now.time()) / TOTAL_MIN
-        sigs, st = scan(api, pool, prog, args.min_pct / 100, args.min_vr,
+        # 扫描下限=obs_low(独立, 默认6%): 6~8% 进候选作为'观测带'(仅判定记录不推送);
+        # push 仍要求 >= push_min_pct(8%) 保质量。不受 --min-pct 影响
+        sigs, st = scan(api, pool, prog,
+                        args.obs_low / 100, args.min_vr,
                         args.min_ratio, hist)
         log_blocked(st.get("blocked") or [], now)   # 拦截日志(复盘用)
         save_limit_list(st.get("limit_codes") or [], now)  # 涨停列表(次日情绪指标)
+        # 拆分: 主推候选(>=push_min_pct) / 观测候选([obs_low,push_min_pct): 仅判定记录不推送)
+        main_sig = [s for s in sigs if float(s.get("pct", 0) or 0) >= args.push_min_pct]
+        obs_sig = [s for s in sigs
+                   if args.obs_low <= float(s.get("pct", 0) or 0) < args.push_min_pct]
         print(f"[{now.strftime('%H:%M:%S')}] 有效 {st['got']:>4} | 涨停 {st['limit']:>3} | "
               f"封死 {st['sealed']:>3} | 一字 {st['yizi']} | 涨幅不足 {st['lowpct']} | "
               f"量比不足 {st['lowvr']} | 强度不足 {st['lowst']} "
               f"额超 {st['hiamt']} | "
               f"标(高位{st['x_high']} 盘{st['x_mv']} "
-              f"换手{st['x_turn']}) → **半路板 {len(sigs)} 只**")
+              f"换手{st['x_turn']}) → **半路板 {len(main_sig)} 只**"
+              + (f" | 观测 {len(obs_sig)} 只({args.obs_low:.0f}%~{args.push_min_pct:.0f}%, 不推送)"
+                 if obs_sig else ""))
         # 行情自愈: 交易时段内 0 只有效 = 连接已死(get_security_quotes 静默返回空)
         if st["got"] == 0 and in_session(now.time()):
             print("[warn] 行情断流(有效 0), 强制重连 ...")
@@ -923,15 +989,30 @@ def main() -> int:
             if not api.connect(TDX_HOST, TDX_PORT, time_out=5):
                 print("[warn] 重连失败, 下轮重试")
             return
-        for s in sigs[:10]:
+        # 候选标注 skip_bl/冷却状态(区分"仍满足过滤但已被AI闸挡掉的幽灵票")
+        _today = now.strftime("%Y-%m-%d")
+        _skip_bl = state.get("skip_blacklist", {}).get(_today, {})
+        _last_judge = state.get("last_judge", {})
+        def _tag(s):
+            if s["code"] in _skip_bl:
+                return " [拉黑]"
+            _l = _last_judge.get(s["code"])
+            if _l and (now - datetime.fromisoformat(_l)).total_seconds() < args.cooldown * 60:
+                return " [冷却]"
+            return ""
+        def _fmt(s, label):
             stk = s.get("streak")
             mv = f"{s['mv']:.0f}亿" if s.get("mv") else "—"
             tn = f"{s['turn']:.1f}%" if s.get("turn") else "—"
             dd = f"{s['dd']:.0f}%" if s.get("dd") is not None else "—"
-            print(f"    [{s['score']:>3}分] {s['code']} {s['name']:<8} {s['pct']:+6.2f}%  "
-                  f"量比{s['vr']:5.1f}  额{s['amt_yi']:>6.2f}亿  "
-                  f"{('首板' if stk == 0 else str(stk) + '板后') if stk is not None else '—':<6}"
-                  f" {mv:>7}  换手{tn:>6}  距高{dd:>4}")
+            return (f"    [{label}{s['score']:>3}分] {s['code']} {s['name']:<8} "
+                    f"{s['pct']:+6.2f}%  量比{s['vr']:5.1f}  额{s['amt_yi']:>6.2f}亿  "
+                    f"{('首板' if stk == 0 else str(stk) + '板后') if stk is not None else '—':<6}"
+                    f" {mv:>7}  换手{tn:>6}  距高{dd:>4}{_tag(s)}")
+        for s in main_sig[:10]:
+            print(_fmt(s, ""))
+        for s in obs_sig[:10]:
+            print(_fmt(s, "观测"))
 
         # 触发时点控制: 只在该下手的时点推(避免全天噪音)
         slot = nearest_slot(now, args.trigger_times)
@@ -952,13 +1033,28 @@ def main() -> int:
         for _old in [k for k in state["skip_blacklist"]
                      if k != now.strftime("%Y-%m-%d")]:
             del state["skip_blacklist"][_old]   # 只留当日, 防 state 膨胀
-        for s in sigs:
-            last = state["sent"].get(s["code"])
+        last_judge = state.setdefault("last_judge", {})
+        for s in (main_sig + obs_sig):
+            last = last_judge.get(s["code"])
+            # 冷却仅去重(防骏亚式54次重复刷屏), 不冻结: 超过冷却的SKIP→BUY翻转仍会重判
             if last and (now - datetime.fromisoformat(last)).total_seconds() < args.cooldown * 60:
                 continue
             if s["code"] in skip_bl:
-                continue                        # 结构性拒绝已判过, 当日不再重判
+                continue                        # 仅静态硬伤(暴雷/ST)当日拉黑; 题材/盘口时变不拉黑
             fresh.append(s)
+        # 模型单批上限(2026-09-16): decide 单 shot 返回全部候选JSON, 候选过多→
+        # 生成超时/限流→整批丢判定(实测午后14只→模型返回全None)。主推优先保推送,
+        # 观测按分截断, 总数封顶 AI_BATCH_CAP; 未进批的候选下轮(仍候选)再判, 不丢。
+        if len(fresh) > AI_BATCH_CAP:
+            _m = [s for s in fresh
+                  if float(s.get("pct", 0) or 0) >= args.push_min_pct]
+            _o = [s for s in fresh
+                  if float(s.get("pct", 0) or 0) < args.push_min_pct]
+            _m.sort(key=lambda s: -float(s.get("score", 0) or 0))
+            _o.sort(key=lambda s: -float(s.get("score", 0) or 0))
+            fresh = _m + _o[:max(0, AI_BATCH_CAP - len(_m))]
+            if len(fresh) > AI_BATCH_CAP:
+                fresh = fresh[:AI_BATCH_CAP]
         if not fresh:
             return
 
@@ -970,16 +1066,18 @@ def main() -> int:
                        "max_st": 3,
                        "emotion": emotion_block(now)}   # 接力赚钱效应(证据维度)
                 decs, aist = decide(fresh, mkt, now, api=api,
-                                    thr=args.min_pct,
+                                    thr=args.obs_low,
                                     min_prob=args.min_prob)
                 by = {d["code"]: d for d in decs}
                 for s in fresh:
                     s["ai"] = by.get(s["code"])
-                # 结构性拒绝 → 当日拉黑(理由含"无题材/暴雷/孤板"等盘中不变因素;
-                # 盘口类临时性拒绝不拉黑——委量比等盘口证据分钟级可翻转)
-                _STRUCT = ("无题材", "暴雷", "暴亏", "孤板", "杂毛",
-                           "孤立", "无联动", "业绩暴")
+                # 当日拉黑仅限静态硬伤(业绩暴雷/暴亏/ST/立案/退市等盘中不会变);
+                # 题材/孤板/杂毛/无联动属板块共振(时变): 别的票封板即可翻转, 不拉黑,
+                # 留待冷却后由模型重判(603276: 13:02 SKIP→13:13 板块联动成型→BUY且封板)
+                _STRUCT = ("暴雷", "暴亏", "业绩暴", "ST", "退市",
+                           "立案", "警示", "监管")
                 for d in decs:
+                    last_judge[d["code"]] = now.isoformat()  # 记录末次判定(BUY/SKIP都记, 冷却去重)
                     if d.get("action") != "SKIP":
                         continue
                     rs = str(d.get("reason", "")) + str(
@@ -987,6 +1085,7 @@ def main() -> int:
                     if any(k in rs for k in _STRUCT):
                         skip_bl[d["code"]] = d.get("reason", "")[:60]
                 log_judgements(fresh, now, mkt)
+                log_obs_judgements(fresh, now, mkt, args.push_min_pct)
                 for s in fresh:
                     a = s.get("ai") or {}
                     act = a.get("action", "无判定")
@@ -1009,7 +1108,8 @@ def main() -> int:
                     fresh = [s for s in fresh
                              if (s.get("ai") or {}).get("action") == "BUY"
                              and float((s.get("ai") or {}).get("prob", 0) or 0)
-                             >= args.min_prob]
+                             >= args.min_prob
+                             and float(s.get("pct", 0) or 0) >= args.push_min_pct]
                     # ── 起始推送时点(2026-09-15 复盘: 09:30-09:40 桶最差):
                     #    判定/日志照常落盘(校准数据不缺), 只是不推送不占配额 ──
                     st_t = parse_hhmm(args.start_time)
