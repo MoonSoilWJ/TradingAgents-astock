@@ -114,9 +114,18 @@ SYSTEM_SELL = """你是一位资金体量数亿的 A 股游资大佬, 深耕打�
        筹码没松, 杀的是恐慌盘, 持有等回流。
      · 判别锚: 看【此前扫描记录】的"现涨幅"序列 —— 一路向下且连低≥2 = 出货;
        下探后回升 / 回到前低之上是洗盘。单点急跌≠破位, 趋势确认才算。
+     · 硬规则(必遵, 2026-09-18 复盘教训): 若【趋势统计】显示"创日内新低:是" 且 "连低≥2",
+       即判定为出货(派发), sell_score 必须 ≥ 65、verdict=出货, 严禁判洗盘/死拿——
+       这是多扫描点确认的派发, 不是单点恐慌; 早盘纪律只约束"单点急杀未收回"的情形,
+       不约束"已连创新低"的确凿派发。若连低≥3 或 跌破早盘最低点, sell_score ≥ 75。
   2) 板块与情绪在帮你还是害你? 同题材/同身位票在跳水、涨停家数骤降、板块资金净流出,
      则"走弱"可信度高; 反之只是个股独立性抖动, 别被单点吓卖。
-  3) 位置与硬风险: 已处高位(10日>25% 或 5日>15%)且 长上影+跌破均价+近30分放量滞涨 = 派发高危;
+  3) 位置与硬风险:
+     · 高位派发(该走, 2026-09-18 复盘教训): 日内曾冲高>4% 或 现涨幅>3%, 但"距高点回落>2%"
+       且 (近30分涨跌为负 / 量能<0.8x萎缩 / 长上影跌破均价) —— 这是高位滞涨派发,
+       sell_score 50~70, verdict=出货/观望, 至少应部分止盈, 不得盲目洗盘死拿。
+     · 高位强势但 距涨停>3% 且 全天横盘缩量不创新高 → 观望, sell_score 40~60, 可减仓。
+     · 已处高位(10日>25% 或 5日>15%)且 长上影+跌破均价+近30分放量滞涨 = 派发高危;
      公告否认核心逻辑 / 逼近异动停牌线 / 龙虎榜机构高位净出货 = 硬风险, 该走。
   4) 连板保护(最高优先级): 现价距涨停 ≤3% 且未炸板(或炸板已回封), 无论浮盈多大必须持有——
      卖飞涨停板 = 重大失误。
@@ -151,6 +160,8 @@ def _pool_daily():
         return None
     try:
         d = pd.read_pickle(p)
+        d = d.drop_duplicates(subset=["date", "code"])  # 防 (date,code) 重复致 pivot 失败
+        d["date"] = pd.to_datetime(d["date"])
         piv = lambda v: d.pivot(index="date", columns="code", values=v).sort_index()
         close = piv("close")
         prev = close.shift(1)
@@ -161,6 +172,54 @@ def _pool_daily():
 
 
 _POOL = None
+
+_prev_close_cache = {}  # code -> {ds: 昨收} 内存缓存
+_hist_cache = {}  # (code, ds) -> 当日1分K DataFrame 内存缓存(日K权威值, 全天/长期有效)
+
+
+def prev_close_of(code: str, ds: str) -> float:
+    """返回 code 在 ds 前一交易日的收盘价(昨收), 用作计算 cur_pct 的权威 prev_close。
+    实时接口的 last_close 对某些票取错(致 cur_pct 爆炸成 ±1000%), 故统一走日K。
+    优先级: pool_daily.pkl 日K > akshare 日K 兜底。结果按 (code,ds) 缓存。
+    """
+    if code in _prev_close_cache and ds in _prev_close_cache[code]:
+        return _prev_close_cache[code][ds]
+    pc = 0.0
+    global _POOL
+    if _POOL is None:
+        _POOL = _pool_daily()
+    if _POOL is not None and code in _POOL["close"].columns:
+        s = _POOL["close"][code].dropna()
+        dt = pd.Timestamp(ds)
+        if dt in s.index:
+            i = s.index.get_loc(dt)
+            if i >= 1:
+                pc = float(s.iloc[i - 1])
+    if pc <= 0:  # 新浪日K 兜底, 失败重试(akshare 偶发限频); pool_daily 也不含卖侧持仓票
+        try:
+            import akshare as ak
+            import time
+            saved = {k: os.environ.pop(k) for k in list(os.environ) if "proxy" in k.lower()}
+            os.environ["no_proxy"] = os.environ["NO_PROXY"] = "*"
+            pre = "sh" if code[0] in "569" else "sz"
+            for _ in range(3):
+                try:
+                    d = ak.stock_zh_a_daily(symbol=pre + code, adjust="")
+                except Exception:
+                    d = None
+                if d is not None and len(d) >= 1:
+                    d["date"] = pd.to_datetime(d["date"])
+                    rows = d[d["date"] < pd.Timestamp(ds)]  # 严格早于评估日 = 昨收
+                    if len(rows) >= 1:
+                        pc = float(rows.iloc[-1]["close"])
+                        break
+                time.sleep(1)
+            os.environ.update(saved)
+        except Exception:
+            pass
+    if pc > 0:  # 仅成功时缓存, 失败不缓存以便下次重试
+        _prev_close_cache.setdefault(code, {})[ds] = pc
+    return pc
 
 
 def market_for_date(ds: str) -> dict:
@@ -426,6 +485,23 @@ def _snap_to_line(h: dict) -> str:
         h["t"], h["cur"], h["fh"], h.get("shape", ""), vt, h.get("score"), h.get("reason", ""))
 
 
+def _compact_history_lines(history: list) -> list:
+    """把逐点历史压缩为少量锚点(首点 + 等距抽样 + 末点 + 极值),
+    保留趋势信号但大幅削减 token(原每点一行≈47行 → 约8-10行)。"""
+    n = len(history)
+    if n <= 8:
+        return [_snap_to_line(h) for h in history]
+    idxs = {0, n - 1}
+    step = max(1, n // 6)          # 等距抽样 ~6 个
+    for i in range(step, n - 1, step):
+        idxs.add(i)
+    curs = [h.get("cur", 0) for h in history]
+    if curs:
+        idxs.add(int(min(range(n), key=lambda i: curs[i])))   # 最低点
+        idxs.add(int(max(range(n), key=lambda i: curs[i])))   # 最高点
+    return [_snap_to_line(history[i]) for i in sorted(idxs)]
+
+
 def _trend_summary(history: list, cur_now, fh_now) -> str:
     """从结构化历史算客观趋势统计, 让模型用趋势而非单点判破位。"""
     scores = [h["score"] for h in history if h.get("score") is not None]
@@ -465,9 +541,11 @@ def decide_sell(evidence: str, verbose: bool = True,
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
         if history:
-            hist_lines = [_snap_to_line(h) for h in history]
+            # 压缩历史: 原每扫描点一行(可达47行)既费 token 又无增量信息(分数常恒定),
+            # 改为"首点+等距抽样+末点+极值"锚点(~8-10行), 趋势信号由【趋势统计】承载。
+            hist_lines = _compact_history_lines(history)
             trend = _trend_summary(history, cur_now, fh_now)
-            hb = ("【此前扫描记录(早→晚, 看趋势)】\n" + "\n".join(hist_lines)
+            hb = ("【此前扫描记录(关键锚点, 早→晚)】\n" + "\n".join(hist_lines)
                   + "\n【趋势统计】" + trend + "\n\n")
             content = hb + evidence
         else:
@@ -596,6 +674,10 @@ def realtime(dry_run: bool = False) -> int:
             if entry <= 0:
                 continue
             df, price, prev = fetch_live_df(api, code)
+            # 昨收用日K权威值(prev_close_of); 实时接口 last_close 对某些票取错 → cur_pct 失真
+            pc = prev_close_of(code, now.strftime("%Y-%m-%d"))
+            if pc > 0:
+                prev = pc
             if prev <= 0:
                 rows.append({**pos, "status": "DATA_SHORT", "msg": "无行情"})
                 continue
@@ -721,31 +803,54 @@ def realtime(dry_run: bool = False) -> int:
 
 # ---------------- 回测模式 ----------------
 def fetch_hist_min_1(code: str, ds: str):
+    if (code, ds) in _hist_cache and _hist_cache[(code, ds)] is not None:
+        return _hist_cache[(code, ds)]
+    import time
     saved = {k: os.environ.pop(k) for k in list(os.environ) if "proxy" in k.lower()}
     pre = "sh" if code[0] in "569" else "sz"
     sym = pre + code
+    df = None
     try:
         import akshare as ak
         os.environ["no_proxy"] = os.environ["NO_PROXY"] = "*"
-        df = ak.stock_zh_a_minute(symbol=sym, period="1", adjust="")
-        if df is None or len(df) == 0:
-            return None
-        df["datetime"] = pd.to_datetime(df["day"])
-        df = df[df["datetime"].dt.strftime("%Y-%m-%d") == ds]
-        if len(df) == 0:
-            return None
-        d = df.rename(columns={"open": "open", "high": "high", "low": "low",
-                               "close": "close", "volume": "vol", "amount": "amt"})
-        d = d.reset_index(drop=True)
-        for c in ("open", "high", "low", "close", "vol", "amt"):
-            d[c] = pd.to_numeric(d[c], errors="coerce")
-        d["date"] = ds
-        return d[["datetime", "date", "open", "high", "low", "close", "vol", "amt"]]
+        for attempt in range(3):
+            d = ak.stock_zh_a_minute(symbol=sym, period="1", adjust="")
+            if d is None or len(d) == 0:
+                time.sleep(1.5)
+                continue
+            d["datetime"] = pd.to_datetime(d["day"])
+            d = d[d["datetime"].dt.strftime("%Y-%m-%d") == ds]
+            if len(d) == 0:
+                time.sleep(1.5)
+                continue
+            d = d.rename(columns={"open": "open", "high": "high", "low": "low",
+                                 "close": "close", "volume": "vol", "amount": "amt"})
+            d = d.reset_index(drop=True)
+            for c in ("open", "high", "low", "close", "vol", "amt"):
+                d[c] = pd.to_numeric(d[c], errors="coerce")
+            d["date"] = ds
+            df = d[["datetime", "date", "open", "high", "low", "close", "vol", "amt"]]
+            # 合理性校验: 1分K收盘应贴近昨收(±30% 容错, 覆盖新股/极端)。
+            # akshare 偶发限频会返回脏数据(价格错乱), 需重试。prev=0 时也按 df 自身跨度拦截。
+            prev = prev_close_of(code, ds)
+            span = (df["close"].max() - df["close"].min()) / max(df["close"].min(), 1e-9)
+            dirty = (prev > 0 and (df["close"].min() < prev * 0.7 or df["close"].max() > prev * 1.3)) or (prev <= 0 and span > 0.5)
+            if dirty:
+                print("    [warn] %s %s 1分K疑似脏数据(close %.2f~%.2f vs 昨收%.2f), 重试%d/3"
+                      % (code, ds, df["close"].min(), df["close"].max(), prev, attempt + 1))
+                df = None
+                time.sleep(1.5)
+                continue
+            break
+        if df is None:
+            print("    [warn] %s %s 1分K拉取失败/脏数据" % (code, ds))
     except Exception as exc:
         print("    [warn] %s %s 1分钟拉取失败: %s" % (code, ds, exc))
-        return None
     finally:
         os.environ.update(saved)
+    if df is not None:  # 仅成功时缓存, 脏/失败不缓存以便重试
+        _hist_cache[(code, ds)] = df
+    return df
 
 
 def _bt_cache():
@@ -755,7 +860,7 @@ def _bt_cache():
 
 def backtest(limit: int = 0, step: int = 10, max_hold: int = 2,
              dry_data: bool = False, thr: float = None, days: int = 0,
-             date: str = None) -> int:
+             date: str = None, show_io: bool = False, code: str = None) -> int:
     global _POOL
     _POOL = _pool_daily()
     thr = SELL_THR if thr is None else thr
@@ -775,6 +880,9 @@ def backtest(limit: int = 0, step: int = 10, max_hold: int = 2,
                      "sell_date": None})
     if limit:
         buys = buys[:limit]
+    if code:
+        allowed = set(code.split(","))
+        buys = [b for b in buys if b["code"] in allowed]
     if days:
         dts = [pd.Timestamp(b["buy_date"]) for b in buys]
         if dts:
@@ -798,22 +906,22 @@ def backtest(limit: int = 0, step: int = 10, max_hold: int = 2,
             eval_dates = [d for d in eval_dates if d == date]
             if not eval_dates:
                 continue
-        sold_at = None
+        first_sell = None
+        last_ok = None  # (评估日, 当日收盘) 最近一个有数据的评估日, 用于末日无数据时落盘
         for di, ds in enumerate(eval_dates):
             df = fetch_hist_min_1(code, ds)
             if df is None or len(df) == 0:
                 print("  [warn] %s %s 无1分钟数据, 跳过该日" % (code, ds))
                 continue
-            prev = float(df.iloc[0]["open"])
-            if _POOL is not None and code in _POOL["close"].columns:
-                s = _POOL["close"][code].dropna()
-                dt = pd.Timestamp(ds)
-                if dt in s.index:
-                    i = s.index.get_loc(dt)
-                    if i >= 1:
-                        prev = float(s.iloc[i - 1])
-            scans = pd.date_range("%s 09:30" % ds, "%s 10:00" % ds, freq="%dmin" % step)
-            first_sell = None
+            last_ok = (ds, float(df.iloc[-1]["close"]))
+            prev = prev_close_of(code, ds)
+            if prev <= 0:  # 最后兜底: 当日开盘
+                prev = float(df.iloc[0]["open"])
+            # 全天扫描(对齐实时 crontab: 09:30-14:55, 跳过午休 12:00-13:00),
+            # 频率由 --step 控制(默认 5 分钟, 与实时一致)
+            m1 = pd.date_range("%s 09:30" % ds, "%s 11:30" % ds, freq="%dmin" % step)
+            m2 = pd.date_range("%s 13:00" % ds, "%s 14:55" % ds, freq="%dmin" % step)
+            scans = m1.union(m2)
             history = []  # 该股该日的扫描历史(逐点累积, 传给模型看趋势)
             for t in scans:
                 sub = df[df["datetime"] <= t]
@@ -847,6 +955,16 @@ def backtest(limit: int = 0, step: int = 10, max_hold: int = 2,
                         "snapshot": raw["prompt"], "llm_response": raw["response"],
                     })
                     cache[key] = {"dec": dec, "snap": snap}
+                    if show_io:
+                        print("\n" + "=" * 72)
+                        print("[LLM-IO] %s %s %s  days_held=%d  cur=%.2f%%  fh=%.2f%%"
+                              % (code, b["name"], t.strftime("%H:%M"), di + 1,
+                                 meta[0], meta[1]))
+                        print("--- PROMPT ---")
+                        print(raw["prompt"])
+                        print("--- RESPONSE ---")
+                        print(raw["response"])
+                        print("=" * 72 + "\n")
                     if len(cache) % 20 == 0:
                         cache_path.write_text(json.dumps(cache, ensure_ascii=False))
                 if dec.get("action") == "SELL" and dec.get("sell_score", 0) >= thr:
@@ -859,8 +977,8 @@ def backtest(limit: int = 0, step: int = 10, max_hold: int = 2,
                 history.append(snap)
                 if len(history) > HISTORY_CAP:
                     history = history[-HISTORY_CAP:]
-            close_px = float(df.iloc[-1]["close"])
             if first_sell:
+                close_px = float(df.iloc[-1]["close"])
                 ai_pnl = (first_sell["price"] / entry - 1) * 100
                 close_pnl = (close_px / entry - 1) * 100
                 rows.append({"code": code, "name": b["name"], "buy_date": bd,
@@ -872,15 +990,16 @@ def backtest(limit: int = 0, step: int = 10, max_hold: int = 2,
                     code, b["name"], ds, first_sell["t"].strftime("%H:%M"),
                     first_sell["score"], first_sell["verdict"], ai_pnl, close_pnl))
                 break
-            else:
-                if di == len(eval_dates) - 1:
-                    close_pnl = (close_px / entry - 1) * 100
-                    rows.append({"code": code, "name": b["name"], "buy_date": bd,
-                                 "eval": ds, "ai_pnl": None, "close_pnl": close_pnl,
-                                 "sell_time": "未触发(持有收盘)", "sell_score": None,
-                                 "reason": ""})
-                    print("  %s %s: %s 未触发(持收 %+.2f%%)" % (code, b["name"], ds, close_pnl))
-        _ = sold_at
+        # 全程未触发且至少有一天有数据 → 按最近一个有数据的评估日收盘落盘
+        # (修复: 末日若为未来交易日无数据被跳过, 旧逻辑不落盘 → 报"无回测结果")
+        if not first_sell and last_ok is not None:
+            ds, close_px = last_ok
+            close_pnl = (close_px / entry - 1) * 100
+            rows.append({"code": code, "name": b["name"], "buy_date": bd,
+                         "eval": ds, "ai_pnl": None, "close_pnl": close_pnl,
+                         "sell_time": "未触发(持有收盘)", "sell_score": None,
+                         "reason": ""})
+            print("  %s %s: %s 未触发(持收 %+.2f%%)" % (code, b["name"], ds, close_pnl))
 
     cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
     df = pd.DataFrame(rows)
@@ -910,11 +1029,13 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="实时模式只打印不推送")
     ap.add_argument("--dry-data", action="store_true", help="回测只验数据覆盖, 不调模型")
     ap.add_argument("--limit", type=int, default=0, help="回测样本数上限")
-    ap.add_argument("--step", type=int, default=3, help="回测扫描间隔(分钟), 默认3")
+    ap.add_argument("--step", type=int, default=5, help="回测扫描间隔(分钟), 默认5(与实时crontab一致)")
     ap.add_argument("--days", type=int, default=0, help="回测只取最近N天买入(0=全部), 降成本用")
     ap.add_argument("--date", type=str, default=None, help="回测只评估该卖出日(YYYY-MM-DD), 单日验证用")
     ap.add_argument("--max-hold", type=int, default=2, help="回测最多持有交易日")
     ap.add_argument("--sell-thr", type=float, default=None, help="卖出阈值(覆盖默认70)")
+    ap.add_argument("--code", type=str, default=None, help="回测只跑指定代码(逗号分隔, 如 000700,002774)")
+    ap.add_argument("--show-io", action="store_true", help="回测时控制台打印每次大模型入参(prompt)/出参(response)")
     args = ap.parse_args()
     global SELL_THR
     if args.sell_thr:
@@ -931,7 +1052,7 @@ def main() -> int:
         if args.backtest:
             rc = backtest(limit=args.limit, step=args.step, max_hold=args.max_hold,
                           dry_data=args.dry_data, thr=args.sell_thr, days=args.days,
-                          date=args.date)
+                          date=args.date, show_io=args.show_io, code=args.code)
         else:
             rc = realtime(dry_run=args.dry_run)
     finally:

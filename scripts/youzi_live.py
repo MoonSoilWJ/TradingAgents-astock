@@ -488,6 +488,33 @@ def log_pushed(sigs: list[dict], now: datetime) -> None:
         pass
 
 
+def sells_today_count(ds: str) -> int:
+    """统计 youzi_sold.jsonl 中 sell_date==ds 的卖出份数。
+
+    卖出释放资金 → 同等额度补回推送配额(2026-09-18 需求):
+    解决"早盘推满 daily_max 发 → 尾盘卖了有资金却无额度"的错配。
+    含 AI 卖(SELL_AI)与手动卖(同写入此文件)——凡释放资金的卖出都计。
+    """
+    p = STATE_DIR / "youzi_sold.jsonl"
+    if not p.exists():
+        return 0
+    n = 0
+    try:
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            if str(o.get("sell_date")) == ds:
+                n += 1
+    except Exception:
+        return 0
+    return n
+
+
 def scan(api: TdxHq_API, pool: list[dict], progress: float,
          min_pct: float, min_vr: float, min_ratio: float = 0.6,
          hist: dict | None = None) -> tuple[list[dict], int]:
@@ -1129,22 +1156,14 @@ def main() -> int:
                         print(f"    → 未到起始推送时点 {args.start_time} "
                               f"(判定已记录, 不推送/不占配额)")
                         return
-                    quota = args.daily_max - int(state.get("buy_today", 0))
-                    # ── 配额择优(P2, 2026-09-14): 10:00 前累计最多用 daily_max-1 个
-                    #    配额, 保留 1 个给 10:00 后(早盘急拉组次日溢价最差)。
-                    #    ⚠ 旧版 bug: 只看当前轮 quota>1, 第三轮 quota=1 时放行,
-                    #    10点前照样烧满 3 发(2026-09-15 实际发生) → 改按累计数判断
-                    if now.time() < dtime(10, 0):
-                        am_cap = args.daily_max - 1      # 早盘累计上限
-                        used = int(state.get("buy_today", 0))
-                        if used + len(fresh) > am_cap:
-                            fresh = sorted(
-                                fresh,
-                                key=lambda s: float(
-                                    (s.get("ai") or {}).get("prob", 0) or 0),
-                                reverse=True)[:max(am_cap - used, 0)]
-                            print(f"    (早盘累计上限 {am_cap}, "
-                                  f"保留 1 配额给 10:00 后)")
+                    # ── 卖出发酵配额(2026-09-18): 每日推送配额与当日已卖份数挂钩,
+                    #    卖出释放资金 → 同等额度补回, 解决"早盘推满→尾盘卖了有资金却无额度"。
+                    #    上限 daily_max(默认3); 没卖则不给额度(不推), 卖1份补1份(上限内)。
+                    sold_today = sells_today_count(now.strftime("%Y-%m-%d"))
+                    quota = max(0, min(args.daily_max, sold_today)
+                                - int(state.get("buy_today", 0)))
+                    # ── 2026-09-18 修订: 取消"早盘保留 1 额度给午后"的纪律。
+                    #    全天任意时刻都用同一 quota(由当日已卖份数决定), 不预留、不按时段收窄。
                     if len(fresh) > max(quota, 0):
                         # 同轮多笔: 按 prob 降序取(同轮内择优, 不再先到先得)
                         fresh = sorted(
@@ -1172,8 +1191,8 @@ def main() -> int:
                     state["buy_today"] = int(state.get("buy_today", 0)) + len(fresh)
                     log_pushed(fresh, now)      # 配额内=真正推送的, 线上展示用
                     print(f"    → AI 过滤: {before} → {len(fresh)} 只 "
-                          f"(prob≥{args.min_prob:.0f}, 今日配额剩 "
-                          f"{args.daily_max - int(state.get('buy_today', 0))})")
+                          f"(prob≥{args.min_prob:.0f}, 今日已卖{sold_today}份/"
+                          f"配额剩{quota})")
                 else:
                     print("    → AI 调用失败, 本次不推送(宁可错过)")
                     fresh = []

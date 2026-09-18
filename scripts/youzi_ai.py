@@ -476,23 +476,65 @@ def orderbook_block(api, code: str, thr_pct: float) -> str:
         return ""
 
 
+_MA_CACHE: dict = {}
+
 def ma_block(code: str) -> str:
-    """均线形态(池日K缓存, 无外网开销): 多头排列承接强, 空头排列反弹抛压重。"""
+    """均线形态: 多头排列承接强, 空头排列反弹抛压重。
+
+    数据源: 优先 pool_daily.pkl(活跃池前600, 无外网); 若代码不在池中(如非活跃票)
+    或池为空, 回退 akshare 个股日K(直连, 绕代理)算 MA —— 保证均线永远有数据,
+    不再出现"缺失"(2026-09-18 复盘: 000700/002774 不在活跃池致均线全缺失)。
+    进程内按 code 缓存(均线日内不变), 避免每扫描点重复联网。
+    """
+    if code in _MA_CACHE:
+        return _MA_CACHE[code]
     try:
+        g = None
         p = Path.home() / ".tradingagents" / "youzi" / "pool_daily.pkl"
-        if not p.exists():
+        if p.exists():
+            try:
+                d = pd.read_pickle(p)
+                g = d[d["code"] == code].sort_values("date")["close"].astype(float)
+            except Exception:
+                g = None
+        if g is None or len(g) < 20:
+            # 回退: akshare 个股日K
+            import time as _t
+            saved = {k: os.environ.pop(k) for k in list(os.environ)
+                     if "proxy" in k.lower()}
+            os.environ["no_proxy"] = os.environ["NO_PROXY"] = "*"
+            try:
+                import akshare as ak
+                pre = "sh" if code[0] in "569" else "sz"
+                for _ in range(3):
+                    try:
+                        dd = ak.stock_zh_a_daily(symbol=pre + code, adjust="")
+                    except Exception:
+                        dd = None
+                    if dd is not None and len(dd) >= 20:
+                        g = pd.to_numeric(dd["close"], errors="coerce").dropna()
+                        break
+                    _t.sleep(1)
+            finally:
+                os.environ.update(saved)
+        if g is None or len(g) < 20:
             return ""
-        d = pd.read_pickle(p)
-        g = d[d["code"] == code].sort_values("date")["close"].astype(float)
+        # 统一为"按日期升序的纯 float 序列", 末尾=最新
+        if isinstance(g.index, pd.DatetimeIndex):
+            g = g.sort_index(ascending=True)
+        g = pd.Series([float(x) for x in g.dropna()], dtype="float64")
         if len(g) < 20:
             return ""
         ma5, ma10, ma20 = g.tail(5).mean(), g.tail(10).mean(), g.tail(20).mean()
         last = float(g.iloc[-1])
         if ma5 > ma10 > ma20 and last > ma5:
-            return "均线多头(5>10>20, 价上5日线) — 承接强"
-        if ma5 < ma10 < ma20:
-            return "均线空头(5<10<20) — 反弹抛压重"
-        return "均线纠缠 — 方向未明"
+            res = "均线多头(5>10>20, 价上5日线) — 承接强"
+        elif ma5 < ma10 < ma20:
+            res = "均线空头(5<10<20) — 反弹抛压重"
+        else:
+            res = "均线纠缠 — 方向未明"
+        _MA_CACHE[code] = res
+        return res
     except Exception:
         return ""
 
