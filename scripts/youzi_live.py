@@ -95,6 +95,12 @@ AI_BATCH_CAP = 8            # 模型单批判定上限(2026-09-16): decide 单sh
 # 复盘要点: ①被拦的BUY封板率是否仍低(是=过滤正确) ②通过的封板率应≈45% ③prob区分度
 MAX_AMT_YI = 12.0          # 成交额上限(亿); 0=关闭
 
+# 买入主信号(2026-09-18 校准结论: prob>75 且 盘口≥7 且 位置≥7)
+# 双高(盘口+位置)是封板率最强正向维度, prob 仅作辅助卡线; 候选池只推 3 笔,
+# 放宽 prob 不会增加推送数, 故定 75 而非 70。
+MIN_PAN = 7   # 盘口子分下限(高分组封板率 51% vs 低分组 40%)
+MIN_POS = 7   # 位置子分下限(高分组 51% vs 低分组 37%)
+
 EXCLUDE_KW = ("ST", "退", "N ", "*")
 
 
@@ -1108,8 +1114,14 @@ def main() -> int:
                     fresh = [s for s in fresh
                              if (s.get("ai") or {}).get("action") == "BUY"
                              and float((s.get("ai") or {}).get("prob", 0) or 0)
-                             >= args.min_prob
-                             and float(s.get("pct", 0) or 0) >= args.push_min_pct]
+                             > args.min_prob
+                             and (s.get("ai") or {}).get("scores", {}).get("盘口", 0) >= MIN_PAN
+                             and (s.get("ai") or {}).get("scores", {}).get("位置", 0) >= MIN_POS
+                             and float(s.get("pct", 0) or 0) >= args.push_min_pct
+                             # ── 同票当日只推一次(修复 000700 重复推送):
+                             #    state["sent"] 跨轮/跨重启持久化, 已推过的票直接剔除,
+                             #    既不重复打扰也不占用每日配额 ──
+                             and s["code"] not in state.get("sent", {})]
                     # ── 起始推送时点(2026-09-15 复盘: 09:30-09:40 桶最差):
                     #    判定/日志照常落盘(校准数据不缺), 只是不推送不占配额 ──
                     st_t = parse_hhmm(args.start_time)
