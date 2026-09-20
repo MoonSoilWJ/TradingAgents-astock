@@ -64,6 +64,13 @@ SOLD = POSITIONS.parent / "youzi_sold.jsonl"
 SELL_ALERTS = POSITIONS.parent / "youzi_sell_ai_alerts.json"
 YOUZI = POSITIONS.parent
 SELL_THR = float(os.getenv("YOUZI_SELL_THR") or "70")
+# 早盘硬规则: 09:30-09:59 代码级禁止任何卖出(LLM 早盘高噪音窗口结构性弱点兜底, 已验证避免地板割肉)
+EARLY_HOLD_START = 9 * 60 + 30
+EARLY_HOLD_END = 10 * 60
+def _is_early_hold(tm) -> bool:
+    """tm: datetime/Timestamp, 返回是否处于早盘禁止卖出时段 09:30-09:59"""
+    m = tm.hour * 60 + tm.minute
+    return EARLY_HOLD_START <= m < EARLY_HOLD_END
 COST = 0.002
 SELL_HIST = YOUZI / "youzi_sell_ai_history.json"  # 实时跨进程累积的扫描历史
 HISTORY_CAP = 60  # 历史块最多保留最近 N 个扫描点(降本且保留趋势)
@@ -105,19 +112,27 @@ SYSTEM_SELL = """你是一位资金体量数亿的 A 股游资大佬, 深耕打�
 
 【你的目标】给每只持仓打"卖出意愿分" sell_score(0-100, 越高越该卖)。
 
-【你是来"做判断"的, 不是来"对清单"的】别机械找"硬信号"。像真人交易员一样, 综合下面所有信息,
-在脑中走完四步, 再给分与判词:
-  1) 这是"出货"还是"洗盘"?
-     · 出货(该走): 全天持续创日内新低、每次反抽都弱且高度递减、低点不断下移、无明显承接——
-       这是资金在派发, 越早走越好, 别等"更像"。
-     · 洗盘(该留): 盘中急杀但很快收回、或低开后横住企稳、或早盘弱但午后被买起——
-       筹码没松, 杀的是恐慌盘, 持有等回流。
-     · 判别锚: 看【此前扫描记录】的"现涨幅"序列 —— 一路向下且连低≥2 = 出货;
-       下探后回升 / 回到前低之上是洗盘。单点急跌≠破位, 趋势确认才算。
-     · 硬规则(必遵, 2026-09-18 复盘教训): 若【趋势统计】显示"创日内新低:是" 且 "连低≥2",
-       即判定为出货(派发), sell_score 必须 ≥ 65、verdict=出货, 严禁判洗盘/死拿——
-       这是多扫描点确认的派发, 不是单点恐慌; 早盘纪律只约束"单点急杀未收回"的情形,
-       不约束"已连创新低"的确凿派发。若连低≥3 或 跌破早盘最低点, sell_score ≥ 75。
+【你是来"做判断"的, 不是来"对清单"的】别机械找"硬信号"。像真人交易员一样, 综合所有信息在脑中走完四步再给分。
+  1) 这是"出货"还是"洗盘"? 用【票型 + 量能 + 反弹结构】三维判别, 单点跌幅不重要:
+     · 票型(看【炸板/封板/回封】【开盘涨停】字段):
+        - 打板票(曾封板/炸板过): 炸板后不回封 + 下跌放量 = 打板失败 = 真派发(封板资金出逃), 该走;
+        - 非板票(半路板失败/低开, 全天未碰涨停): 早盘急跌多为低开洗盘或弱势, 不轻易走。
+     · 量能(看【下跌放量比】): >1.3 = 资金在派发(跌时有人砸); <1 = 缩量洗盘(杀恐慌盘、无人接)。
+       注: 早盘开盘量大, 纯比>1.3 易虚高, 早盘判派发需比>1.5 才确认。
+     · 反弹结构(看【日内轨迹】现涨幅序列 + 距日内低回升 + 站均价):
+        - 洗盘 = 急跌后已收回前低/站回均价/跌幅收窄(筹码没松, 杀的是恐慌盘, 持有等回流);
+        - 派发 = 连创新低且每次反抽弱(反弹不过前低)/无量承接(资金持续出)。
+     · 出货铁证(满足其一才判出货; 不确定则持有——卖出层是安全网, 次日开盘走是主纪律):
+       (a)【打板失败·派发】: 打板票 炸板不回封 且 下跌放量比>1.3 且 已浮亏 → sell_score≥70(仅 10:00 后生效, 早盘代码级禁止卖出);
+          ❗开盘一字炸板例外: 若【开盘涨停=是·开板换手】(今开即涨停后炸板), 视为强势开板换手/洗盘, 早盘一律不判出货(sell_score≤40); 仅尾盘(14:30后)仍未回封且放巨量(比>2)才考虑走。
+       (b)【持续派发】: 连低≥3 且 反弹不过前低(每次反抽高度递减) 且 下跌放量比>1.3 且 已跌破早盘最低点 → sell_score≥65;
+          ❗(b)仅 10:00 后生效, 早盘(09:30-10:00)一律不认(b)——非板票早盘急跌/连低多为洗盘, 不割。
+       连低≥4 或 跌破早盘最低点超2% → 升档≥75(仅午后)。
+     · 洗盘铁证(满足必持有, sell_score≤40): 连低但 下跌缩量(<1) 且 急跌后已收回前低/站回均价;
+       或半路板次日 浮盈状态(现价≥成本)早盘抖动 —— 锁利留给尾盘或次日开盘, 绝不早盘割赢家。
+     · 浮盈保护: 现价≥成本(仍浮盈)时, 任何早盘急跌/炸板一律视为洗盘(除非命中(a)打板失败且放量派发, 且非开盘一字炸板), sell_score≤40。
+     · 时间纪律(代码级硬规则, 非你判断): 早盘 09:30-10:00 脚本强制 HOLD, 无论你给多高分都不卖出(这是 LLM 在早盘高噪音窗口结构性弱点的兜底, 已验证避免地板割肉)。你的卖出判断只在 10:00 后生效。
+       10:00 后: (a)打板失败派发 与 (b)持续派发 均有效, 正常按规则给分。
   2) 板块与情绪在帮你还是害你? 同题材/同身位票在跳水、涨停家数骤降、板块资金净流出,
      则"走弱"可信度高; 反之只是个股独立性抖动, 别被单点吓卖。
   3) 位置与硬风险:
@@ -127,15 +142,15 @@ SYSTEM_SELL = """你是一位资金体量数亿的 A 股游资大佬, 深耕打�
      · 高位强势但 距涨停>3% 且 全天横盘缩量不创新高 → 观望, sell_score 40~60, 可减仓。
      · 已处高位(10日>25% 或 5日>15%)且 长上影+跌破均价+近30分放量滞涨 = 派发高危;
      公告否认核心逻辑 / 逼近异动停牌线 / 龙虎榜机构高位净出货 = 硬风险, 该走。
-  4) 连板保护(最高优先级): 现价距涨停 ≤3% 且未炸板(或炸板已回封), 无论浮盈多大必须持有——
-     卖飞涨停板 = 重大失误。
+  4) 连板保护(最高优先级·覆盖一切): 现价距涨停 ≤3% 且 (封死 或 仅炸板一次已回封), 无论浮盈多大 sell_score≤30 必须持有——
+     卖飞涨停板 = 重大失误; 此规则优先于上述所有出货铁证。
 
 【默认持有是"先验", 不是"铁律"】半路板次日波动大, 平开低开小高开早盘急跌浮亏都属常态,
-没有上述走弱证据时默认持有(sell_score ≤40)。但"持续创新低的阴跌"是覆盖先验的强证据——
+没有上述走弱证据时默认持有(sell_score ≤40)。但"持续创新低的阴跌"是覆盖先验的强证据(午后生效)——
 它不是单点恐慌, 是多扫描点确认的派发, 该走就走。
 
-【早盘纪律·铁律】09:30-10:00 只认两类才允许判"出货": (a)炸板不回封; (b)多扫描点已确认持续新低——连低≥2 且 每次反抽都弱(高度递减/无量承接)。
-除此之外的"单点急杀"(哪怕单根跌幅很大)未收回前一律不判出货: 急杀后收回前低/横住企稳=洗盘, 必须持有; 早盘最忌把"洗盘急杀"当"出货"割在地板。
+【早盘硬规则·代码保障】09:30-10:00 任何情况不卖出(已代码级拦截, 你的 sell_score 此时被忽略, 不必费心判断)。你只需对 10:00 后情形负责: 真·盘中打板失败(a) 与 持续创新低阴跌(b) 都是有效卖点——非板票低开急跌若午后确认(b)持续派发也走, 但早盘一律持有。
+早盘最忌把"缩量洗盘急杀""赢家早盘抖动""非板票低开""开盘一字炸板(尾盘常回封)"当"出货"割在地板——现由代码彻底禁止, 你无需在此纠结。
 
 【输出】严格 JSON, 对每只持仓:
 [{"id":"A","action":"SELL","sell_score":82,
@@ -143,8 +158,7 @@ SYSTEM_SELL = """你是一位资金体量数亿的 A 股游资大佬, 深耕打�
   "scores":{"盘口":8,"资金":6,"题材":3,"趋势":7,"情绪":5,"风险":9},
   "reason":"40字内: 为何判出货/洗盘 + 依据; 无则写持有理由"}]
 action: SELL=该卖 / HOLD=继续拿。
-verdict 必须与 action 自洽: 早盘(09:30-10:00)单点急杀时 verdict 必须为 洗盘/观望, 不得为 出货; verdict=出货 时 action 应为 SELL 且 sell_score≥60;
-verdict=洗盘/观望 时 action 应为 HOLD 且 sell_score≤45。
+verdict 必须与 action 自洽: verdict=出货 时 action 应为 SELL 且 sell_score≥60; verdict=洗盘/观望 时 action 应为 HOLD 且 sell_score≤45。
 sell_score 须与六维子分自洽: 六维普遍无走弱时 sell_score 必须低; 只有强走弱(尤其炸板/硬风险)才拉高。
 每次判断都会被记录与实际走势比对校准——给分必须经得起复盘。
 """
@@ -304,16 +318,34 @@ def intraday_metrics(df: pd.DataFrame, t: datetime, prev_close: float,
     chg = price / prev_close - 1
     from_high = (price / day_high - 1) if day_high > 0 else 0
     touched = (d["high"] >= limit_up - 0.005).any()
+    # —— 炸板/封板结构(打板接力核心信号, 从1分K逐根判定) ——
+    is_seal = (d["close"] >= limit_up - 0.01)
+    blast = 0
+    prev_s = None
+    last_blast_i = -1
+    for i in range(len(d)):
+        s = bool(is_seal.iloc[i])
+        if prev_s is not None and prev_s and not s:  # 封→开 = 炸板
+            blast += 1
+            last_blast_i = i
+        prev_s = s
     if touched and not sealed:
-        zha = "是(曾触板后开板)"
+        zha = "是(炸板%d次)" % blast if blast else "是(曾触板后开板)"
     elif not sealed:
         zha = "否"
     else:
         zha = "封死"
-    if sealed:
-        seal_txt = "封死"
-    else:
-        seal_txt = "未封"
+    seal_txt = "封死" if sealed else "未封"
+    # 末尾连续封板分钟数(封板时长近似)
+    sealed_run = 0
+    for i in range(len(d) - 1, -1, -1):
+        if bool(is_seal.iloc[i]):
+            sealed_run += 1
+        else:
+            break
+    blast_ago = "%d分前" % (len(d) - 1 - last_blast_i) if last_blast_i >= 0 else "—"
+    re_sealed = ("是" if (blast > 0 and sealed)
+                 else ("否" if blast > 0 else "无炸板"))
 
     def _ago(minutes):
         tt = t - timedelta(minutes=minutes)
@@ -327,18 +359,30 @@ def intraday_metrics(df: pd.DataFrame, t: datetime, prev_close: float,
     rec = d.tail(30)
     pre = d.iloc[:-30] if len(d) > 30 else d
     vr = (rec["amt"].sum() / pre["amt"].sum()) if pre["amt"].sum() > 0 else None
+    # 下跌段量能结构(出货 vs 洗盘判别): 近30分 下跌Bar量 / 上涨Bar量
+    r0 = rec["close"].shift(1)
+    up_vol = float(rec.loc[rec["close"] >= r0, "vol"].sum())
+    dn_vol = float(rec.loc[rec["close"] < r0, "vol"].sum())
+    dv_ratio = (dn_vol / up_vol) if up_vol > 0 else (9.9 if dn_vol > 0 else 1.0)
     pnl = (price / entry - 1) if entry > 0 else None
     d5s = "%+.1f%%" % (d5 * 100) if d5 is not None else "?"
     d15s = "%+.1f%%" % (d15 * 100) if d15 is not None else "?"
     d30s = "%+.1f%%" % (d30 * 100) if d30 is not None else "?"
     vrs = "%.1fx" % vr if vr is not None else "?"
+    dvrs = "%.1fx%s" % (dv_ratio, " (下跌放量·派发嫌疑)" if dv_ratio > 1.3 else "")
+    # 均价与反弹结构(洗盘/派发判别核心): 急跌后站回均价/距日内低回升 = 洗盘; 一路新低 = 派发
+    _vol = d["vol"].astype(float)
+    vwap = float((d["close"] * _vol).sum()) / max(float(_vol.sum()), 1e-9)
+    vs_vwap = (price / vwap - 1) if vwap > 0 else 0.0
+    reb = (price / day_low - 1) if day_low > 0 else 0.0
     pnls = "%+.1f%%" % (pnl * 100) if pnl is not None else "?"
     parts = [
         "现价 %.2f | 今开 %+.1f%% | 现涨幅 %+.1f%%" % (price, gap * 100, chg * 100),
-        "日内高 %.2f 低 %.2f | 距高点 %+.1f%%" % (day_high, day_low, from_high * 100),
-        "涨停价 %.2f %s | 炸板 %s" % (limit_up, seal_txt, zha),
+        "日内高 %.2f 低 %.2f | 距高点 %+.1f%% | 距日内低回升 %+.1f%%" % (day_high, day_low, from_high * 100, reb * 100),
+        "涨停价 %.2f %s | 炸板 %s | 开盘涨停:%s" % (limit_up, seal_txt, zha, ("是·开板换手" if (float(d.iloc[0]["open"]) >= limit_up - 0.01 and blast > 0) else "否")),
+        "封板时长 %d分 | 末次炸板 %s | 回封:%s | 站均价 %+.1f%%" % (sealed_run, blast_ago, re_sealed, vs_vwap * 100),
         "delta 5/15/30分: %s/%s/%s" % (d5s, d15s, d30s),
-        "近30分量能 %s" % vrs,
+        "近30分量能 %s | 下跌放量比 %s" % (vrs, dvrs),
         "浮盈亏 %s (成本 %.2f)" % (pnls, entry),
     ]
     return " | ".join(parts)
@@ -708,7 +752,8 @@ def realtime(dry_run: bool = False) -> int:
                 rows.append({**pos, "status": "AI_FAIL", "msg": "模型调用失败"})
                 continue
             pnl = (price / entry - 1) * 100 if price > 0 else None
-            sell = dec["action"] == "SELL" and dec["sell_score"] >= SELL_THR
+            # 早盘硬规则: 09:30-10:00 代码级禁止卖出, 不论 AI 给多高分
+            sell = (not _is_early_hold(now)) and dec["action"] == "SELL" and dec["sell_score"] >= SELL_THR
             rows.append({**pos, "status": "SELL" if sell else "HOLD",
                          "sell_score": dec["sell_score"], "reason": dec["reason"],
                          "price": price, "pnl": pnl, "days_held": days_held,
@@ -967,7 +1012,8 @@ def backtest(limit: int = 0, step: int = 10, max_hold: int = 2,
                         print("=" * 72 + "\n")
                     if len(cache) % 20 == 0:
                         cache_path.write_text(json.dumps(cache, ensure_ascii=False))
-                if dec.get("action") == "SELL" and dec.get("sell_score", 0) >= thr:
+                # 早盘硬规则: 09:30-10:00 代码级禁止卖出, 不论 AI 给多高分
+                if (not _is_early_hold(t)) and dec.get("action") == "SELL" and dec.get("sell_score", 0) >= thr:
                     price = float(sub.iloc[-1]["close"])
                     first_sell = {"t": t, "price": price,
                                   "score": dec.get("sell_score"),
