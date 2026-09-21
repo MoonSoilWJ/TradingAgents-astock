@@ -20,10 +20,12 @@ sell_score >= SELL_THR(默认70) 即触发卖出提醒(推钉钉), 不代下单�
   python3 scripts/youzi_sell_ai.py --backtest --limit 3 --step 30   # 小样本先验证
   python3 scripts/youzi_sell_ai.py --backtest --dry-data            # 只验数据覆盖, 不调模型
 
-crontab(已部署: 每5分一轮, 覆盖 09:30->14:55, 跳过午休 12:00-13:00; 日志 /tmp/youzi_sell_ai.log,
-  另每次判定快照写 sell_judgements.jsonl 供复盘):
+crontab(已部署: 每5分一轮, 覆盖 09:30->11:25 + 13:00->14:55, 午休 11:30-13:00 跳过(代码层也硬跳过, 不调 LLM 省 token); 日志 /tmp/youzi_sell_ai.log,
+ 另每次判定快照写 sell_judgements.jsonl 供复盘):
  30-55/5 9 * * 1-5 .../youzi_sell_ai.py
- */5 10,11,13,14 * * 1-5 .../youzi_sell_ai.py
+ */5 10 * * 1-5 .../youzi_sell_ai.py
+ 0-25/5 11 * * 1-5 .../youzi_sell_ai.py
+ */5 13,14 * * 1-5 .../youzi_sell_ai.py
 """
 from __future__ import annotations
 
@@ -71,6 +73,14 @@ def _is_early_hold(tm) -> bool:
     """tm: datetime/Timestamp, 返回是否处于早盘禁止卖出时段 09:30-09:59"""
     m = tm.hour * 60 + tm.minute
     return EARLY_HOLD_START <= m < EARLY_HOLD_END
+
+# 午休硬跳过: 11:30-13:00 A股午间休市, 行情不动、无需盯盘, 跳过 LLM 评估省 token
+NOON_PAUSE_START = 11 * 60 + 30
+NOON_PAUSE_END = 13 * 60
+def _is_noon_pause(tm) -> bool:
+    """tm: datetime/Timestamp, 返回是否处于午休跳过时段 11:30-13:00"""
+    m = tm.hour * 60 + tm.minute
+    return NOON_PAUSE_START <= m < NOON_PAUSE_END
 COST = 0.002
 SELL_HIST = YOUZI / "youzi_sell_ai_history.json"  # 实时跨进程累积的扫描历史
 HISTORY_CAP = 60  # 历史块最多保留最近 N 个扫描点(降本且保留趋势)
@@ -594,9 +604,16 @@ def decide_sell(evidence: str, verbose: bool = True,
             content = hb + evidence
         else:
             content = evidence
+        import concurrent.futures as _cf
         llm = _client().get_llm()
-        resp = llm.invoke([SystemMessage(content=SYSTEM_SELL),
-                           HumanMessage(content=content)])
+        try:
+            with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+                _fut = _ex.submit(llm.invoke,
+                                  [SystemMessage(content=SYSTEM_SELL),
+                                   HumanMessage(content=content)])
+                resp = _fut.result(timeout=90)
+        except _cf.TimeoutError:
+            raise TimeoutError("LLM invoke timeout 90s")
         text = getattr(resp, "content", None) or str(resp)
     except Exception as exc:
         print("[AI] 调用失败(%s: %s)" % (type(exc).__name__, str(exc)[:100]))
@@ -691,6 +708,9 @@ def load_alerts() -> dict:
 
 def realtime(dry_run: bool = False) -> int:
     now = datetime.now()
+    if _is_noon_pause(now):
+        print("[跳过] 午休 11:30-13:00, 不评估卖出(省 token)")
+        return 0
     holds = load_positions()
     if not holds:
         print("[跳过] 无持仓记录")
