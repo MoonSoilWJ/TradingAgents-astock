@@ -221,3 +221,4 @@ __marimo__/
 # Code intelligence indexes (local-only artifacts, regenerable)
 .codegraph/
 .codebase-memory/
+state_backup/

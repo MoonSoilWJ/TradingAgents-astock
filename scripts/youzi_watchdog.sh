@@ -10,12 +10,15 @@
 # crontab: */5 9-14 * * 1-5 /Users/licheng/文档/TradingAgents-astock/scripts/youzi_watchdog.sh
 
 STALE=${1:-600}
-DIR=/Users/licheng/文档/TradingAgents-astock
+# 可用环境变量覆盖(迁移到其他电脑时无需改本文件):
+#   YOUZI_DIR=仓库根目录  YOUZI_PYTHON=python3 绝对路径(crontab 里 export)
+DIR=${YOUZI_DIR:-/Users/licheng/文档/TradingAgents-astock}
+PYTHON=${YOUZI_PYTHON:-/usr/local/bin/python3}
 LOG=/tmp/youzi.log
 WLOG=/tmp/youzi_watchdog.log
 PAT="youzi_live.py --ai"
 # 不传 --trigger-times: 其 argparse 默认就是 ""(全天), 传空串在 $CMD 展开时会被当字面量 ""
-CMD="/usr/local/bin/python3 scripts/youzi_live.py --ai --min-pct 6 --push-min-pct 6 --min-prob 75 --start-time 09:40"
+CMD="$PYTHON scripts/youzi_live.py --ai --min-pct 6 --push-min-pct 6 --min-prob 75 --start-time 09:40"
 
 NOW=$(date +%s)
 MT=$(stat -f %m "$LOG" 2>/dev/null || echo 0)
