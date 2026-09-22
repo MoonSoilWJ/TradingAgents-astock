@@ -19,6 +19,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
+
 from pytdx.hq import TdxHq_API
 from pytdx.params import TDXParams
 
@@ -74,7 +76,7 @@ def fetch_daily(api: TdxHq_API, code: str, n: int = 15):
     try:
         import requests
         pre = "sh" if code[0] in "569" else "sz"
-        u = (f"https://web.ifzq.gtimg.cn/appstock/app/kline/kline"
+        u = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
              f"?param={pre}{code},day,,,{n},qfq")
         r = requests.get(u, headers={"User-Agent": "Mozilla/5.0"},
                          timeout=10, proxies={"http": None, "https": None})
@@ -109,15 +111,10 @@ def tx_close(code: str) -> tuple[float, float]:
         return 0.0, 0.0
 
 
-def backfill_blocked() -> int:
-    """被规则层拦截的候选(blocked_log.jsonl) → 回填当日封板状态。
-
-    两周复盘(2026-09-28)的核心数据: 验证「被拦的确实差」——
-    若被拦票封板率接近/超过通过的, 说明过滤误杀, 应撤。
-    """
+def _load_blocked() -> list[dict]:
     bf = STATE / "blocked_log.jsonl"
     if not bf.exists():
-        return 0
+        return []
     recs = []
     for line in bf.read_text(encoding="utf-8").splitlines():
         if not line.strip():
@@ -128,23 +125,69 @@ def backfill_blocked() -> int:
                 recs.append(o)
         except Exception:
             pass
+    return recs
+
+
+def backfill_blocked() -> int:
+    """被规则层拦截的候选(blocked_log.jsonl) → 回填当日封板状态。
+
+    两周复盘(2026-09-28)的核心数据: 验证「被拦的确实差」——
+    若被拦票封板率接近/超过通过的, 说明过滤误杀, 应撤。
+
+    ⚠ 2026-09-22 修复: 旧逻辑对【历史】记录也用 tx_close(=最新价)判封板,
+    且跳过当天记录 → 每条记录都被第二天以错误价格回填。改为:
+    当天记录(15:20 后收盘已定型)用 tx_close; 历史记录用当日日K收盘。
+    已被旧逻辑污染(有 seal 但无 seal_src)的记录在本轮自动重算修复。
+    """
+    recs = _load_blocked()
     if not recs:
         return 0
+    api = TdxHq_API()
+    api_ok = api.connect(*TDX, time_out=5)
+    cache: dict = {}
     n = 0
-    for r in recs:
-        if r.get("seal") is not None:
-            continue
-        code, dt = r.get("code", ""), r["ts"][:10]
-        if dt >= datetime.now().strftime("%Y-%m-%d"):
-            continue            # 当天的收盘后再判
-        px, pv = tx_close(code)
-        if px > 0 and pv > 0:
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        for r in recs:
+            if r.get("seal") is not None and r.get("seal_src"):
+                continue                    # 已按正确口径回填过
+            code, dt = r.get("code", ""), r["ts"][:10]
+            if dt == today:                 # 15:20 后 tx_close 即当天最终收盘
+                px, pv = tx_close(code)
+                if px > 0 and pv > 0:
+                    r["seal"] = bool(px / pv - 1 >= 0.098)
+                    r["seal_src"] = "tx_today"
+                    n += 1
+                continue
+            if code not in cache:
+                cache[code] = fetch_daily(api if api_ok else None, code)
+            d = cache[code]
+            if d is None or len(d) < 2:
+                continue
+            dates = d["date"].tolist()
+            if dt not in dates:
+                continue
+            i = dates.index(dt)
+            if i < 1:
+                continue
             # 拦截记录无 thr_pct, 主板默认10%; pct 字段是判定时涨幅
-            r["seal"] = bool(px / pv - 1 >= 0.098)
+            r["seal"] = bool(float(d.iloc[i]["close"])
+                             / float(d.iloc[i - 1]["close"]) - 1 >= 0.098)
+            r["seal_src"] = "daily"
             n += 1
+    finally:
+        if api_ok:
+            try:
+                api.disconnect()
+            except Exception:
+                pass
     if n:
-        bf.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n"
-                              for r in recs))
+        import os as _os
+        bf = STATE / "blocked_log.jsonl"
+        tmp = str(bf) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in recs))
+        _os.replace(tmp, bf)
     return n
 
 
@@ -301,6 +344,29 @@ def report() -> str:
         out.append("")
     elif scored:
         out += [f"【维度子分校准】已有 {len(scored)} 条, 样本满 8 条后出报告", ""]
+
+    # ── 机械闸误杀率 · 分日趋势(2026-09-22 新增, 复盘建议⑤) ──
+    # 被拦票当日封板占比越低 = 闸门越准; 若持续 >25% 需评估撤闸/调参。
+    blk = [r for r in _load_blocked() if r.get("seal") is not None]
+    if blk:
+        byday: dict = {}
+        for r in blk:
+            byday.setdefault(r["ts"][:10], []).append(r)
+        out += ["【机械闸误杀率 · 分日趋势】(被拦票当日封板占比, 越低=闸门越准)",
+                f"{'日期':<11}{'拦截':>4}{'误杀':>4}{'误杀率':>8}"]
+        for d in sorted(byday)[-10:]:
+            rs = byday[d]
+            k = sum(1 for r in rs if r.get("seal"))
+            out.append(f"{d:<11}{len(rs):>4}{k:>4}{k / len(rs) * 100:>7.1f}%")
+        bywhy: dict = {}
+        for r in blk:
+            bywhy.setdefault(str(r.get("why", "?")).split("(")[0], []).append(r)
+        out.append("  按原因(全样本, 误杀/总数): " + " | ".join(
+            f"{w}:{sum(1 for r in rs if r.get('seal'))}/{len(rs)}"
+            for w, rs in sorted(bywhy.items(), key=lambda x: -len(x[1]))))
+        out.append("")
+    else:
+        out += ["【机械闸误杀率】暂无已回填拦截记录", ""]
 
     out.append(f"【次日收益 · {len(recs)} 条已回填】")
     if not recs:

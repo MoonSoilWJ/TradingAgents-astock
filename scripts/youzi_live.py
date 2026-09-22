@@ -69,6 +69,15 @@ POOL_DAILY = STATE_DIR / "pool_daily.pkl"     # 池内日K(回退用)
 MB_DAILY = STATE_DIR / "mb_daily.pkl"         # 全市场主板日K(连板数/距高点/昨日额)
 MB_FLOAT = STATE_DIR / "mb_float.json"        # 全市场流通股本
 STATE_FILE = STATE_DIR / "signals.json"
+
+
+def _atomic_json(path: Path, obj) -> None:
+    """原子写 JSON(2026-09-22 新增): 状态文件被 sell_ai(每分钟)与本进程并发读写,
+    write_text 直接覆盖会让并发读者拿到半截 JSON(11:16 卖侧 days_held=2 误判
+    疑似此竞态)。tmp + os.replace: 读者要么看到旧完整版, 要么新完整版。"""
+    tmp = Path(str(path) + ".tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
+    _os.replace(tmp, path)
 POSITIONS = STATE_DIR / "positions.json"      # 已推送信号 → 次日卖出提醒用
 LOG_DIR = STATE_DIR / "logs"                  # 每日运行日志(一天一个文件)
 
@@ -95,6 +104,11 @@ _LAST_AI_TS = None          # 上次真正调 AI 的时刻(常驻进程内节流
 AI_CHUNK = int(_os.getenv("YOUZI_AI_CHUNK") or "8")
 AI_BATCH_CAP = 8            # 兼容旧引用; 判定分批粒度见 AI_CHUNK
                          # 候选过多→生成超时/限流→整批丢判定(实测午后14只→全None); 主推优先, 观测按分截断
+
+# 秒级盘口(fast_book.json)新鲜度上限(2026-09-22 复盘修订): 哨兵 cron 每 2 分钟一轮,
+# 旧值 30s 只覆盖 ~1/4 判定轮 → 75% 的轮次 AI 根本看不到秒级证据。
+# 放宽到覆盖整个哨兵周期(150s), 数据龄随注入透出, 让模型与复盘都能感知证据新旧。
+FAST_BOOK_MAX_AGE = int(_os.getenv("YOUZI_FAST_BOOK_MAX_AGE") or "150")  # 秒
 # ── 2026-09-14 实盘149笔复盘定档, 试运行两周(至2026-09-28): ──
 # 量比≥4:  封板率 14%(vr<2)→46%(vr>8) 单调升, 低量比段拦掉
 # 成交额上限: 判定时已成交>12亿 封板率仅13%(全场明牌/抛压最大) — 反直觉但数据硬
@@ -1223,7 +1237,9 @@ def main() -> int:
             if s["code"] in _skip_bl:
                 return " [拉黑]"
             _l = _last_judge.get(s["code"])
-            if _l and (now - datetime.fromisoformat(_l)).total_seconds() < args.cooldown * 60:
+            # last_judge 兼容两种格式: 新 {"a","p","t"} / 旧 iso 字符串
+            _lt = _l.get("t") if isinstance(_l, dict) else _l
+            if _lt and (now - datetime.fromisoformat(_lt)).total_seconds() < args.cooldown * 60:
                 return " [冷却]"
             return ""
         def _fmt(s, label):
@@ -1260,14 +1276,37 @@ def main() -> int:
                      if k != now.strftime("%Y-%m-%d")]:
             del state["skip_blacklist"][_old]   # 只留当日, 防 state 膨胀
         last_judge = state.setdefault("last_judge", {})
+        # ── 重启恢复(2026-09-22, 600640 事故): 进程挂掉时"已判 BUY 未推送"的判定
+        #    随内存蒸发。last_judge 现为 {action, prob, ts} 且每轮原子落盘 →
+        #    15 分钟内 BUY 且 prob≥门槛且从未推送过的票: 豁免冷却/拉黑, 本轮重判补推。
+        pending = {}
+        for _c, _r in last_judge.items():
+            if not (isinstance(_r, dict) and _r.get("a") == "BUY"
+                    and float(_r.get("p") or 0) >= args.min_prob
+                    and _c not in state.get("sent", {})):
+                continue
+            try:
+                if (now - datetime.fromisoformat(_r["t"])).total_seconds() < 900:
+                    pending[_c] = _r
+            except Exception:
+                pass
         for s in (main_sig + obs_sig):
             last = last_judge.get(s["code"])
+            _lt = last.get("t") if isinstance(last, dict) else last
             # 冷却仅去重(防骏亚式54次重复刷屏), 不冻结: 超过冷却的SKIP→BUY翻转仍会重判
-            if last and (now - datetime.fromisoformat(last)).total_seconds() < args.cooldown * 60:
+            if (_lt and s["code"] not in pending and
+                    (now - datetime.fromisoformat(_lt)).total_seconds()
+                    < args.cooldown * 60):
                 continue
-            if s["code"] in skip_bl:
+            if s["code"] in skip_bl and s["code"] not in pending:
                 continue                        # 仅静态硬伤(暴雷/ST)当日拉黑; 题材/盘口时变不拉黑
             fresh.append(s)
+        if pending:
+            _hit = [s["code"] for s in (main_sig + obs_sig) if s["code"] in pending]
+            if _hit:
+                print("    [恢复] 重启前 BUY 未推送: "
+                      + ", ".join(f"{c}(prob={pending[c].get('p')})" for c in _hit)
+                      + " → 豁免冷却重判补推")
         # ── 2026-09-22 修订: 不再截断候选数 ──
         # 原逻辑把候选砍到 AI_BATCH_CAP=8(主推优先+观测带补齐), 理由是单批过多会超时。
         # 但截断会漏票(午后候选常 14+ 只, 被砍掉的正是规则分靠后的潜在好票)。
@@ -1284,15 +1323,30 @@ def main() -> int:
         except Exception:
             pass
         # 注入秒级盘口摘要(30秒动量/卖一量变化/触板次数): 让 AI 看"变化率"而非单点快照
+        # 2026-09-22 复盘修订: 新鲜度窗口 30s→FAST_BOOK_MAX_AGE, 且注入必须可观测 —
+        # 快照龄/命中数落日志, 每只候选命中的证据原文随判定行落日志(复盘可见模型看到了什么)。
+        _fb_hits, _fb_age = 0, None
         try:
             fb = json.loads((STATE_DIR / "fast_book.json").read_text(encoding="utf-8"))
-            if time.time() - float(fb.get("ts") or 0) < 30:
+            _fb_age = time.time() - float(fb.get("ts") or 0)
+            if 0 <= _fb_age < FAST_BOOK_MAX_AGE:
                 for s in fresh:
                     b = (fb.get("data") or {}).get(s["code"])
                     if b:
-                        s["fast_book"] = _fmt_fast_book(b)
+                        _fb_s = _fmt_fast_book(b)
+                        if _fb_s:
+                            s["fast_book"] = _fb_s
+                            s["fast_book_age"] = int(_fb_age)
+                            _fb_hits += 1
         except Exception:
             pass
+        if fresh:
+            if _fb_age is None:
+                print("    [秒级盘口] fast_book.json 缺失/异常, 本轮无秒级注入")
+            elif not (0 <= _fb_age < FAST_BOOK_MAX_AGE):
+                print(f"    [秒级盘口] 快照龄{int(_fb_age)}s ≥ {FAST_BOOK_MAX_AGE}s, 本轮不注入(哨兵未跑?)")
+            else:
+                print(f"    [秒级盘口] 快照龄{int(_fb_age)}s, 注入 {_fb_hits}/{len(fresh)} 只候选")
 
         # ── 影子模式(2026-09-22): 额度已用尽时降频+限量调 AI ──
         # 额度 0 → 判了也推不出去, 但 AI 判定要落盘(ai_judgements.jsonl)作为两周后
@@ -1360,15 +1414,26 @@ def main() -> int:
                 _STRUCT = ("暴雷", "暴亏", "业绩暴", "ST", "退市",
                            "立案", "警示", "监管")
                 for d in decs:
-                    last_judge[d["code"]] = now.isoformat()  # 记录末次判定(BUY/SKIP都记, 冷却去重)
+                    # last_judge 升级(2026-09-22): 存 {action, prob, ts} 供重启恢复;
+                    # 配合下方每轮原子落盘, 进程挂掉不再丢判定(旧行为只推时写盘)
+                    last_judge[d["code"]] = {"a": d.get("action", "SKIP"),
+                                             "p": d.get("prob", 0),
+                                             "t": now.isoformat()}
                     if d.get("action") != "SKIP":
                         continue
                     rs = str(d.get("reason", "")) + str(
                         (d.get("judgement") or {}).get("题材", ""))
-                    if any(k in rs for k in _STRUCT):
-                        skip_bl[d["code"]] = d.get("reason", "")[:60]
+                    _hit = [k for k in _STRUCT if k in rs]
+                    if _hit:
+                        # 2026-09-22 复盘修订: 拉黑必须留痕 — 落盘与日志都带命中的结构词。
+                        # 否则无法事后复盘是否误伤(如 reason 干净但 runtime 题材文本
+                        # 含结构词的情况, 今天根本查不出 002259 为何被拉黑)
+                        skip_bl[d["code"]] = (str(d.get("reason", ""))[:45]
+                                              + "｜命中:" + ",".join(_hit))[:60]
+                        print(f"    [拉黑] {d['code']} 命中结构词: {','.join(_hit)}")
                 log_judgements(fresh, now, mkt)
                 log_obs_judgements(fresh, now, mkt, args.push_min_pct)
+                _atomic_json(STATE_FILE, state)   # 每轮落盘 last_judge/buy_today(重启恢复依赖)
                 for s in fresh:
                     a = s.get("ai") or {}
                     act = a.get("action", "无判定")
@@ -1384,6 +1449,10 @@ def main() -> int:
                             f"{k}:{v}" for k, v in jm.items())
                     if a.get("reason"):
                         head += f"\n        → {a['reason']}"
+                    if s.get("fast_book"):
+                        # 复盘可见性(2026-09-22): 展示实际注入 prompt 的秒级盘口证据原文
+                        head += (f"\n        [秒级盘口·已注入prompt·数据龄"
+                                 f"{int(s.get('fast_book_age') or 0)}s] {s['fast_book']}")
                     print(head)
                 if aist == "ok":
                     # AI 正常判定(含"全放弃"=空列表) → 严格执行三道闸
@@ -1466,10 +1535,9 @@ def main() -> int:
             if slot != "ALL":
                 fired.append(key)
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            # 只在这里写一次且必须带 encoding: 之前循环内有一次无 encoding 的写入,
+            # 只在这里写一次(2026-09-22 起改原子写; 另 AI 判定轮也有落盘兜底):
             # 抛异常后中断 → sent/buy_today 都未落盘 → 冷却失效(同票重复推) + 配额超发
-            STATE_FILE.write_text(json.dumps(state, ensure_ascii=False),
-                                  encoding="utf-8")
+            _atomic_json(STATE_FILE, state)
             if ok:                                   # 记录持仓 → 次日卖出提醒
                 pos = load_json(POSITIONS)
                 day = now.strftime("%Y-%m-%d")
@@ -1480,8 +1548,7 @@ def main() -> int:
                         "pct": s["pct"], "score": s["score"],
                         "vr": s["vr"], "time": now.strftime("%H:%M"),
                     }
-                POSITIONS.write_text(json.dumps(pos, ensure_ascii=False),
-                                     encoding="utf-8")
+                _atomic_json(POSITIONS, pos)   # 原子写: 防 sell_ai 每分钟轮询读到半截文件
         elif fresh:
             print(f"    → {len(fresh)} 只待推送 (加 --push 发送)")
 

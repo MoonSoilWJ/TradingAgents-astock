@@ -6,10 +6,14 @@
 # 根因: llm.invoke 无超时(已在 youzi_ai.invoke_llm 加 90s 硬超时); 本脚本是第二道防线:
 # 只要日志超过 STALE 秒没更新, 就判定"假活"并重启。
 #
-# 用法: ./youzi_watchdog.sh [STALE_SEC=600]
+# 用法: ./youzi_watchdog.sh [STALE_SEC=1200]
 # crontab: */5 9-14 * * 1-5 /Users/licheng/文档/TradingAgents-astock/scripts/youzi_watchdog.sh
+#
+# STALE 600→1200(2026-09-22 复盘): 当日 10:15/10:36/11:09 三次拉起, 其中至少一次
+# 误杀了健康进程(10:15 那次 09:00 进程 09:42 批次后挂起属真挂; 但 AI 批次+
+# 证据构建最坏 ~6 分钟, 600s 阈值贴得太近)。1200s = 2× 最坏批次时长, 真挂仍会被杀。
 
-STALE=${1:-600}
+STALE=${1:-1200}
 # 可用环境变量覆盖(迁移到其他电脑时无需改本文件):
 #   YOUZI_DIR=仓库根目录  YOUZI_PYTHON=python3 绝对路径(crontab 里 export)
 DIR=${YOUZI_DIR:-/Users/licheng/文档/TradingAgents-astock}

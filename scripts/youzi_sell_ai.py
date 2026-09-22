@@ -107,6 +107,17 @@ def _is_noon_pause(tm) -> bool:
     return NOON_PAUSE_START <= m < NOON_PAUSE_END
 COST = 0.002
 SELL_HIST = YOUZI / "youzi_sell_ai_history.json"  # 实时跨进程累积的扫描历史
+
+
+def _atomic_json(path, obj) -> None:
+    """原子写 JSON(2026-09-22 新增): 本脚本每分钟一轮 + youzi_live 进程并发
+    读写 SELL_HIST/POSITIONS/SELL_ALERTS, write_text 直接覆盖会让并发读者拿到
+    半截 JSON(11:16 days_held=2 误判疑似此因)。tmp + os.replace 原子替换。"""
+    import os as _os
+    tmp = str(path) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False)
+    _os.replace(tmp, path)
 HISTORY_CAP = 60  # 历史块最多保留最近 N 个扫描点(降本且保留趋势)
 LOG_DIR = YOUZI / "logs"          # 每日运行日志(与买侧同目录, 一天一个文件)
 _LOCK_FP = None                   # 单实例锁文件句柄(见 _acquire_lock)
@@ -1077,7 +1088,7 @@ def realtime(dry_run: bool = False) -> int:
         # 只保留当日的扫描历史: hkey 已含评估日, 旧 key 自然被丢弃(防跨日污染 + 防文件膨胀)
         _ds = now.strftime("%Y-%m-%d")
         hist_all = {k: v for k, v in hist_all.items() if k.endswith("|" + _ds)}
-        SELL_HIST.write_text(json.dumps(hist_all, ensure_ascii=False), encoding="utf-8")
+        _atomic_json(SELL_HIST, hist_all)
     except Exception:
         pass
 
@@ -1089,7 +1100,7 @@ def realtime(dry_run: bool = False) -> int:
             if not dry_run:
                 alerts[key] = True
     if not dry_run and pending:
-        SELL_ALERTS.write_text(json.dumps(alerts, ensure_ascii=False), encoding="utf-8")
+        _atomic_json(SELL_ALERTS, alerts)
 
     _settle = now.hour * 60 + now.minute >= 14 * 60 + 50
     # 强制了结(时间纪律)不等 14:50: 当日必走, 命中即记账 → 立刻把打板额度还给你。
@@ -1129,7 +1140,7 @@ def realtime(dry_run: bool = False) -> int:
                     raw[day].pop(code)
                     if not raw[day]:
                         raw.pop(day, None)
-            POSITIONS.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+            _atomic_json(POSITIONS, raw)
         except Exception:
             pass
 

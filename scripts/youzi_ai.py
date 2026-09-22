@@ -88,10 +88,13 @@ prob 达标({MINP}+)的候选往往多于名额。
 
 【输出】严格 JSON, 对【每只候选】都给出判定(BUY 或 SKIP):
 [{"id":"A","action":"BUY","prob":80,
-  "scores":{"盘口":7,"资金":8,"题材":3,"基本面":5,"首触":8,"位置":6},
-  "judgement":{"盘口":"...","资金":"...","题材":"...","基本面":"...","首触":"...","风险":"..."},
+  "scores":{"盘口":7,"资金":8,"题材":3,"基本面":5,"位置":6},
+  "judgement":{"盘口":"...","资金":"...","题材":"...","基本面":"...","风险":"..."},
   "reason":"40字内结论"}]
-scores = 六个维度的子分(各 1-10 分, 按你对该维度证据的评估打分)。
+scores = 五个维度的子分(各 1-10 分, 按你对该维度证据的评估打分)。
+【首触不评分 — 2026-09-22 消融】首触/时段维度经 635 条实盘校准为【反向】
+(打高分封板率反而更低, 且几乎给所有票都打 7-8 分, 零区分度), 已从评分中剔除。
+证据里的"首触形态"仅作背景叙述, 禁止据此抬高或压低 prob。
 prob = 你对"今天封住板且明日有溢价"的真实概率估计(0-100), 是六维子分的综合。
 【prob 与子分必须自洽】维度间可以有主次与交互 — 某维度极强/极差可以主导判断,
 这是操盘直觉, 优于机械加权平均; 但组合必须能自圆其说:
@@ -681,8 +684,12 @@ def build_prompt(sigs: list[dict], snap: dict, market: dict,
         dd = f"{s['dd']:.0f}%" if s.get("dd") is not None else "?"
         vr_txt = (f"{(s.get('vr') or 0):.1f}(早盘折算失真, 不采信)"
                   if s.get("vr_na") else f"{(s.get('vr') or 0):.1f}")
-        fbk = (f"  秒级盘口(近60秒, 哨兵实测): {s['fast_book']}\n"
-               if s.get("fast_book") else "")
+        if s.get("fast_book"):
+            _fa = s.get("fast_book_age")
+            fbk = (f"  秒级盘口(哨兵实测, 数据龄{int(_fa) if _fa is not None else '?'}秒): "
+                   f"{s['fast_book']}\n")
+        else:
+            fbk = ""
         lines.append(
             f"- {s['id']}: +{s['pct']:.1f}% 未封板 | {board} | 题材: "
             f"{str(snap.get('topics', {}).get(s['code'], '无标注'))[:36]}\n"
@@ -693,7 +700,7 @@ def build_prompt(sigs: list[dict], snap: dict, market: dict,
             f"  均线: {s.get('ma') or '缺失'}\n"
             f"  基本面: {s.get('fin') or '缺失'}\n"
             f"  资金面: {str(s.get('fund'))[:200] or '缺失'}\n"
-            f"  首触形态: {s.get('stance') or '缺失'}\n"
+            f"  首触形态(已证伪反向维度, 仅背景, 禁止计分): {s.get('stance') or '缺失'}\n"
             f"  公告异动: {s.get('notice') or '缺失'}\n"
             f"  龙虎榜: {s.get('lhb') or '近两周未上榜(或数据缺失)'}")
         rsi, p5, p10 = s.get("rsi"), s.get("pct5"), s.get("pct10")
