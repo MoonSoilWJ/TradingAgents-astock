@@ -87,7 +87,13 @@ MIN_STRENGTH = 0.10
 PROGRESS_CAP = 0.33        # 进度封顶(2026-09-16): vr/est_turn 均 ÷progress, 午后progress≈0.85
                          # 把等效门槛抬到不可达→午后0候选进AI; 封顶后上午(progress<cap)不变,
                          # 午后等效门槛降到约"1.3倍昨日量", 活票可进AI被判(推送仍由模型把关)
-AI_BATCH_CAP = 8            # 模型单批判定上限(2026-09-16): decide 单shot返回全部候选JSON,
+# ── 影子模式(额度用尽时): 判定仍要落盘做校准样本, 但降频+限量省 token/CPU ──
+SHADOW_AI_INTERVAL = int(_os.getenv("YOUZI_SHADOW_AI_INTERVAL") or "300")  # 秒
+_LAST_AI_TS = None          # 上次真正调 AI 的时刻(常驻进程内节流)
+
+# 不再作为"每轮候选上限"(2026-09-22 去掉, 避免漏票), 只作为整批失败时的拆分重试粒度
+AI_CHUNK = int(_os.getenv("YOUZI_AI_CHUNK") or "8")
+AI_BATCH_CAP = 8            # 兼容旧引用; 判定分批粒度见 AI_CHUNK
                          # 候选过多→生成超时/限流→整批丢判定(实测午后14只→全None); 主推优先, 观测按分截断
 # ── 2026-09-14 实盘149笔复盘定档, 试运行两周(至2026-09-28): ──
 # 量比≥4:  封板率 14%(vr<2)→46%(vr>8) 单调升, 低量比段拦掉
@@ -515,13 +521,195 @@ def sells_today_count(ds: str) -> int:
     return n
 
 
+def positions_held_count(exclude_today: bool = True) -> int:
+    """未平仓份数(positions.json), 已排除 youzi_sold.jsonl 中记过卖出的票。
+
+    2026-09-22 新增: 给配额提供"仓位口径"。排除已卖记录是为了兼容"手动卖票但未清
+    positions.json"的情况 —— 否则那只票会永久占着额度。
+
+    exclude_today=True(默认, 配额用): 只数"今日之前买入"的遗留持仓。
+    今日买入的份数由 state["buy_today"] 单独计, 否则会双重扣减
+    (今日买的票同时在 positions 里 → held 已含, 再减一次 buy_today)。
+    """
+    _today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        raw = json.loads(POSITIONS.read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+    sold = set()
+    p = STATE_DIR / "youzi_sold.jsonl"
+    try:
+        if p.exists():
+            for line in p.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                sold.add((str(o.get("buy_date")), str(o.get("code"))))
+    except Exception:
+        pass
+    n = 0
+    for day, holds in (raw or {}).items():
+        if exclude_today and str(day) >= _today:
+            continue                      # 今日买入的由 buy_today 计, 避免双重扣减
+        for code in (holds or {}):
+            if (str(day), str(code)) in sold:
+                continue
+            n += 1
+    return n
+
+
+def quota_state(daily_max: int, daily_new: int, buy_today: int,
+                ds: str) -> tuple[int, int, int]:
+    """返回 (quota, 今日已卖份数, 今日之前遗留持仓份数)。
+
+    2026-09-22 引入"梯队滚动"双层限额(用户方案A):
+      · 总仓空位 slot_cap = daily_max - 遗留持仓 - 今日已买   ← 仓位上限
+      · 每日新买  new_cap  = daily_new  - 今日已买            ← 每天最多新开几只
+    quota = min(两者)。分层的目的: T+1 14:30 强制了结后, 若每日新买=总仓(=3),
+    会形成"今天买满→明天全天额度0→隔天才能买"的块状节奏; 每日新买 < 总仓后,
+    遗留仓位永远留有空位, 每天都能按信号顺序自然补仓(不人为拆上午/下午)。
+    positions_held_count 已排除记过卖出的票, 故 14:30 卖出后 slot_cap 即时恢复。
+    """
+    sold = sells_today_count(ds)
+    legacy = positions_held_count(exclude_today=True)
+    slot_cap = daily_max - legacy - int(buy_today)
+    new_cap = daily_new - int(buy_today)
+    quota = max(0, min(slot_cap, new_cap))
+    return quota, sold, legacy
+
+
+def _fmt_fast_book(b: dict) -> str:
+    """把哨兵的秒级盘口摘要压成一行中文(注入 AI 证据)。"""
+    parts = []
+    m = b.get("mom30")
+    if m is not None:
+        parts.append("30秒动量%+.2f%%" % m)
+    a = b.get("ask_chg60")
+    if a is not None:
+        parts.append("卖一量60秒%+.0f%%(%s)" % (
+            a, "卖压快速消化·临封" if a <= -30 else
+            ("卖压堆积" if a >= 30 else "平稳")))
+    t = int(b.get("touches") or 0)
+    if t:
+        parts.append("今日触板%d次" % t)
+    if b.get("bid1_amt"):
+        parts.append("封单%s" % ("%.1f亿" % (b["bid1_amt"] / 1e8)
+                                 if b["bid1_amt"] >= 1e8
+                                 else "%.0f万" % (b["bid1_amt"] / 1e4)))
+    if b.get("sealed"):
+        parts.append("已封死")
+    return " | ".join(parts)
+
+
+def market_regime_block(now: datetime) -> str:
+    """情绪周期指标(纯代码, 每轮重算) → 注入买侧 prompt。
+
+    游资空仓纪律的核心 = 识别退潮期: 昨日涨停今日普遍不晋级/亏钱 → 今日少买甚至空仓。
+    原系统只有涨停家数+最高连板, 模型看不到"周期位置", 退潮期照样给高分。
+    数据: limits_{昨日}.json(save_limit_list 落盘的昨日涨停列表) + 腾讯快照(今日表现)。
+    指标定义: 晋级率 = 昨日涨停今日仍封死占比; 均涨 = 昨日涨停股今日平均涨幅。
+    """
+    import glob
+    today = now.strftime("%Y-%m-%d")
+    prev_path = None
+    for f in sorted(glob.glob(str(STATE_DIR / "limits_*.json")), reverse=True):
+        d = Path(f).stem.replace("limits_", "")
+        if d < today:
+            prev_path = Path(f)
+            break
+    if prev_path is None:
+        return ""
+    try:
+        y_codes = [str(c) for c in json.loads(prev_path.read_text(encoding="utf-8"))]
+    except Exception:
+        return ""
+    if not y_codes:
+        return ""
+    try:
+        from tx_quote import snapshot as tx_snapshot
+        quotes = tx_snapshot(y_codes[:80]) or {}
+    except Exception:
+        return ""
+    promoted = touched = 0
+    pcts: list = []
+    for c in y_codes:
+        q = quotes.get(c) or {}
+        price = float(q.get("price") or 0)
+        prev = float(q.get("prev_close") or 0)
+        high = float(q.get("high") or 0)
+        if price <= 0 or prev <= 0:
+            continue
+        lim = round(prev * (1 + (0.20 if c[:3] in ("300", "688", "689") else 0.10)), 2)
+        pcts.append(price / prev - 1)
+        if price >= lim - 0.01:
+            promoted += 1
+        elif high >= lim - 0.01:
+            touched += 1
+    n = len(pcts)
+    if n < 5:                      # 样本太少不出结论
+        return ""
+    rate = promoted / n * 100
+    avg = sum(pcts) / n * 100
+    if rate < 30 and avg < 1.0:
+        regime, advice = ("退潮期",
+                          "游资纪律: 退潮期不接飞刀 —— 晋级率低迷+昨日涨停普遍亏钱, "
+                          "prob 应整体下修 5~10 分, 宁可全天空仓。")
+    elif rate < 40 and avg < 0:
+        regime, advice = ("冰点/修复前夜",
+                          "亏钱效应显著: 只给最强的核心票高分, 普通候选一律低分。")
+    elif rate >= 50 and avg >= 3.0:
+        regime, advice = ("主升期",
+                          "情绪主升: 可适度积极, 但高位票(3板+)注意兑现风险。")
+    else:
+        regime, advice = ("震荡", "情绪中性: 按正常标准判。")
+    return ("昨日涨停 %d 只 → 今日晋级 %d(%.0f%%) | 触板未回封 %d 只 | "
+            "昨日涨停股今日均涨 %+.2f%% → **周期: %s**" % (n, promoted, rate, touched, avg, regime)) \
+        + "\n  %s" % advice
+
+
+def market_max_streak(limit_codes: list, hist: dict):
+    """市场最高连板(真实值) = 今日涨停股中"截至昨日的连续涨停天数"最大值 + 1。
+
+    原代码把 `max_st: 3` 硬编码注入 prompt, 模型拿到的是假的市场情绪数据。
+    hist 已按 `date < 今日` 过滤(见 build_pool), 故无前视。
+    算不出(池缺数据/今日无涨停)则返回 None → prompt 显示 "?"。
+    """
+    if not limit_codes or not hist:
+        return None
+    best = 0
+    for c in limit_codes:
+        h = hist.get(c)
+        if h is None or len(h) < 3:
+            continue
+        try:
+            cl = h["close"].values.astype(float)
+            ret = pd.Series(cl).pct_change().values
+            lim = [False] + [bool(x) for x in (ret[1:] >= 0.098)]
+            n = 0
+            for v in reversed(lim[-10:]):
+                if v:
+                    n += 1
+                else:
+                    break
+        except Exception:
+            continue
+        if n > best:
+            best = n
+    return (best + 1) if best >= 0 and limit_codes else None
+
+
 def scan(api: TdxHq_API, pool: list[dict], progress: float,
          min_pct: float, min_vr: float, min_ratio: float = 0.6,
          hist: dict | None = None) -> tuple[list[dict], int]:
     """拉实时报价 → 返回 (信号列表, 池内涨停家数)。"""
     sigs, n_limit = [], 0
     stat = {"got": 0, "limit": 0, "sealed": 0, "lowpct": 0, "lowvr": 0, "yizi": 0,
-            "lowst": 0, "hiamt": 0, "x_high": 0, "x_mv": 0, "x_turn": 0}
+            "lowst": 0, "hiamt": 0, "x_high": 0, "x_mv": 0, "x_turn": 0,
+            "touch": 0}          # 触板未回封(盘中炸板率原料)
     blocked = []                    # 被规则层拦截的候选(复盘用: 验证拦截是否正确)
     # 进度封顶(2026-09-16): vr/est_turn 均 ÷progress, 午后 progress≈0.85 把等效门槛
     # 抬到不可达(正常节奏票 vr≈1 过不了 min_vr)→ 午后0候选进AI。封顶到 PROGRESS_CAP:
@@ -574,6 +762,9 @@ def scan(api: TdxHq_API, pool: list[dict], progress: float,
         if ask1 <= 0:                       # 无卖单 = 封死/停牌, 买不到
             stat["sealed"] += 1
             continue
+        hi = float(q.get("high") or 0)
+        if hi > 0 and hi >= prev * (1 + thr) - 0.01:
+            stat["touch"] += 1              # 触及涨停但已回落 = 盘中炸板(未回封)
         # 启动阈值按各板涨跌幅缩放: 主板 10%→6%, 创业板 20%→12%(否则创业板 6% 只是噪音)
         if pct < max(min_pct, thr * min_ratio):
             stat["lowpct"] += 1
@@ -923,7 +1114,9 @@ def main() -> int:
     ap.add_argument("--min-prob", type=float, default=65.0,
                     help="AI 放行硬阈值: prob≥此值才推送(回测基线封板率63.4%)")
     ap.add_argument("--daily-max", type=int, default=3,
-                    help="每日最多推送笔数(全仓纪律: 分散≤3只)")
+                    help="总仓上限(同时持有的最大笔数)")
+    ap.add_argument("--daily-new", type=int, default=2,
+                    help="每日新买上限(梯队滚动: 必须 < daily-max, 否则隔天才能买)")
     ap.add_argument("--cooldown", type=int, default=10,
                     help="同票AI判定间隔(分钟): 仅去重防刷屏(骏亚式54次), "
                          "不冻结——超过该间隔的SKIP→BUY翻转(如603276隔11分钟)仍会重判")
@@ -1075,32 +1268,89 @@ def main() -> int:
             if s["code"] in skip_bl:
                 continue                        # 仅静态硬伤(暴雷/ST)当日拉黑; 题材/盘口时变不拉黑
             fresh.append(s)
-        # 模型单批上限(2026-09-16): decide 单 shot 返回全部候选JSON, 候选过多→
-        # 生成超时/限流→整批丢判定(实测午后14只→模型返回全None)。主推优先保推送,
-        # 观测按分截断, 总数封顶 AI_BATCH_CAP; 未进批的候选下轮(仍候选)再判, 不丢。
-        if len(fresh) > AI_BATCH_CAP:
-            _m = [s for s in fresh
-                  if float(s.get("pct", 0) or 0) >= args.push_min_pct]
-            _o = [s for s in fresh
-                  if float(s.get("pct", 0) or 0) < args.push_min_pct]
-            _m.sort(key=lambda s: -float(s.get("score", 0) or 0))
-            _o.sort(key=lambda s: -float(s.get("score", 0) or 0))
-            fresh = _m + _o[:max(0, AI_BATCH_CAP - len(_m))]
-            if len(fresh) > AI_BATCH_CAP:
-                fresh = fresh[:AI_BATCH_CAP]
+        # ── 2026-09-22 修订: 不再截断候选数 ──
+        # 原逻辑把候选砍到 AI_BATCH_CAP=8(主推优先+观测带补齐), 理由是单批过多会超时。
+        # 但截断会漏票(午后候选常 14+ 只, 被砍掉的正是规则分靠后的潜在好票)。
+        # 改为: 全部候选一次送判; 若整批失败/返回不全 → 自动拆成 AI_CHUNK 大小分批重试,
+        # 保证既不漏票也不整批丢失。排序仍按规则分降序(模型看到的主次顺序不变)。
+        fresh.sort(key=lambda s: -float(s.get("score", 0) or 0))
         if not fresh:
             return
+        # 候选落盘 → 秒级哨兵(youzi_fast_watch)顺带监控, 产出 fast_book.json 趋势摘要
+        try:
+            (STATE_DIR / "candidates.json").write_text(json.dumps(
+                {"ts": time.time(), "codes": [s["code"] for s in fresh]}),
+                encoding="utf-8")
+        except Exception:
+            pass
+        # 注入秒级盘口摘要(30秒动量/卖一量变化/触板次数): 让 AI 看"变化率"而非单点快照
+        try:
+            fb = json.loads((STATE_DIR / "fast_book.json").read_text(encoding="utf-8"))
+            if time.time() - float(fb.get("ts") or 0) < 30:
+                for s in fresh:
+                    b = (fb.get("data") or {}).get(s["code"])
+                    if b:
+                        s["fast_book"] = _fmt_fast_book(b)
+        except Exception:
+            pass
+
+        # ── 影子模式(2026-09-22): 额度已用尽时降频+限量调 AI ──
+        # 额度 0 → 判了也推不出去, 但 AI 判定要落盘(ai_judgements.jsonl)作为两周后
+        # 校准 prob 阈值/六维子分/规则层的唯一原料, 所以不能全停。
+        # 折中: 只降频(每 SHADOW_AI_INTERVAL 秒一轮), 不砍候选(砍了会漏票、样本也有偏)。
+        # token 降约 80%, 同时保住完整样本。规则层的 blocked_log 不受影响(已落盘)。
+        global _LAST_AI_TS
+        _bt0 = int(state.get("buy_today", 0))
+        _q0, _sold0, _held0 = quota_state(args.daily_max, args.daily_new, _bt0,
+                                          now.strftime("%Y-%m-%d"))
+        if _q0 and _LAST_AI_TS is not None and (
+                now - _LAST_AI_TS).total_seconds() < SHADOW_AI_INTERVAL:
+            print(f"    → 影子模式(配额0, 遗留{_held0}/已买{_bt0}): 本轮跳过 AI "
+                  f"(距上次 {int((now - _LAST_AI_TS).total_seconds())}s "
+                  f"< {SHADOW_AI_INTERVAL}s), 规则层已记录")
+            return
+        _LAST_AI_TS = now
 
         # ── AI 决策层: 规则负责召回, 模型负责判断"能不能封住板" ──
         if args.ai:
             try:
                 from youzi_ai import decide
+                # 情绪周期(纯代码): 晋级率/炸板率/昨日涨停今日表现 → 退潮期不买
+                _reg = market_regime_block(now)
+                _t, _l = int(st.get("touch") or 0), int(st.get("limit") or 0)
+                if _reg and _t + _l > 0:
+                    _reg += ("\n  今日盘中: 触板未回封 %d 只 / 封死 %d 只 → 盘中炸板率 %.0f%%"
+                             % (_t, _l, 100.0 * _t / (_t + _l)))
                 mkt = {"n_limit": st["limit"], "pool_n": len(pool),
-                       "max_st": 3,
+                       "max_st": market_max_streak(st.get("limit_codes") or [], hist),
+                       "regime": _reg,
                        "emotion": emotion_block(now)}   # 接力赚钱效应(证据维度)
                 decs, aist = decide(fresh, mkt, now, api=api,
                                     thr=args.obs_low,
                                     min_prob=args.min_prob)
+                # 分批兜底: 不限候选数后, 单批过大可能生成超时/限流 → 整批返回空。
+                # 此时按 AI_CHUNK 拆分重试未返回的候选, 宁可多调几次也不丢票。
+                if aist != "ok" or len({d.get("code") for d in decs}) < len(fresh):
+                    _by = {d.get("code"): d for d in decs if d.get("code")}
+                    _miss = [s for s in fresh if s["code"] not in _by]
+                    if _miss:
+                        print(f"    [AI] 整批 {len(fresh)} 只仅回 {len(_by)} 只 "
+                              f"→ 拆批重试 {len(_miss)} 只(每批 {AI_CHUNK})")
+                        for i in range(0, len(_miss), AI_CHUNK):
+                            _sub = _miss[i:i + AI_CHUNK]
+                            try:
+                                _d2, _st2 = decide(_sub, mkt, now, api=api,
+                                                   thr=args.obs_low,
+                                                   min_prob=args.min_prob)
+                            except Exception as _e:
+                                print(f"    [AI] 拆批 {i // AI_CHUNK + 1} 失败: {_e}")
+                                continue
+                            if _st2 == "ok":
+                                aist = "ok"
+                                for d in _d2:
+                                    if d.get("code"):
+                                        _by[d["code"]] = d
+                        decs = list(_by.values())
                 by = {d["code"]: d for d in decs}
                 for s in fresh:
                     s["ai"] = by.get(s["code"])
@@ -1156,12 +1406,13 @@ def main() -> int:
                         print(f"    → 未到起始推送时点 {args.start_time} "
                               f"(判定已记录, 不推送/不占配额)")
                         return
-                    # ── 卖出发酵配额(2026-09-18): 每日推送配额与当日已卖份数挂钩,
-                    #    卖出释放资金 → 同等额度补回, 解决"早盘推满→尾盘卖了有资金却无额度"。
-                    #    上限 daily_max(默认3); 没卖则不给额度(不推), 卖1份补1份(上限内)。
-                    sold_today = sells_today_count(now.strftime("%Y-%m-%d"))
-                    quota = max(0, min(args.daily_max, sold_today)
-                                - int(state.get("buy_today", 0)))
+                    # ── 梯队双层限额(2026-09-22 方案A): 总仓上限 daily_max(3) +
+                    #    每日新买上限 daily_new(2)。14:30 强制了结释放仓位后, 仍受
+                    #    daily_new 约束 → 每天最多新开2只, 按信号顺序自然补, 不拆时段。
+                    _bt = int(state.get("buy_today", 0))
+                    quota, sold_today, held = quota_state(
+                        args.daily_max, args.daily_new, _bt,
+                        now.strftime("%Y-%m-%d"))
                     # ── 2026-09-18 修订: 取消"早盘保留 1 额度给午后"的纪律。
                     #    全天任意时刻都用同一 quota(由当日已卖份数决定), 不预留、不按时段收窄。
                     if len(fresh) > max(quota, 0):
@@ -1191,13 +1442,17 @@ def main() -> int:
                     state["buy_today"] = int(state.get("buy_today", 0)) + len(fresh)
                     log_pushed(fresh, now)      # 配额内=真正推送的, 线上展示用
                     print(f"    → AI 过滤: {before} → {len(fresh)} 只 "
-                          f"(prob≥{args.min_prob:.0f}, 今日已卖{sold_today}份/"
-                          f"配额剩{quota})")
+                          f"(prob≥{args.min_prob:.0f}, 遗留持仓{held}份/今日已卖{sold_today}份/"
+                          f"今日已买{_bt}份/总仓{args.daily_max}/每日新买{args.daily_new}"
+                          f"/配额剩{quota})")
                 else:
                     print("    → AI 调用失败, 本次不推送(宁可错过)")
                     fresh = []
             except Exception as exc:
-                print(f"    [AI] 异常, 降级为规则: {exc}")
+                # ⚠ 旧行为: 异常后 fresh 仍是规则层原始候选 → 跳出 if 后直接推送,
+                #   既不判 prob 也不去重、不扣配额("降级即裸推")。AI 挂了宁可不推。
+                print(f"    [AI] 异常, 不推送(宁可错过): {exc}")
+                fresh = []
         st_t = parse_hhmm(args.start_time)
         if st_t and now.time() < st_t and fresh:
             print(f"    → 未到起始推送时点 {args.start_time}, 仅记录")

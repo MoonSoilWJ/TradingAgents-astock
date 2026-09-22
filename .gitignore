@@ -217,3 +217,7 @@ __marimo__/
 # Cache
 **/data_cache/
 .env
+
+# Code intelligence indexes (local-only artifacts, regenerable)
+.codegraph/
+.codebase-memory/

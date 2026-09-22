@@ -16,6 +16,7 @@ _os.environ["no_proxy"] = _os.environ["NO_PROXY"] = "*"
 import os
 import re
 import sys
+import threading
 import time
 from collections import Counter
 from datetime import datetime, time as dtime, timedelta
@@ -48,7 +49,8 @@ SYSTEM = """你是一位资金体量数亿的 A 股游资大佬, 深耕打板接
 无差别买入该口径的全部候选: 封板率 {SEAL}%, 次日均 {AVG}%(净)。
 
 【弹药约束 — 你的决策现实, 不是判断规则】
-系统每日最多执行 3 笔, 单轮最多 2 笔; prob 达标({MINP}+)的候选往往多于名额。
+系统每日最多执行 3 笔; 单轮候选不限数量(全部同批判定, 不必假设只有 2 个名额);
+prob 达标({MINP}+)的候选往往多于名额。
 你的每个高分都在与其他候选竞争稀缺名额 — 把 prob 留给真正有把握的票,
 大多数候选应落在 40-60 区间; 大面积 65+ 说明你的标尺过松。
 
@@ -69,6 +71,16 @@ SYSTEM = """你是一位资金体量数亿的 A 股游资大佬, 深耕打板接
 5. 首触形态与时段: 【当前时间】附有各时段历史统计均值 — 它描述平均规律,
    不代表当下这只票, 结合个股证据自行权衡其权重
 6. 位置与情绪: 连板高度与梯队、流通市值、均线形态、距60日高、大盘涨停家数;
+
+【★维度有效性 — 实盘 541 条校准(2026-09-21), 只列已验证结论; 若与下方成绩单冲突, 以成绩单为准】
+ · 真正有效的三维(子分≥7 组封板率显著高于 ≤4 组):
+     位置 53% vs 37%  ← 最强 | 盘口 47% vs 37% | 资金 45% vs 38%
+   这三维是你判断的主轴, 证据要重点看、分数要拉开区分度。
+ · 已证伪为【反向】的两维(打高分反而封板率更低):
+     首触 33% vs 58% | 基本面 31% vs 44%
+   → 这两维只作背景参考: 不要因为"首触时段差/基本面差"就压低 prob, 也不要因为它们看着好就抬高。
+     基本面真正有用的只有"公司公告否认炒作逻辑/暴雷"这类硬负证据(见第4条的公告项)。
+ · 题材维度高分样本仅 1 条, 无法验证; 但代码有硬封顶(见下), 你给低分会直接触发封顶。
    高位减分项(RSI>80 / 5日涨幅>15% / 10日涨幅>25%) = 超买+乖离红灯,
    触发越多, 炸板与次日兑现压力越大, prob 应显著下调
 
@@ -94,6 +106,11 @@ prob≥75 是系统放行线, 必须由【多维度共振】支撑, 不可被单
 - 只有"盘口≥6 且 资金≥6 且 题材≥5"三者同时成立, prob 才允许超过 75。
 此规则来自实盘复盘: 三天 19 笔推送中, 单靠资金高分(82分)的票全部大亏
 (北自科技 −11.6%/浙江新能未封), 而多维度均衡的 76 分票反而封板。
+
+【★代码级机械门槛 — 不是你的判断, 但会直接否决, 必须知道】
+除了上面的封顶, 系统还有两条硬线: **盘口子分 < 7 或 位置子分 < 7 的候选, 无论 prob 多高都不会推送。**
+所以: 这两维只要低于 7, 你把 prob 打到 90 也白费 —— 与其给一个注定被砍的高分,
+不如如实反映证据(该低就低), 把高分留给"盘口≥7 且 位置≥7"真正够格的票。
 每次判断都会被记录, 收盘后与实际结果(封板/次日溢价)比对, 且子分会被单独校准 —
 哪个维度打分与结果相关性高, 哪个维度就会被采信; 给分必须经得起复盘。
 """
@@ -652,6 +669,9 @@ def build_prompt(sigs: list[dict], snap: dict, market: dict,
     if emo:
         lines.append(f"【接力赚钱效应】{emo} — 这是封板次日溢价最直接的温度计: "
                      "冰点时封板次日普遍低开, 修复时高开; 权衡权重由你定")
+    reg = str(market.get("regime") or "")
+    if reg:
+        lines.append("【情绪周期·晋级率/炸板】" + reg)
     lines += ["", "【候选标的】(均为涨幅≥{t}% 未封板, 盘口有卖单可成交)".format(t=f"{thr:g}"), ""]
     for s in sigs:
         stk = s.get("streak")
@@ -661,12 +681,15 @@ def build_prompt(sigs: list[dict], snap: dict, market: dict,
         dd = f"{s['dd']:.0f}%" if s.get("dd") is not None else "?"
         vr_txt = (f"{(s.get('vr') or 0):.1f}(早盘折算失真, 不采信)"
                   if s.get("vr_na") else f"{(s.get('vr') or 0):.1f}")
+        fbk = (f"  秒级盘口(近60秒, 哨兵实测): {s['fast_book']}\n"
+               if s.get("fast_book") else "")
         lines.append(
             f"- {s['id']}: +{s['pct']:.1f}% 未封板 | {board} | 题材: "
             f"{str(snap.get('topics', {}).get(s['code'], '无标注'))[:36]}\n"
             f"  市值 {mv} 换手 {tn} 距60日高 {dd} 量比 {vr_txt} "
             f"额 {s['amt_yi']:.1f}亿\n"
             f"  盘口承接: {s.get('obook') or '缺失'}\n"
+            f"{fbk}"
             f"  均线: {s.get('ma') or '缺失'}\n"
             f"  基本面: {s.get('fin') or '缺失'}\n"
             f"  资金面: {str(s.get('fund'))[:200] or '缺失'}\n"
@@ -690,7 +713,43 @@ def build_prompt(sigs: list[dict], snap: dict, market: dict,
 
 
 # 各阈值档的无差别基准(回测, 动态池无前视): thr -> (封板率%, 次日均%)
-_BENCH = {"9": (61.7, 1.18), "8": (52.6, 0.79)}
+# 2026-09-22 补 "6" 档: 实盘 obs_low=6, 旧逻辑 thr<8.5 一律取 8% 档 52.6%,
+# 但实盘 541 条校准(2026-09-21)实测 6% 口径无差别封板率仅 40.1% —— 基准虚高 12.1pp,
+# 会让模型以为"随便买都有 52.6% 封板率"而把 prob 整体抬高。次日均暂沿用 8% 档(次日回填样本仍为 0)。
+_BENCH = {"9": (61.7, 1.18), "8": (52.6, 0.79), "6": (40.1, 0.79)}
+
+LLM_TIMEOUT = float(os.getenv("YOUZI_LLM_TIMEOUT") or "90")
+
+
+def invoke_llm(llm, messages, timeout: float = None):
+    """带硬超时的 llm.invoke —— 买侧/卖侧共用。
+
+    背景(2026-09-22 事故): youzi_live 盘中卡在"[AI] ...调用模型" 12 分钟无输出,
+    进程活着但完全静默; 而 watchdog 是 `pgrep || 拉起`, 进程还在就不会重启 → 全天空转。
+    根因: llm.invoke 无超时, HTTP 层挂起即永久阻塞。
+
+    ⚠ 不能用 ThreadPoolExecutor + future.result(timeout): 退出 with 块时
+    shutdown(wait=True) 仍会阻塞到工作线程结束, 超时形同虚设(卖侧旧实现即此问题)。
+    故用 daemon 线程 + join(timeout): 超时立刻抛异常返回, 挂死的线程随进程退出被回收。
+    """
+    timeout = LLM_TIMEOUT if timeout is None else timeout
+    box = {}
+
+    def _run():
+        try:
+            box["resp"] = llm.invoke(messages)
+        except BaseException as exc:      # noqa: BLE001 — 原样抛回主线程
+            box["err"] = exc
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise TimeoutError("LLM invoke timeout %.0fs(线程挂死, 已放弃本次调用)"
+                           % timeout)
+    if "err" in box:
+        raise box["err"]
+    return box["resp"]
 
 
 def decide(sigs: list[dict], market: dict, now: datetime | None = None,
@@ -744,14 +803,14 @@ def decide(sigs: list[dict], market: dict, now: datetime | None = None,
               flush=True)
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
-        seal, avg = _BENCH.get("9" if thr >= 8.5 else "8")
+        seal, avg = _BENCH.get("9" if thr >= 8.5 else ("8" if thr >= 7.5 else "6"))
         # 用 replace 而非 format: SYSTEM 内含 JSON 示例的 {} 会被 format 误当占位符
         sys_txt = (SYSTEM.replace("{THR}", f"{thr:g}")
                    .replace("{SEAL}", str(seal)).replace("{AVG}", str(avg))
                    .replace("{MINP}", f"{min_prob:g}"))
         llm = _client().get_llm()
-        resp = llm.invoke([SystemMessage(content=sys_txt),
-                           HumanMessage(content=prompt)])
+        resp = invoke_llm(llm, [SystemMessage(content=sys_txt),
+                                HumanMessage(content=prompt)])
         text = getattr(resp, "content", None) or str(resp)
         if verbose:
             print(f"[AI] 模型返回 {time.time()-_t0:.1f}s", flush=True)

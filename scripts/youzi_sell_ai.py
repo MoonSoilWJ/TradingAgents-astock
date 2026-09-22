@@ -66,6 +66,30 @@ SOLD = POSITIONS.parent / "youzi_sold.jsonl"
 SELL_ALERTS = POSITIONS.parent / "youzi_sell_ai_alerts.json"
 YOUZI = POSITIONS.parent
 SELL_THR = float(os.getenv("YOUZI_SELL_THR") or "70")
+# 时间纪律(代码级): 持满 N 个交易日仍未被 AI 卖出 → 无条件了结, 释放打板额度。
+# 这是隔夜半路板战法, 不是趋势持有: 老仓不走 → 当日卖出份数=0 → youzi_live 配额不释放 → 全天无法买入。
+# N=2 与回测 max_hold=2(最晚 T+2 走)对齐。连板/近涨停豁免(不砍赢家)。
+# 2026-09-22 回测定档(同一批 12 只票对照): T+1 笔均 -3.73%/胜率33% vs T+2 笔均 -7.02%/胜率10%
+# → 真游资"隔夜走"是对的, 多拿一天平均亏 2.9pp。默认改 T+1。
+FORCE_SELL_DAYS = int(os.getenv("YOUZI_FORCE_SELL_DAYS") or "1")
+# 强制了结的执行时点: 回测显示 T+1 收盘(-3.41%)优于 T+1 10:00(-3.73%),
+# 且 AI 在 10:00 卖最差(-4.63%, 与 v8"10:00 卖飞"教训一致) → 强制了结放尾盘。
+# 取 14:30 而非 14:50: 回测扫描点是 step 网格(默认30min → 最后一点 14:30),
+# 设 14:50 会导致回测永远命中不到 → 回测与实盘口径不一致。两侧统一 14:30。
+FORCE_SELL_TIME = os.getenv("YOUZI_FORCE_SELL_TIME") or "14:30"
+try:
+    _h, _m = FORCE_SELL_TIME.split(":")
+    FORCE_SELL_MIN = int(_h) * 60 + int(_m)
+except Exception:
+    FORCE_SELL_MIN = 14 * 60 + 30
+
+
+def _force_time_ok(t) -> bool:
+    """t 是否已到强制了结时点(尾盘执行, 避开早盘低点)。"""
+    return (t.hour * 60 + t.minute) >= FORCE_SELL_MIN
+NEAR_LIMIT_PCT = 0.03   # 现价距涨停 ≤3% 视为连板进行中, 豁免强制了结
+# 封死/近涨停持仓的评估间隔(分钟): 连板票每 2 分钟判一次没有信息量, 还白烧 token
+SEAL_EVAL_MIN = int(os.getenv("YOUZI_SEAL_EVAL_MIN") or "15")
 # 早盘硬规则: 09:30-09:59 代码级禁止任何卖出(LLM 早盘高噪音窗口结构性弱点兜底, 已验证避免地板割肉)
 EARLY_HOLD_START = 9 * 60 + 30
 EARLY_HOLD_END = 10 * 60
@@ -85,6 +109,7 @@ COST = 0.002
 SELL_HIST = YOUZI / "youzi_sell_ai_history.json"  # 实时跨进程累积的扫描历史
 HISTORY_CAP = 60  # 历史块最多保留最近 N 个扫描点(降本且保留趋势)
 LOG_DIR = YOUZI / "logs"          # 每日运行日志(与买侧同目录, 一天一个文件)
+_LOCK_FP = None                   # 单实例锁文件句柄(见 _acquire_lock)
 JUDGE_LOG = LOG_DIR / "sell_judgements.jsonl"  # 每次判定快照(复盘/校准闭环用)
 
 
@@ -138,9 +163,10 @@ SYSTEM_SELL = """你是一位资金体量数亿的 A 股游资大佬, 深耕打�
        (b)【持续派发】: 连低≥3 且 反弹不过前低(每次反抽高度递减) 且 下跌放量比>1.3 且 已跌破早盘最低点 → sell_score≥65;
           ❗(b)仅 10:00 后生效, 早盘(09:30-10:00)一律不认(b)——非板票早盘急跌/连低多为洗盘, 不割。
        连低≥4 或 跌破早盘最低点超2% → 升档≥75(仅午后)。
-     · 洗盘铁证(满足必持有, sell_score≤40): 连低但 下跌缩量(<1) 且 急跌后已收回前低/站回均价;
+     · 洗盘铁证(倾向持有, 落在 10~30 档): 连低但 下跌缩量(<1) 且 急跌后已收回前低/站回均价;
        或半路板次日 浮盈状态(现价≥成本)早盘抖动 —— 锁利留给尾盘或次日开盘, 绝不早盘割赢家。
-     · 浮盈保护: 现价≥成本(仍浮盈)时, 任何早盘急跌/炸板一律视为洗盘(除非命中(a)打板失败且放量派发, 且非开盘一字炸板), sell_score≤40。
+       ❗"落在档内"不等于"填 30": 洗盘越干净(缩量越狠、越稳站均价)分越低, 洗盘带瑕疵(量没缩/均价反复丢)分越高。
+     · 浮盈保护: 现价≥成本(仍浮盈)时, 早盘急跌/炸板倾向视为洗盘(除非命中(a)打板失败且放量派发, 且非开盘一字炸板), 落在 10~35 档。
      · 时间纪律(代码级硬规则, 非你判断): 早盘 09:30-10:00 脚本强制 HOLD, 无论你给多高分都不卖出(这是 LLM 在早盘高噪音窗口结构性弱点的兜底, 已验证避免地板割肉)。你的卖出判断只在 10:00 后生效。
        10:00 后: (a)打板失败派发 与 (b)持续派发 均有效, 正常按规则给分。
   2) 板块与情绪在帮你还是害你? 同题材/同身位票在跳水、涨停家数骤降、板块资金净流出,
@@ -152,23 +178,45 @@ SYSTEM_SELL = """你是一位资金体量数亿的 A 股游资大佬, 深耕打�
      · 高位强势但 距涨停>3% 且 全天横盘缩量不创新高 → 观望, sell_score 40~60, 可减仓。
      · 已处高位(10日>25% 或 5日>15%)且 长上影+跌破均价+近30分放量滞涨 = 派发高危;
      公告否认核心逻辑 / 逼近异动停牌线 / 龙虎榜机构高位净出货 = 硬风险, 该走。
-  4) 连板保护(最高优先级·覆盖一切): 现价距涨停 ≤3% 且 (封死 或 仅炸板一次已回封), 无论浮盈多大 sell_score≤30 必须持有——
+  4) 连板保护(最高优先级·覆盖一切): 现价距涨停 ≤3% 且 (封死 或 仅炸板一次已回封), 无论浮盈多大 sell_score≤25 必须持有——
      卖飞涨停板 = 重大失误; 此规则优先于上述所有出货铁证。
 
 【默认持有是"先验", 不是"铁律"】半路板次日波动大, 平开低开小高开早盘急跌浮亏都属常态,
-没有上述走弱证据时默认持有(sell_score ≤40)。但"持续创新低的阴跌"是覆盖先验的强证据(午后生效)——
+没有走弱证据时默认持有(落在 20~40 档)。但"持续创新低的阴跌"是覆盖先验的强证据(午后生效)——
 它不是单点恐慌, 是多扫描点确认的派发, 该走就走。
+
+【★时间纪律: 这是隔夜战法, 持有天数本身就是卖出理由】
+今买明卖的半路板/打板, 不是趋势持有。老仓不走 = 资金被占用 = 次日没有打板额度。
+看【持仓】行的【持有 N 交易日】:
+  · T+1(第2个交易日): 尾盘 14:30 后仍未封板 且 浮盈<3% → 至少 55 分(观望偏弱, 不该再拿);
+  · T+2 及以后: 只要没封板、也没逼近涨停, 一律 ≥70 该走 —— 代码层面也会强制了结, 你给低分也没用;
+  · 唯一能续命的: 封死涨停 / 距涨停≤3% 的连板进行中。
+别拿"洗盘"给隔夜票无限续命: 洗盘是日内概念, 拖到第 3 个交易日是资金效率问题, 不是盘口问题。
 
 【早盘硬规则·代码保障】09:30-10:00 任何情况不卖出(已代码级拦截, 你的 sell_score 此时被忽略, 不必费心判断)。你只需对 10:00 后情形负责: 真·盘中打板失败(a) 与 持续创新低阴跌(b) 都是有效卖点——非板票低开急跌若午后确认(b)持续派发也走, 但早盘一律持有。
 早盘最忌把"缩量洗盘急杀""赢家早盘抖动""非板票低开""开盘一字炸板(尾盘常回封)"当"出货"割在地板——现由代码彻底禁止, 你无需在此纠结。
 
-【输出】严格 JSON, 对每只持仓:
+【分数刻度(连续刻度, 不是档位开关)】
+ 0-20  强势持有(封死/连板进行中/缩量站均价向上)
+ 20-40 中性持有(震荡、无派发证据) ← 多数"没事"的票落这里, 但必须按走弱程度在这 20 分内分开高低
+ 40-60 观望偏弱(高位滞涨、破均价、放量不涨、T+1 尾盘未封板)
+ 60-75 该卖(出货铁证成立 / 硬风险)
+ 75-100 必卖(打板失败放量派发 / T+2 未封板 / 逼近停牌)
+
+【给分必须"算"出来, 不许"背"出来】
+ · sell_score 是你自己对六维子分加权复合的结果, 正常应该出现 23 / 37 / 52 这类带个位的值;
+ · 严禁直接输出 15/25/30/35/40/45 等本提示词里出现过的整数 —— 那是抄锚点不是打分, 会让校准彻底失效;
+ · 同一持仓连续扫描: 只要证据(涨跌幅/量能/距高点/站均价)任一维变了, 分数必须跟着动, 不许复制上一次。
+
+【输出】严格 JSON, 对每只持仓各给一项:
 [{"id":"A","action":"SELL","sell_score":82,
   "verdict":"出货",  // 你的真实判词: 出货 / 洗盘 / 观望(观望=暂持但盯紧)
   "scores":{"盘口":8,"资金":6,"题材":3,"趋势":7,"情绪":5,"风险":9},
   "reason":"40字内: 为何判出货/洗盘 + 依据; 无则写持有理由"}]
 action: SELL=该卖 / HOLD=继续拿。
-verdict 必须与 action 自洽: verdict=出货 时 action 应为 SELL 且 sell_score≥60; verdict=洗盘/观望 时 action 应为 HOLD 且 sell_score≤45。
+❗多只持仓同批判定时(见【本次共 N 只持仓】): 数组必须按 id A/B/C… 各给一项, 每只**独立**判断 —
+   不要因为同批里另一只更弱就把这只的分数顺手抬高或压低, 每只的分数只由它自己的证据决定。
+verdict 必须与 action 自洽: verdict=出货 时 action 应为 SELL 且 sell_score≥60; verdict=洗盘/观望 时 action 应为 HOLD。
 sell_score 须与六维子分自洽: 六维普遍无走弱时 sell_score 必须低; 只有强走弱(尤其炸板/硬风险)才拉高。
 每次判断都会被记录与实际走势比对校准——给分必须经得起复盘。
 """
@@ -196,6 +244,74 @@ def _pool_daily():
 
 
 _POOL = None
+
+
+def trading_days_held(buy_date: str, today: str) -> int:
+    """真实持有交易日数(买入当日=0, 次日 T+1=1)。
+
+    原来用 (today - buy_date).days 日历日差, 跨周末/节假日会把 T+1 吹成 T+3(如周五买→周二
+    显示"持有4交易日"), 而证据块【持仓】行正是拿它标"持有 N 交易日"喂给模型的 —— 模型看到
+    错误的持有天数, 时间纪律判断全偏。故改按真实交易日计数:
+    优先用 pool_daily 的交易日索引(仅当池子覆盖到买入日才可信, 否则整段回退工作日计数);
+    池末落后于今日时用工作日补上 池末→今日 这一段(节假日会略多算 → 偏早了结, 方向安全)。
+    """
+    b, t = pd.Timestamp(buy_date), pd.Timestamp(today)
+    try:
+        import numpy as np
+    except Exception:
+        np = None
+    global _POOL
+    if _POOL is None:
+        _POOL = _pool_daily()
+    try:
+        idx = _POOL["close"].index if _POOL is not None else None
+        if idx is not None and len(idx):
+            idx = idx.sort_values()
+            last = pd.Timestamp(idx[-1])
+            if b <= last:                                  # 池子覆盖买入日才用池内精确计数
+                if t <= last:
+                    return max(int(((idx > b) & (idx <= t)).sum()), 0)
+                n = int(((idx > b) & (idx <= last)).sum())
+                if np is not None:
+                    n += int(np.busday_count(last.date(), t.date()))
+                return max(n, 0)
+    except Exception:
+        pass
+    if np is not None:
+        return max(int(np.busday_count(b.date(), t.date())), 0)
+    return max((t - b).days, 0)
+
+
+def near_limit(price: float, prev_close: float, code: str) -> bool:
+    """现价距涨停 ≤NEAR_LIMIT_PCT → 连板/封板进行中(强制了结的豁免条件, 不砍赢家)。"""
+    if price <= 0 or prev_close <= 0:
+        return False
+    lim = prev_close * (1 + limit_pct_of(code))
+    return price >= lim * (1 - NEAR_LIMIT_PCT)
+
+
+def is_sealed(price: float, prev_close: float, code: str) -> bool:
+    """当前是否封死涨停(严格口径, 与 near_limit 的 97% 近似口径区分)。
+
+    用于【代码级连板保护】: 2026-09-22 事故 —— 603068 封死涨停, 模型仍给 78 分
+    触发 SELL 推送(提示词的"连板保护 sell_score≤25"被模型违反)。提示词约束
+    不可靠, 卖飞涨停板是重大失误 → 代码级兜底: 封死涨停一律禁止卖出。
+    """
+    if price <= 0 or prev_close <= 0:
+        return False
+    return price >= prev_close * (1 + limit_pct_of(code)) - 0.01
+
+
+def forced_decision(tdays: int) -> dict:
+    """时间纪律强制了结的判定结果(不调 LLM, 也省 token)。
+
+    forced=True 让下游跳过 SELL_THR 门槛: 时间纪律是代码级纪律, 不是模型建议,
+    不该被阈值过滤(否则调高 SELL_THR 就会把强制了结一起关掉)。
+    """
+    return {"action": "SELL", "sell_score": 90.0, "scores": {}, "forced": True,
+            "verdict": "时间纪律",
+            "reason": "持满%d个交易日代码级强制了结(隔夜战法, 释放打板额度)" % tdays}
+
 
 _prev_close_cache = {}  # code -> {ds: 昨收} 内存缓存
 _hist_cache = {}  # (code, ds) -> 当日1分K DataFrame 内存缓存(日K权威值, 全天/长期有效)
@@ -604,16 +720,12 @@ def decide_sell(evidence: str, verbose: bool = True,
             content = hb + evidence
         else:
             content = evidence
-        import concurrent.futures as _cf
+        content += _sell_report_block()   # 校准闭环: 注入历史卖点成绩单
         llm = _client().get_llm()
-        try:
-            with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
-                _fut = _ex.submit(llm.invoke,
-                                  [SystemMessage(content=SYSTEM_SELL),
+        # 硬超时(daemon 线程 + join): 旧实现用 ThreadPoolExecutor + result(timeout),
+        # 退出 with 块时 shutdown(wait=True) 仍会阻塞到线程结束, 超时形同虚设。
+        resp = YA.invoke_llm(llm, [SystemMessage(content=SYSTEM_SELL),
                                    HumanMessage(content=content)])
-                resp = _fut.result(timeout=90)
-        except _cf.TimeoutError:
-            raise TimeoutError("LLM invoke timeout 90s")
         text = getattr(resp, "content", None) or str(resp)
     except Exception as exc:
         print("[AI] 调用失败(%s: %s)" % (type(exc).__name__, str(exc)[:100]))
@@ -635,6 +747,71 @@ def decide_sell(evidence: str, verbose: bool = True,
     except Exception as exc:
         print("[AI] JSON 解析失败: %s | %s" % (exc, text[:200]))
         return {}, "failed", {"prompt": content, "response": text}
+
+
+def decide_sell_batch(items: list, now=None) -> dict:
+    """一次 LLM 调用判定多只持仓 → {code: (dec, status, raw)}。
+
+    items: [(pos, evidence, meta, hkey, history, days_held, price, entry), ...]
+    实盘常驻 2~3 只持仓, 原实现逐只调用: 同一份 SYSTEM_SELL 被重复发送 N 遍,
+    且单轮耗时 = N × 单次延迟, 被 1 分钟 cron 的单实例锁跳过。
+    合并后 token ≈ 1/N, 单轮 ~35s。回测仍走单票 decide_sell(逐票逐时点, 缓存键独立)。
+    """
+    if not items:
+        return {}
+    ids = [chr(ord("A") + i) for i in range(len(items))]
+    parts = ["【本次共 %d 只持仓, 请逐只判定, id 依次为 %s】"
+             % (len(items), "/".join(ids))]
+    for i, (pos, ev, meta, hkey, h, days_held, price, entry) in enumerate(items):
+        block = ""
+        if h:
+            block += ("【%s · 此前扫描记录(关键锚点, 早→晚)】\n"
+                      % ids[i]) + "\n".join(_compact_history_lines(h)) \
+                     + "\n【%s · 趋势统计】" % ids[i] \
+                     + _trend_summary(h, meta[0], meta[1]) + "\n\n"
+        block += ev
+        parts.append("════ 持仓 %s (%s) ════\n%s"
+                     % (ids[i], pos.get("code", ""), block))
+    content = "\n\n".join(parts) + _sell_report_block()
+    try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+        llm = _client().get_llm()
+        resp = YA.invoke_llm(llm, [SystemMessage(content=SYSTEM_SELL),
+                                   HumanMessage(content=content)])
+        text = getattr(resp, "content", None) or str(resp)
+    except Exception as exc:
+        print("[AI] 批量调用失败(%s: %s)" % (type(exc).__name__, str(exc)[:100]))
+        return {}
+    m = re.search(r"\[.*\]", text, re.S)
+    if not m:
+        print("[AI] 批量原始输出: %s" % text[:300])
+        return {}
+    try:
+        data = json.loads(m.group(0))
+        if not isinstance(data, list):
+            data = [data]
+    except Exception as exc:
+        print("[AI] 批量 JSON 解析失败: %s | %s" % (exc, text[:200]))
+        return {}
+    id2item = {}
+    for i, it in enumerate(items):
+        id2item[str(ids[i]).upper()] = it
+        id2item[str(i + 1)] = it          # 模型偶尔用序号当 id
+    out = {}
+    for d in data:
+        key = str(d.get("id", "")).strip().upper()
+        it = id2item.get(key)
+        if it is None:
+            continue
+        pos = it[0]
+        out[pos["code"]] = ({
+            "action": str(d.get("action", "HOLD")).upper(),
+            "sell_score": float(d.get("sell_score", d.get("score", 0)) or 0),
+            "scores": d.get("scores", {}) or {},
+            "verdict": str(d.get("verdict", ""))[:4],
+            "reason": str(d.get("reason", ""))[:120],
+        }, "ok", {"prompt": content, "response": text})
+    return out
 
 
 # ---------------- 实时模式 ----------------
@@ -706,10 +883,53 @@ def load_alerts() -> dict:
         return {}
 
 
+SELL_REPORT = YOUZI / "youzi_sell_calibration_report.txt"
+
+
+def _sell_report_block() -> str:
+    """卖出判断的历史成绩单(校准闭环) — 与买侧 `ai_calibration_report.txt` 同构。
+
+    买侧把成绩单注入 prompt, 卖侧 prompt 却写着"每次判断都会被记录与实际走势比对校准"
+    却从不给模型看结果 —— 承诺了反馈但闭环断开, 模型无法自己修正 sell_score 标尺。
+    样本不足(文件缺失/过小)时不注入: 注入空表反而误导。
+    """
+    if os.getenv("YOUZI_SELL_NO_REPORT"):
+        return ""
+    try:
+        if SELL_REPORT.exists() and SELL_REPORT.stat().st_size > 80:
+            txt = SELL_REPORT.read_text(encoding="utf-8").strip()
+            if txt:
+                return ("\n\n【你截至当前的历史卖出判断成绩单 — 据此校准你的 sell_score 标尺】\n"
+                        + txt[:900])
+    except Exception:
+        pass
+    return ""
+
+
+def _acquire_lock() -> bool:
+    """单实例锁(2026-09-22 新增): 卖侧 cron 已改为 1 分钟/轮, 而单轮要跑 60~90s
+    (每只持仓一次 LLM 调用), 无锁必然进程重叠 → 并发写 SELL_HIST / positions
+    互相覆盖、重复推送、token 翻倍。用 flock: 进程崩溃时内核自动释放, 不留死锁。
+    """
+    global _LOCK_FP
+    try:
+        import fcntl
+        _LOCK_FP = open("/tmp/youzi_sell_ai.lock", "w")
+        fcntl.flock(_LOCK_FP, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        print("[锁] 上一轮卖出评估仍在跑(单轮>60s), 本次跳过(防并发覆盖状态)")
+        return False
+    except Exception:
+        return True      # 拿锁机制本身失败 → 不阻断业务
+
+
 def realtime(dry_run: bool = False) -> int:
     now = datetime.now()
     if _is_noon_pause(now):
         print("[跳过] 午休 11:30-13:00, 不评估卖出(省 token)")
+        return 0
+    if not _acquire_lock():
         return 0
     holds = load_positions()
     if not holds:
@@ -731,6 +951,43 @@ def realtime(dry_run: bool = False) -> int:
     except Exception:
         hist_all = {}
     rows = []
+    need_ai = []          # 需要模型判定的持仓(证据先攒好, 循环后一次性批量调用)
+
+    def _finalize(pos, meta, hkey, h, days_held, dec, stt, raw, forced,
+                  price, entry, prev):
+        """落盘判定 + 计算是否触发卖出 + 汇总到 rows(单票路径与批量路径共用)。"""
+        code = pos["code"]
+        snap = _snap_dict(now, meta[0], meta[1], meta[2], dec)
+        h.append(snap)
+        if len(h) > HISTORY_CAP:
+            del h[:-HISTORY_CAP]
+        hist_all[hkey] = h
+        log_judgement({
+            "mode": "live", "date": now.strftime("%Y-%m-%d"),
+            "time": now.strftime("%H:%M"), "code": code, "name": pos.get("name", code),
+            "buy_date": str(pos.get("buy_date")), "days_held": days_held,
+            "cur_pct": meta[0], "from_high": meta[1], "shape": meta[2],
+            "sell_score": dec.get("sell_score"), "verdict": dec.get("verdict", ""),
+            "action": dec.get("action"), "reason": dec.get("reason", ""),
+            "scores": dec.get("scores", {}), "forced": forced,
+            "snapshot": raw.get("prompt", ""), "llm_response": raw.get("response", ""),
+        })
+        if stt != "ok":
+            rows.append({**pos, "status": "AI_FAIL", "msg": "模型调用失败"})
+            return
+        pnl = (price / entry - 1) * 100 if price > 0 and entry > 0 else None
+        # 早盘硬规则: 09:30-10:00 代码级禁止卖出, 不论模型给多高分
+        # forced(时间纪律)直接放行, 不受 SELL_THR 约束
+        # 连板保护(代码级): 封死涨停一律不卖 —— 提示词的"≤25"被模型违反过(2026-09-22
+        # 603068 封死被推 SELL 78), 卖飞涨停是重大失误, 必须代码兜底
+        sell = ((not _is_early_hold(now)) and dec["action"] == "SELL"
+                and (forced or dec["sell_score"] >= SELL_THR)
+                and not is_sealed(price, prev, code))
+        rows.append({**pos, "status": "SELL" if sell else "HOLD",
+                     "sell_score": dec["sell_score"], "reason": dec["reason"],
+                     "price": price, "pnl": pnl, "days_held": days_held,
+                     "scores": dec["scores"], "forced": forced})
+
     try:
         for pos in holds:
             code = pos["code"]
@@ -746,44 +1003,80 @@ def realtime(dry_run: bool = False) -> int:
                 rows.append({**pos, "status": "DATA_SHORT", "msg": "无行情"})
                 continue
             bd = pd.Timestamp(pos["buy_date"]).date()
-            days_held = (now.date() - bd).days
-            ev, meta = build_evidence(code, pos.get("name", code), now.strftime("%Y-%m-%d"),
-                                      now, df, prev, entry, days_held, live_api=api)
-            hkey = "%s|%s" % (pos["buy_date"], code)
-            h = hist_all.get(hkey, [])
-            dec, stt, raw = decide_sell(ev, verbose=True, history=h,
-                                        cur_now=meta[0], fh_now=meta[1])
-            snap = _snap_dict(now, meta[0], meta[1], meta[2], dec)
-            h.append(snap)
-            if len(h) > HISTORY_CAP:
-                h = h[-HISTORY_CAP:]
-            hist_all[hkey] = h
-            log_judgement({
-                "mode": "live", "date": now.strftime("%Y-%m-%d"),
-                "time": now.strftime("%H:%M"), "code": code, "name": pos.get("name", code),
-                "buy_date": str(pos.get("buy_date")), "days_held": days_held,
-                "cur_pct": meta[0], "from_high": meta[1], "shape": meta[2],
-                "sell_score": dec.get("sell_score"), "verdict": dec.get("verdict", ""),
-                "action": dec.get("action"), "reason": dec.get("reason", ""),
-                "scores": dec.get("scores", {}),
-                "snapshot": raw["prompt"], "llm_response": raw["response"],
-            })
-            if stt != "ok":
-                rows.append({**pos, "status": "AI_FAIL", "msg": "模型调用失败"})
+            # 持有交易日数(非日历日): 原口径跨周末会把 T+1 吹成 T+3, 时间纪律判断全偏
+            days_held = trading_days_held(pos["buy_date"], now.strftime("%Y-%m-%d"))
+            # ── T+1 硬约束(2026-09-22): 当日买入的票当日不可卖 ──
+            # A 股 T+1: 今天买的份额今天不能卖。原逻辑不区分, 当日买入的票同样进 AI 评估,
+            # 一旦给到 sell_score≥阈值 就会推卖出、写 youzi_sold.jsonl、从 positions 里
+            # 剔除 → 记一笔根本无法成交的"卖出", 还凭空释放打板额度。故代码级跳过评估。
+            if days_held <= 0:
+                rows.append({**pos, "status": "T1_LOCK",
+                             "msg": "T+1 当日买入不可卖", "days_held": 0})
                 continue
-            pnl = (price / entry - 1) * 100 if price > 0 else None
-            # 早盘硬规则: 09:30-10:00 代码级禁止卖出, 不论 AI 给多高分
-            sell = (not _is_early_hold(now)) and dec["action"] == "SELL" and dec["sell_score"] >= SELL_THR
-            rows.append({**pos, "status": "SELL" if sell else "HOLD",
-                         "sell_score": dec["sell_score"], "reason": dec["reason"],
-                         "price": price, "pnl": pnl, "days_held": days_held,
-                         "scores": dec["scores"]})
+            # hkey 含评估日: 原 key 只有 (buy_date, code) → 历史跨日无限累积,
+            # 今天 09:30 的评估会把昨天 14:58 的扫描点当"此前扫描记录"喂给模型
+            # (趋势统计算"较首点"跨日变化毫无意义), 且降频判断会跨日误判。
+            ds = now.strftime("%Y-%m-%d")
+            hkey = "%s|%s|%s" % (pos["buy_date"], code, ds)
+            h = hist_all.get(hkey, [])
+            # ── 封死涨停 → 降频评估(省 token): 严格封死才降频, +7~9% 未封死的票
+            #    恰恰是炸板高发区, 仍按正常频率评估 ──
+            if is_sealed(price, prev, code) and h:
+                _lt = str(h[-1].get("t") or "")
+                try:
+                    _lts = now.replace(hour=int(_lt[:2]), minute=int(_lt[3:5]),
+                                       second=0, microsecond=0)
+                    _gap = (now - _lts).total_seconds()
+                except Exception:
+                    _gap = SEAL_EVAL_MIN * 60
+                # _gap<0 = 跨日残留(昨日 14:58 的记录), 不节流
+                if 0 <= _gap < SEAL_EVAL_MIN * 60:
+                    rows.append({**pos, "status": "SKIP_SEALED", "days_held": days_held,
+                                 "price": price, "sell_score": None,
+                                 "pnl": (price / entry - 1) * 100 if price > 0 else None,
+                                 "reason": "封板中·降频(上次评估 %s, 每 %d 分钟一次)"
+                                           % (_lt, SEAL_EVAL_MIN)})
+                    continue
+            forced = False
+            if (days_held >= FORCE_SELL_DAYS and _force_time_ok(now)
+                    and not near_limit(price, prev, code)):
+                # 时间纪律命中 → 不调 LLM(省 token), 直接判定卖出, 当日释放打板额度
+                dec = forced_decision(days_held)
+                stt = "ok"
+                raw = {"prompt": "[时间纪律] 持有%d个交易日, 未调用模型" % days_held,
+                       "response": ""}
+                cur = float(df.iloc[-1]["close"]) if df is not None and len(df) else price
+                meta = ((cur / prev - 1) * 100 if prev > 0 else 0.0, 0.0, "强制了结")
+                forced = True
+                _finalize(pos, meta, hkey, h, days_held, dec, stt, raw, forced,
+                          price, entry, prev)
+            else:
+                # 需要 AI 判定的: 先攒证据, 循环结束后**一次性**调模型(见下方批量调用)
+                ev, meta = build_evidence(code, pos.get("name", code), now.strftime("%Y-%m-%d"),
+                                          now, df, prev, entry, days_held, live_api=api)
+                need_ai.append((pos, ev, meta, hkey, h, days_held, price, entry))
+
+        # ── 批量调用(2026-09-22): 所有需判定的持仓合并成 1 次 LLM ──
+        # 原实现每只票单独调一次: 3 只持仓 = 3 次调用, 且同一份 SYSTEM_SELL(~1200字)
+        # 被重复发送 3 遍。合并后: 1 次调用, token 约降到 1/3, 单轮从 75~105s 降到 ~35s,
+        # 1 分钟 cron 才不会被单实例锁跳过。
+        if need_ai:
+            bres = decide_sell_batch(need_ai, now)
+            for (pos, ev, meta, hkey, h, days_held, price, entry) in need_ai:
+                dec, stt, raw = bres.get(pos["code"], (
+                    {"action": "HOLD", "sell_score": -1}, "failed",
+                    {"prompt": "", "response": "批量调用未返回该票"}))
+                _finalize(pos, meta, hkey, h, days_held, dec, stt, raw, False,
+                          price, entry, prev)
     finally:
         try:
             api.disconnect()
         except Exception:
             pass
     try:
+        # 只保留当日的扫描历史: hkey 已含评估日, 旧 key 自然被丢弃(防跨日污染 + 防文件膨胀)
+        _ds = now.strftime("%Y-%m-%d")
+        hist_all = {k: v for k, v in hist_all.items() if k.endswith("|" + _ds)}
         SELL_HIST.write_text(json.dumps(hist_all, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
@@ -799,6 +1092,11 @@ def realtime(dry_run: bool = False) -> int:
         SELL_ALERTS.write_text(json.dumps(alerts, ensure_ascii=False), encoding="utf-8")
 
     _settle = now.hour * 60 + now.minute >= 14 * 60 + 50
+    # 强制了结(时间纪律)不等 14:50: 当日必走, 命中即记账 → 立刻把打板额度还给你。
+    # 否则"10:00 判定卖、14:50 才写 youzi_sold.jsonl" → youzi_live 的 quota=sells_today_count
+    # 全天为 0 → 当天根本买不进新票(这正是 09-21 全天 0 成交的根因)。
+    if not dry_run and any(r.get("forced") for r in pending):
+        _settle = True
     if not dry_run and _settle and pending:
         have = set()
         if SOLD.exists():
@@ -819,7 +1117,8 @@ def realtime(dry_run: bool = False) -> int:
                         "buy_price": float(r.get("entry") or 0),
                         "sell_date": now.strftime("%Y-%m-%d"),
                         "sell_price": float(r.get("price") or 0),
-                        "status": "SELL_AI", "sell_score": r.get("sell_score"),
+                        "status": "SELL_FORCED" if r.get("forced") else "SELL_AI",
+                        "sell_score": r.get("sell_score"),
                         "reason": r.get("reason", ""),
                     }, ensure_ascii=False) + "\n")
         try:
@@ -837,11 +1136,23 @@ def realtime(dry_run: bool = False) -> int:
     print("=" * 70)
     print("游资卖出AI · %s · 阈值 sell_score>=%.0f" % (now.strftime("%Y-%m-%d %H:%M"), SELL_THR))
     for r in rows:
+        if r.get("status") == "T1_LOCK":
+            print("  [T+1] %s(%s) 当日买入, 今日不可卖(不评估)" % (
+                r.get("name", r["code"]), r["code"]))
+            continue
+        if r.get("status") == "SKIP_SEALED":
+            pnl = " 浮盈%+.2f%%" % r["pnl"] if r.get("pnl") is not None else ""
+            print("  [封板·降频] %s(%s)%s · %s" % (
+                r.get("name", r["code"]), r["code"], pnl, r.get("reason", "")))
+            continue
         sc = r.get("sell_score")
         tag = "SELL" if r.get("status") == "SELL" else "HOLD"
+        if r.get("forced"):
+            tag += "*"     # *=代码级时间纪律强制, 非模型判定
         pnl = " 浮盈%+.2f%%" % r["pnl"] if r.get("pnl") is not None else ""
-        print("  [%s] %s(%s) score=%s%s\n     %s" % (
-            tag, r.get("name", r["code"]), r["code"], sc, pnl, r.get("reason", "")))
+        dh = " 持%d日" % r["days_held"] if r.get("days_held") is not None else ""
+        print("  [%s] %s(%s) score=%s%s%s\n     %s" % (
+            tag, r.get("name", r["code"]), r["code"], sc, pnl, dh, r.get("reason", "")))
     print("=" * 70)
 
     webhook = (os.getenv("DINGTALK_YOUZI_WEBHOOK") or os.getenv("DINGTALK_WEBHOOK") or "").strip()
@@ -993,7 +1304,26 @@ def backtest(limit: int = 0, step: int = 10, max_hold: int = 2,
                 if len(sub) == 0:
                     continue  # 该时刻无 Bar(如开盘前), 跳过此扫描点
                 key = "%s|%s|%s" % (code, ds, t.strftime("%H%M"))
-                if dry_data:
+                # 时间纪律(与实盘同口径): 持满 FORCE_SELL_DAYS 个交易日且未封板 → 强制了结
+                _px = float(sub.iloc[-1]["close"])
+                _frc = ((di + 1) >= FORCE_SELL_DAYS and _force_time_ok(t)
+                        and not near_limit(_px, prev, code))
+                if _frc:
+                    dec = forced_decision(di + 1)
+                    snap = _snap_dict(t, (_px / prev - 1) * 100 if prev > 0 else 0.0,
+                                      0.0, "强制了结", dec)
+                    log_judgement({
+                        "mode": "backtest", "date": ds, "time": t.strftime("%H:%M"),
+                        "code": code, "name": b["name"], "buy_date": bd,
+                        "days_held": di + 1,
+                        "cur_pct": snap["cur"], "from_high": 0.0, "shape": "强制了结",
+                        "sell_score": dec.get("sell_score"), "verdict": dec.get("verdict", ""),
+                        "action": dec.get("action"), "reason": dec.get("reason", ""),
+                        "scores": {}, "forced": True,
+                        "snapshot": "[时间纪律] 持有%d个交易日, 未调用模型" % (di + 1),
+                        "llm_response": "",
+                    })
+                elif dry_data:
                     dec = {"action": "HOLD", "sell_score": 0}
                     snap = {"t": t.strftime("%H:%M"), "cur": 0, "fh": 0,
                             "shape": "dry", "score": 0, "reason": ""}
@@ -1033,7 +1363,10 @@ def backtest(limit: int = 0, step: int = 10, max_hold: int = 2,
                     if len(cache) % 20 == 0:
                         cache_path.write_text(json.dumps(cache, ensure_ascii=False))
                 # 早盘硬规则: 09:30-10:00 代码级禁止卖出, 不论 AI 给多高分
-                if (not _is_early_hold(t)) and dec.get("action") == "SELL" and dec.get("sell_score", 0) >= thr:
+                # forced(时间纪律)不受 thr 约束(与实盘一致); 封死涨停代码级禁止卖
+                if ((not _is_early_hold(t)) and dec.get("action") == "SELL"
+                        and (dec.get("forced") or dec.get("sell_score", 0) >= thr)
+                        and not is_sealed(_px, prev, code)):
                     price = float(sub.iloc[-1]["close"])
                     first_sell = {"t": t, "price": price,
                                   "score": dec.get("sell_score"),
@@ -1068,6 +1401,33 @@ def backtest(limit: int = 0, step: int = 10, max_hold: int = 2,
             print("  %s %s: %s 未触发(持收 %+.2f%%)" % (code, b["name"], ds, close_pnl))
 
     cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    # 落盘回测逐笔汇总(供 youzi_sell_calibrate 作为'回测反事实'数据源, 比日K近似精确)
+    _bt_file = LOG_DIR / "sell_backtest_results.jsonl"
+    _bt_old = []
+    if _bt_file.exists():
+        for _l in _bt_file.read_text(encoding="utf-8").splitlines():
+            _l = _l.strip()
+            if _l:
+                try:
+                    _bt_old.append(json.loads(_l))
+                except Exception:
+                    pass
+    _bt_seen = {(r.get("code"), r.get("buy_date"), r.get("eval"), r.get("thr"))
+                for r in _bt_old}
+    for r in rows:
+        _rec = {**r, "thr": thr, "step": step, "max_hold": max_hold}
+        _key = (r.get("code"), r.get("buy_date"), r.get("eval"), thr)
+        if _key in _bt_seen:
+            for _i, _o in enumerate(_bt_old):
+                if (_o.get("code"), _o.get("buy_date"), _o.get("eval"), _o.get("thr")) == _key:
+                    _bt_old[_i] = _rec
+                    break
+        else:
+            _bt_old.append(_rec)
+            _bt_seen.add(_key)
+    _bt_file.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in _bt_old),
+                         encoding="utf-8")
+    print("  回测汇总落盘(累计 %d 笔) → %s" % (len(_bt_old), _bt_file.name))
     df = pd.DataFrame(rows)
     if len(df) == 0:
         print("无回测结果")
