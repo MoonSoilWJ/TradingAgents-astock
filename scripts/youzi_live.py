@@ -99,6 +99,7 @@ PROGRESS_CAP = 0.33        # 进度封顶(2026-09-16): vr/est_turn 均 ÷progres
 # ── 影子模式(额度用尽时): 判定仍要落盘做校准样本, 但降频+限量省 token/CPU ──
 SHADOW_AI_INTERVAL = int(_os.getenv("YOUZI_SHADOW_AI_INTERVAL") or "300")  # 秒
 _LAST_AI_TS = None          # 上次真正调 AI 的时刻(常驻进程内节流)
+_LAST_QUOTA = -1            # 上一轮的额度值(用于检测 0→正数 的恢复事件)
 
 # 不再作为"每轮候选上限"(2026-09-22 去掉, 避免漏票), 只作为整批失败时的拆分重试粒度
 AI_CHUNK = int(_os.getenv("YOUZI_AI_CHUNK") or "8")
@@ -109,6 +110,8 @@ AI_BATCH_CAP = 8            # 兼容旧引用; 判定分批粒度见 AI_CHUNK
 # 旧值 30s 只覆盖 ~1/4 判定轮 → 75% 的轮次 AI 根本看不到秒级证据。
 # 放宽到覆盖整个哨兵周期(150s), 数据龄随注入透出, 让模型与复盘都能感知证据新旧。
 FAST_BOOK_MAX_AGE = int(_os.getenv("YOUZI_FAST_BOOK_MAX_AGE") or "150")  # 秒
+# 落盘候选后等哨兵扫一轮再读 fast_book(哨兵 3s 轮询, 给 4s 冗余)
+FAST_BOOK_WAIT = int(_os.getenv("YOUZI_FAST_BOOK_WAIT") or "4")          # 秒
 # ── 2026-09-14 实盘149笔复盘定档, 试运行两周(至2026-09-28): ──
 # 量比≥4:  封板率 14%(vr<2)→46%(vr>8) 单调升, 低量比段拦掉
 # 成交额上限: 判定时已成交>12亿 封板率仅13%(全场明牌/抛压最大) — 反直觉但数据硬
@@ -1276,6 +1279,32 @@ def main() -> int:
                      if k != now.strftime("%Y-%m-%d")]:
             del state["skip_blacklist"][_old]   # 只留当日, 防 state 膨胀
         last_judge = state.setdefault("last_judge", {})
+        # ── 额度先算(2026-09-23): 冷却/拉黑过滤之前就要知道本轮是不是影子模式 ──
+        # 原顺序是先过滤再算额度 → 影子模式(额度0)期间照样写冷却,
+        # 等额度恢复后这些票还在 10 分钟冷却里 → 眼睁睁错过(2026-09-23 实测)。
+        # 而且影子模式 5 分钟一轮, 冷却 10 分钟 > 扫描间隔 → 校准采样也被砍半。
+        global _LAST_QUOTA
+        _bt0 = int(state.get("buy_today", 0))
+        _quota_now, _sold0, _held0 = quota_state(args.daily_max, args.daily_new,
+                                                 _bt0, now.strftime("%Y-%m-%d"))
+        shadow = (_quota_now == 0)
+        # -1 = 本进程首轮(重启后也走解冻: 进程内不知道重启前是不是影子模式)
+        if (_LAST_QUOTA == 0 or _LAST_QUOTA == -1) and _quota_now > 0:
+            # 额度刚恢复 → 清掉"冷却挡条", 本轮全量重评(否则要等 10 分钟才解冻)。
+            # 只保留"曾判 BUY 且 prob 达标且未推送过"的记录: 它们走下方 pending 通道,
+            # 豁免冷却/拉黑立即补推 —— 影子模式期间错过的机会在这里被捞回来。
+            _keep = {}
+            for _c, _r in last_judge.items():
+                if (isinstance(_r, dict) and _r.get("a") == "BUY"
+                        and float(_r.get("p") or 0) >= args.min_prob
+                        and _c not in state.get("sent", {})):
+                    _keep[_c] = _r
+            _n = len(last_judge) - len(_keep)
+            last_judge.clear()
+            last_judge.update(_keep)
+            print(f"    [额度恢复] 解冻 {_n} 条冷却记录 → 本轮全量重评"
+                  + (f"; 保留 {len(_keep)} 条 BUY 待补推" if _keep else ""))
+        _LAST_QUOTA = _quota_now
         # ── 重启恢复(2026-09-22, 600640 事故): 进程挂掉时"已判 BUY 未推送"的判定
         #    随内存蒸发。last_judge 现为 {action, prob, ts} 且每轮原子落盘 →
         #    15 分钟内 BUY 且 prob≥门槛且从未推送过的票: 豁免冷却/拉黑, 本轮重判补推。
@@ -1294,7 +1323,9 @@ def main() -> int:
             last = last_judge.get(s["code"])
             _lt = last.get("t") if isinstance(last, dict) else last
             # 冷却仅去重(防骏亚式54次重复刷屏), 不冻结: 超过冷却的SKIP→BUY翻转仍会重判
-            if (_lt and s["code"] not in pending and
+            # 影子模式期间照常记冷却(防 5 分钟一轮把同一只票重复判定、污染校准样本),
+            # 但额度一旦恢复会由上方 [额度恢复] 统一解冻, 不会卡住机会。
+            if _lt and s["code"] not in pending and (
                     (now - datetime.fromisoformat(_lt)).total_seconds()
                     < args.cooldown * 60):
                 continue
@@ -1320,6 +1351,14 @@ def main() -> int:
             (STATE_DIR / "candidates.json").write_text(json.dumps(
                 {"ts": time.time(), "codes": [s["code"] for s in fresh]}),
                 encoding="utf-8")
+        except Exception:
+            pass
+        # ── 等哨兵扫一轮再读(2026-09-23 修): ──
+        # 哨兵是 3 秒轮询; 若写完 candidates 立刻读 fast_book, 本轮新出现的票哨兵还没
+        # 纳入监控 → fast_book 里没有它 → 注入命中 0(日志"注入 0/1"), 即"首次出现的票
+        # 永远拿不到秒级证据"。这里等 FAST_BOOK_WAIT 秒(一轮 60s, 多等几秒无影响)。
+        try:
+            time.sleep(FAST_BOOK_WAIT)
         except Exception:
             pass
         # 注入秒级盘口摘要(30秒动量/卖一量变化/触板次数): 让 AI 看"变化率"而非单点快照
@@ -1354,9 +1393,7 @@ def main() -> int:
         # 折中: 只降频(每 SHADOW_AI_INTERVAL 秒一轮), 不砍候选(砍了会漏票、样本也有偏)。
         # token 降约 80%, 同时保住完整样本。规则层的 blocked_log 不受影响(已落盘)。
         global _LAST_AI_TS
-        _bt0 = int(state.get("buy_today", 0))
-        _q0, _sold0, _held0 = quota_state(args.daily_max, args.daily_new, _bt0,
-                                          now.strftime("%Y-%m-%d"))
+        _q0 = shadow                     # 额度已在冷却过滤前算好
         if _q0 and _LAST_AI_TS is not None and (
                 now - _LAST_AI_TS).total_seconds() < SHADOW_AI_INTERVAL:
             print(f"    → 影子模式(配额0, 遗留{_held0}/已买{_bt0}): 本轮跳过 AI "

@@ -141,17 +141,34 @@ def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     out_pkl = Path(args.out) if args.out else DAILY_PKL
 
-    # 累加式: 载入既有 pkl 中已完成的标的, 本轮只补拉缺失的, 末尾合并写回
+    # 累加式: 载入既有 pkl, 按【每股最后日期】判定增量, 末尾合并写回
     # (东财限频下每轮只能拉到一部分, 整体覆盖会丢失此前进度 → 必须累加)
+    # ⚠️ 2026-09-22 修复: 原逻辑"code 已存在即跳过"只补缺股不补缺日期,
+    #    日K 永不前进 (9/22 实测绝大多数股停在 9/18)。改为: 最后日期已含
+    #    今日(或 --as-of 指定日)才跳过, 否则重拉全史由合并去重兜底。
     existing_df = None
     existing_codes: set = set()
+    existing_last: dict = {}
+    trade_idx: dict = {}
+    have_sets: dict = {}
     if out_pkl.exists() and not args.offset:
         try:
             existing_df = pd.read_pickle(out_pkl)
             existing_codes = set(existing_df["code"].unique())
-            print(f"[基线] 既有 pkl 含 {len(existing_codes)} 只, 本轮补拉缺失标的")
+            existing_last = existing_df.groupby("code")["date"].max().to_dict()
+            # 缺口感知: 全市场覆盖率>95% 的日子视为"必须有的交易日";
+            # 个股缺其中任一天 → 判为有洞 → 重拉全史补齐 (停牌股重拉幂等无害)
+            day_counts = existing_df["date"].value_counts()
+            must_days = sorted(
+                day_counts[day_counts > 0.95 * len(existing_codes)].index)
+            trade_idx = {d: i for i, d in enumerate(must_days)}
+            have_sets = existing_df.groupby("code")["date"].agg(set).to_dict()
+            print(f"[基线] 既有 pkl 含 {len(existing_codes)} 只, "
+                  f"最后日期 {existing_df['date'].max().date()}, 补拉落后/有洞标的")
         except Exception:
             existing_df = None
+    # 增量基准日: 当天 0 点 (当日收盘K拉过即视为已最新); 盘前跑时自然无一股达标 → 全量补
+    as_of = pd.Timestamp.now().normalize()
 
     api = connect()
     try:
@@ -195,9 +212,12 @@ def main() -> int:
     skip = 0
     try:
         for i, (m, code, name) in enumerate(uni):
-            if code in existing_codes and not args.force:  # 已完成且非强制 → 跳过
-                skip += 1
-                continue
+            last = existing_last.get(code)
+            if not args.force and last is not None and pd.Timestamp(last) >= as_of:
+                have = have_sets.get(code) or set()
+                if all(d in have for d in trade_idx):
+                    skip += 1             # 最后日期已含今日 且 必须交易日无洞 → 跳过
+                    continue
             try:
                 d = fetch_one_em(code, args.start)
                 consec_fail = 0

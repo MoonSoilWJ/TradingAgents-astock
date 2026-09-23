@@ -90,6 +90,13 @@ def _force_time_ok(t) -> bool:
 NEAR_LIMIT_PCT = 0.03   # 现价距涨停 ≤3% 视为连板进行中, 豁免强制了结
 # 封死/近涨停持仓的评估间隔(分钟): 连板票每 2 分钟判一次没有信息量, 还白烧 token
 SEAL_EVAL_MIN = int(os.getenv("YOUZI_SEAL_EVAL_MIN") or "15")
+# 同一持仓的卖出提醒冷却(秒): 避免 AI 持续判 SELL 时每分钟重复推送
+ALERT_COOLDOWN = int(os.getenv("YOUZI_ALERT_COOLDOWN") or "1800")
+# 已推送过卖出提醒的持仓 → 评估降频间隔(分钟)。人已收到提醒, 每分钟重判结论都一样
+# (603353: 68.5/68.3/68.5 连续三轮同结论) 纯烧 token; 哨兵(3秒)仍在盯事件, 出事会即时触发。
+SELL_ALERT_EVAL_MIN = int(os.getenv("YOUZI_SELL_ALERT_EVAL_MIN") or "10")
+# 哨兵事件触发本脚本时置 1 → 绕过降频(事件驱动就是要即时评估)
+EVENT_TRIGGER = bool(os.getenv("YOUZI_SELL_EVENT_TRIGGER"))
 # 早盘硬规则: 09:30-09:59 代码级禁止任何卖出(LLM 早盘高噪音窗口结构性弱点兜底, 已验证避免地板割肉)
 EARLY_HOLD_START = 9 * 60 + 30
 EARLY_HOLD_END = 10 * 60
@@ -217,7 +224,15 @@ SYSTEM_SELL = """你是一位资金体量数亿的 A 股游资大佬, 深耕打�
 【给分必须"算"出来, 不许"背"出来】
  · sell_score 是你自己对六维子分加权复合的结果, 正常应该出现 23 / 37 / 52 这类带个位的值;
  · 严禁直接输出 15/25/30/35/40/45 等本提示词里出现过的整数 —— 那是抄锚点不是打分, 会让校准彻底失效;
- · 同一持仓连续扫描: 只要证据(涨跌幅/量能/距高点/站均价)任一维变了, 分数必须跟着动, 不许复制上一次。
+
+【★分数必须稳定 — 2026-09-23 修订(去整数锚点的副作用)】
+相邻两次扫描只隔 1 分钟, 盘面通常没有实质变化。此时分数**必须保持稳定(与上次相差 ≤5 分)** ——
+   逐分钟重算不等于逐分钟改判; 复制上次分数在"证据没变"时是**正确**的, 不是偷懒。
+只有当证据出现**方向性变化**时, 分数才可以明显移动(>10 分), 例如:
+   由缩量转放量下跌(下跌放量比跨过 1.3)、跌破分时均价且收不回、出现连创新低、
+   炸板/开板、封单快速衰减、新增利空公告。
+❗禁止: 因 1 分钟内的单笔成交/分时小波动就把分数大幅上调或下调(603353: 10:32 给43.6,
+   10:33 仅因放量比 1.4x 就跳到 63.2 → 结论 HOLD→SELL 反复翻转, 是抖动不是判断)。
 
 【输出】严格 JSON, 对每只持仓各给一项:
 [{"id":"A","action":"SELL","sell_score":82,
@@ -773,7 +788,7 @@ def decide_sell_batch(items: list, now=None) -> dict:
     ids = [chr(ord("A") + i) for i in range(len(items))]
     parts = ["【本次共 %d 只持仓, 请逐只判定, id 依次为 %s】"
              % (len(items), "/".join(ids))]
-    for i, (pos, ev, meta, hkey, h, days_held, price, entry) in enumerate(items):
+    for i, (pos, ev, meta, hkey, h, days_held, price, entry, prev) in enumerate(items):
         block = ""
         if h:
             block += ("【%s · 此前扫描记录(关键锚点, 早→晚)】\n"
@@ -873,18 +888,194 @@ def fetch_live_df(api, code: str):
     return df, price, prev
 
 
-def load_positions() -> list[dict]:
+def _sold_keys() -> set:
+    """youzi_sold.jsonl 里已记账卖出的 (buy_date, code) 集合。"""
+    keys = set()
+    if not SOLD.exists():
+        return keys
+    try:
+        for line in SOLD.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            o = json.loads(line)
+            keys.add((str(o.get("buy_date")), str(o.get("code"))))
+    except Exception:
+        pass
+    return keys
+
+
+def load_positions(include_sold: bool = False) -> list[dict]:
+    """持仓列表。默认**排除已在 youzi_sold.jsonl 记账卖出的票**。
+
+    2026-09-23: 手动卖出没有记账路径 → 人卖了但 positions.json 没清 →
+    卖侧 AI 仍在每分钟评估已清仓的票(白烧 LLM), 买侧还把它算进"遗留持仓"卡死额度。
+    这里做防御: 只要记过卖出就不再评估(记账与清仓不一致时以记账为准)。
+    """
     if not POSITIONS.exists():
         return []
     try:
         raw = json.loads(POSITIONS.read_text(encoding="utf-8"))
     except Exception:
         return []
+    sold = set() if include_sold else _sold_keys()
     out = []
     for day, holds in raw.items():
         for code, meta in holds.items():
+            if (str(day), str(code)) in sold:
+                continue
             out.append({"buy_date": day, "code": code, **meta})
     return out
+
+
+def settle_pushed(items: list, now: datetime) -> int:
+    """推送即平仓(2026-09-23 用户定): 已推送过卖出提醒的持仓 → 记账 + 移出 positions。
+
+    之前"推送≠成交", 记账要等 14:50 或 14:30 强制了结 → 期间仓位被占、额度不恢复、
+    还要每分钟重复评估。现改为: 提醒发出去就按已卖出记账, 额度立刻释放。
+    ⚠ 若实际没成交, 用 `python3 scripts/youzi_sell_ai.py --undo-sold CODE` 撤销。
+    """
+    if not items:
+        return 0
+    try:
+        raw = json.loads(POSITIONS.read_text(encoding="utf-8"))
+    except Exception:
+        raw = {}
+    prices = {}
+    try:
+        from tx_quote import snapshot as tx_snapshot
+        prices = tx_snapshot([p["code"] for p in items]) or {}
+    except Exception:
+        pass
+    ds = now.strftime("%Y-%m-%d")
+    sold_keys = _sold_keys()
+    n = 0
+    for p in items:
+        day, code = str(p.get("buy_date")), str(p.get("code"))
+        if (day, code) in sold_keys:
+            continue
+        meta = (raw.get(day) or {}).get(code)
+        if meta is None:
+            continue
+        px = float((prices.get(code) or {}).get("price") or 0)
+        with open(SOLD, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "code": code, "name": meta.get("name", code), "buy_date": day,
+                "buy_price": float(meta.get("entry") or 0), "sell_date": ds,
+                "sell_price": px, "status": "SELL_AI_PUSHED",
+                "sell_score": p.get("sell_score"), "reason": p.get("reason", ""),
+                "_pos_meta": meta,      # 供 --undo-sold 完整恢复持仓
+            }, ensure_ascii=False) + "\n")
+        raw[day].pop(code)
+        if not raw[day]:
+            raw.pop(day, None)
+        print("  [推送即平仓] %s %s 记账卖出(价 %.2f) → 额度释放"
+              % (code, meta.get("name", code), px))
+        n += 1
+    if n:
+        _atomic_json(POSITIONS, raw)
+    return n
+
+
+def undo_sold(codes: list) -> int:
+    """撤销今日的 SELL_AI_PUSHED 记账(推送了但没真成交) → 恢复持仓 + 清提醒。"""
+    ds = datetime.now().strftime("%Y-%m-%d")
+    try:
+        lines = SOLD.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        lines = []
+    try:
+        pos = json.loads(POSITIONS.read_text(encoding="utf-8"))
+    except Exception:
+        pos = {}
+    keep, n = [], 0
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            o = json.loads(line)
+        except Exception:
+            keep.append(line)
+            continue
+        if (str(o.get("sell_date")) == ds and str(o.get("code")) in codes
+                and o.get("status") == "SELL_AI_PUSHED"):
+            meta = o.get("_pos_meta") or {}
+            pos.setdefault(str(o.get("buy_date")), {})[str(o["code"])] = meta
+            n += 1
+            print("  ↩ 撤销 %s %s, 恢复持仓(成本 %.2f)"
+                  % (o["code"], meta.get("name", o["code"]),
+                     float(meta.get("entry") or 0)))
+            continue
+        keep.append(line)
+    if n:
+        # SOLD 是 jsonl(逐行), 不能用 _atomic_json(它做 json.dump) → 文本方式原子替换
+        _tmp = str(SOLD) + ".tmp"
+        with open(_tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(keep) + "\n")
+        os.replace(_tmp, SOLD)
+        _atomic_json(POSITIONS, pos)
+        try:
+            al = load_alerts()
+            for c in codes:
+                for k in [k for k in al if k.endswith("|" + c)]:
+                    al.pop(k, None)
+            _atomic_json(SELL_ALERTS, al)
+        except Exception:
+            pass
+    return n
+
+
+def mark_sold(codes: list, price_map: dict = None) -> int:
+    """手动卖出记账: 写 youzi_sold.jsonl + 从 positions.json 移除 → 立即释放打板额度。
+
+    用法: python3 scripts/youzi_sell_ai.py --mark-sold 603068,603903 [--sold-price 603068=46.3]
+    脚本不代下单, 你卖掉后必须跑这条, 否则系统会一直当它还持仓(评估+占额度)。
+    """
+    now = datetime.now()
+    ds = now.strftime("%Y-%m-%d")
+    try:
+        raw = json.loads(POSITIONS.read_text(encoding="utf-8"))
+    except Exception:
+        raw = {}
+    sold_keys = _sold_keys()
+    prices = {}
+    try:
+        from tx_quote import snapshot as tx_snapshot
+        prices = tx_snapshot([str(c) for c in codes]) or {}
+    except Exception:
+        pass
+    n = 0
+    for day in list(raw.keys()):
+        for code in list((raw.get(day) or {}).keys()):
+            if str(code) not in codes:
+                continue
+            if (str(day), str(code)) in sold_keys:
+                print("  %s 已记账过, 跳过" % code)
+                continue
+            meta = raw[day][code]
+            px = 0.0
+            if price_map and str(code) in price_map:
+                px = float(price_map[str(code)] or 0)
+            elif str(code) in prices:
+                px = float(prices[str(code)].get("price") or 0)
+            with open(SOLD, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "code": str(code), "name": meta.get("name", code),
+                    "buy_date": str(day), "buy_price": float(meta.get("entry") or 0),
+                    "sell_date": ds, "sell_price": px,
+                    "status": "SELL_MANUAL", "sell_score": None,
+                    "reason": "手动卖出记账(释放额度)",
+                }, ensure_ascii=False) + "\n")
+            raw[day].pop(code)
+            if not raw[day]:
+                raw.pop(day, None)
+            print("  ✅ %s %s 已记账卖出(成本%.2f 卖价%.2f)"
+                  % (code, meta.get("name", code), float(meta.get("entry") or 0), px))
+            n += 1
+    if n:
+        _atomic_json(POSITIONS, raw)
+    return n
 
 
 def load_alerts() -> dict:
@@ -946,6 +1137,25 @@ def realtime(dry_run: bool = False) -> int:
     if not holds:
         print("[跳过] 无持仓记录")
         return 0
+    # ── 推送即平仓(2026-09-23 用户定): 今日已推送过卖出提醒的持仓视为已卖出 ──
+    # 之前"推送≠成交"要等 14:50 才记账 → 仓位被占、额度不恢复、每分钟重复评估。
+    # 这里统一补记(含历史推送过的), 记账后 load_positions 过滤 → 不再评估。
+    try:
+        _al = load_alerts()
+        _ds = now.strftime("%Y-%m-%d")
+        _pushed = [p for p in holds
+                   if (isinstance(_al.get("%s|%s" % (p["buy_date"], p["code"])),
+                                  (int, float))
+                       and datetime.fromtimestamp(
+                           _al["%s|%s" % (p["buy_date"], p["code"])]).strftime("%Y-%m-%d") == _ds)]
+        if _pushed:
+            settle_pushed(_pushed, now)
+            holds = load_positions()      # 重新加载: 已记账的被过滤掉
+            if not holds:
+                print("[跳过] 持仓已全部平仓记账")
+                return 0
+    except Exception as exc:
+        print("[warn] 推送即平仓失败: %s" % str(exc)[:80])
     api = None
     try:
         from pytdx.hq import TdxHq_API
@@ -991,11 +1201,27 @@ def realtime(dry_run: bool = False) -> int:
         # forced(时间纪律)直接放行, 不受 SELL_THR 约束
         # 连板保护(代码级): 封死涨停一律不卖 —— 提示词的"≤25"被模型违反过(2026-09-22
         # 603068 封死被推 SELL 78), 卖飞涨停是重大失误, 必须代码兜底
-        sell = ((not _is_early_hold(now)) and dec["action"] == "SELL"
+        # ── 2026-09-23: 不再依赖 action 字段 ──
+        # 事故: 603068 给出 sell_score=89 且理由写"资金效率归零必卖", 但 action 字段
+        # 却返回 "HOLD" → 代码要求 action=="SELL" → 该卖的票被自己卡成 HOLD。
+        # 模型违反自洽要求已是第二次(上次是封死涨停给78分)。故以连续量 sell_score 为准,
+        # action 仅作日志展示; 分数是"该卖程度", 理由与分数一致即执行。
+        sell = ((not _is_early_hold(now))
                 and (forced or dec["sell_score"] >= SELL_THR)
                 and not is_sealed(price, prev, code))
+        # ── 迟滞(2026-09-23): 分数在阈值附近抖动会让 HOLD/SELL 反复翻转 ──
+        # 实例: 603353 10:32 score=43.6(HOLD) → 10:33 score=63.2(SELL), 一分钟翻转。
+        # 规则: 弱信号(阈值 ~ 阈值+15)必须连续两次达标才执行(上次分 ≥ 阈值-5 视为已确认);
+        #       强信号(≥ 阈值+15, 如炸板 85+)立即执行, 不等确认 —— 真出事不能拖。
+        _note = ""
+        if sell and not forced and dec["sell_score"] < SELL_THR + 15:
+            _ps = h[-1].get("score") if h else None
+            if not (isinstance(_ps, (int, float)) and _ps >= SELL_THR - 5):
+                sell = False
+                _note = " | 首次达阈值, 待下轮确认(防 1 分钟抖动)"
         rows.append({**pos, "status": "SELL" if sell else "HOLD",
-                     "sell_score": dec["sell_score"], "reason": dec["reason"],
+                     "sell_score": dec["sell_score"],
+                     "reason": (dec["reason"] or "") + _note,
                      "price": price, "pnl": pnl, "days_held": days_held,
                      "scores": dec["scores"], "forced": forced})
 
@@ -1030,6 +1256,27 @@ def realtime(dry_run: bool = False) -> int:
             ds = now.strftime("%Y-%m-%d")
             hkey = "%s|%s|%s" % (pos["buy_date"], code, ds)
             h = hist_all.get(hkey, [])
+            # ── 已推送过卖出提醒 → 降频评估(省 token) ──
+            # 人已经收到提醒, 每分钟重判结论都一样(603353: 68.5/68.3/68.5)纯烧钱。
+            # 哨兵(3秒)仍在盯盘口事件, 出事会带 YOUZI_SELL_EVENT_TRIGGER=1 触发本脚本 → 绕过降频。
+            _al = load_alerts().get("%s|%s" % (pos["buy_date"], code))
+            if (not EVENT_TRIGGER) and h and isinstance(_al, (int, float)) \
+                    and now.timestamp() - _al < ALERT_COOLDOWN:
+                _lt = str(h[-1].get("t") or "")
+                try:
+                    _lts = now.replace(hour=int(_lt[:2]), minute=int(_lt[3:5]),
+                                       second=0, microsecond=0)
+                    _gap = (now - _lts).total_seconds()
+                except Exception:
+                    _gap = SELL_ALERT_EVAL_MIN * 60
+                if 0 <= _gap < SELL_ALERT_EVAL_MIN * 60:
+                    rows.append({**pos, "status": "SKIP_ALERTED",
+                                 "days_held": days_held, "price": price,
+                                 "sell_score": h[-1].get("score"),
+                                 "pnl": (price / entry - 1) * 100 if price > 0 else None,
+                                 "reason": "提醒已推送(上次评估 %s), 降频至每 %d 分钟"
+                                           % (_lt, SELL_ALERT_EVAL_MIN)})
+                    continue
             # ── 封死涨停 → 降频评估(省 token): 严格封死才降频, +7~9% 未封死的票
             #    恰恰是炸板高发区, 仍按正常频率评估 ──
             if is_sealed(price, prev, code) and h:
@@ -1065,7 +1312,9 @@ def realtime(dry_run: bool = False) -> int:
                 # 需要 AI 判定的: 先攒证据, 循环结束后**一次性**调模型(见下方批量调用)
                 ev, meta = build_evidence(code, pos.get("name", code), now.strftime("%Y-%m-%d"),
                                           now, df, prev, entry, days_held, live_api=api)
-                need_ai.append((pos, ev, meta, hkey, h, days_held, price, entry))
+                # prev 必须一起存: 批量路径在循环外调用, 若用循环残留的 prev 会串到
+                # 别的票(2026-09-23 事故: 603068 被当成 603903 的昨收判 is_sealed → 误判封死禁卖)
+                need_ai.append((pos, ev, meta, hkey, h, days_held, price, entry, prev))
 
         # ── 批量调用(2026-09-22): 所有需判定的持仓合并成 1 次 LLM ──
         # 原实现每只票单独调一次: 3 只持仓 = 3 次调用, 且同一份 SYSTEM_SELL(~1200字)
@@ -1073,7 +1322,7 @@ def realtime(dry_run: bool = False) -> int:
         # 1 分钟 cron 才不会被单实例锁跳过。
         if need_ai:
             bres = decide_sell_batch(need_ai, now)
-            for (pos, ev, meta, hkey, h, days_held, price, entry) in need_ai:
+            for (pos, ev, meta, hkey, h, days_held, price, entry, prev) in need_ai:
                 dec, stt, raw = bres.get(pos["code"], (
                     {"action": "HOLD", "sell_score": -1}, "failed",
                     {"prompt": "", "response": "批量调用未返回该票"}))
@@ -1094,12 +1343,21 @@ def realtime(dry_run: bool = False) -> int:
 
     alerts = load_alerts() if not dry_run else {}
     pending = [r for r in rows if r.get("status") == "SELL"]
+    # ── 推送去重(2026-09-23 修): 旧代码把 alerts 写盘但推送时从不读,
+    #    结果同一只票只要 AI 一直判 SELL 就每分钟推一次(603903 今早连推两遍刷屏)。
+    #    改为存"上次推送时间戳", ALERT_COOLDOWN 内不重推; 超时再提醒一次(人可能没看到)。
+    _now_ts = now.timestamp()
+    to_push = []
     for r in pending:
         key = "%s|%s" % (r.get("buy_date"), r.get("code"))
-        if key not in alerts:
-            if not dry_run:
-                alerts[key] = True
-    if not dry_run and pending:
+        _last = alerts.get(key)
+        if (not dry_run) and isinstance(_last, (int, float)) \
+                and _now_ts - _last < ALERT_COOLDOWN:
+            continue
+        to_push.append(r)
+        if not dry_run:
+            alerts[key] = _now_ts
+    if not dry_run and to_push:
         _atomic_json(SELL_ALERTS, alerts)
 
     _settle = now.hour * 60 + now.minute >= 14 * 60 + 50
@@ -1151,6 +1409,11 @@ def realtime(dry_run: bool = False) -> int:
             print("  [T+1] %s(%s) 当日买入, 今日不可卖(不评估)" % (
                 r.get("name", r["code"]), r["code"]))
             continue
+        if r.get("status") == "SKIP_ALERTED":
+            _pnl = " 浮盈%+.2f%%" % r["pnl"] if r.get("pnl") is not None else ""
+            print("  [提醒中·降频] %s(%s)%s · %s" % (
+                r.get("name", r["code"]), r["code"], _pnl, r.get("reason", "")))
+            continue
         if r.get("status") == "SKIP_SEALED":
             pnl = " 浮盈%+.2f%%" % r["pnl"] if r.get("pnl") is not None else ""
             print("  [封板·降频] %s(%s)%s · %s" % (
@@ -1174,14 +1437,18 @@ def realtime(dry_run: bool = False) -> int:
     if not webhook:
         print("! 钉钉未配置")
         return 0
-    if pending:
+    if to_push:
         al = ["### 游资卖点提醒 · %s" % now.strftime("%Y-%m-%d %H:%M"),
               "> 以下持仓 AI 评分达卖出阈值, 请处理(脚本不代下单):", ""]
-        for r in pending:
+        for r in to_push:
             pnl = " 浮盈%+.2f%%" % r["pnl"] if r.get("pnl") is not None else ""
             al.append("- SELL **%s(%s)** score=%s%s\n  买入@%s 现价%s\n  %s" % (
                 r.get("name", r["code"]), r["code"], r.get("sell_score"),
                 pnl, r.get("entry"), r.get("price"), r.get("reason", "")))
+        # 闭环指令: 脚本不代下单, 人卖掉后必须记账, 否则系统仍当它持仓(继续评估+占额度)
+        al.append("")
+        al.append("> 卖掉后执行(立即释放额度):\n`python3 scripts/youzi_sell_ai.py "
+                  "--mark-sold " + ",".join(str(r["code"]) for r in to_push) + "`")
         ok = send_markdown("游资卖点提醒 · %s" % now.strftime("%m-%d %H:%M"),
                            "\n".join(al), webhook=webhook, keyword=keyword)
         print("卖点推送: %s (%d 笔)" % ("成功" if ok else "失败", len(pending)))
@@ -1473,7 +1740,33 @@ def main() -> int:
     ap.add_argument("--sell-thr", type=float, default=None, help="卖出阈值(覆盖默认70)")
     ap.add_argument("--code", type=str, default=None, help="回测只跑指定代码(逗号分隔, 如 000700,002774)")
     ap.add_argument("--show-io", action="store_true", help="回测时控制台打印每次大模型入参(prompt)/出参(response)")
+    ap.add_argument("--mark-sold", type=str, default=None,
+                    help="手动卖出记账(逗号分隔代码): 写youzi_sold.jsonl+清positions.json, 立即释放额度")
+    ap.add_argument("--sold-price", type=str, default=None,
+                    help="配合 --mark-sold 指定卖价, 如 603068=46.30,603903=14.85 (不给则取实时快照)")
+    ap.add_argument("--undo-sold", type=str, default=None,
+                    help="撤销今日'推送即平仓'记账(推送了但没真成交), 恢复持仓; 逗号分隔代码")
     args = ap.parse_args()
+    if args.undo_sold:
+        codes = [c.strip() for c in args.undo_sold.split(",") if c.strip()]
+        print("撤销今日推送即平仓: %s" % codes)
+        n = undo_sold(codes)
+        print("撤销 %d 笔; 当前持仓: %s" % (
+            n, [p["code"] for p in load_positions()]))
+        return 0
+    if args.mark_sold:
+        codes = [c.strip() for c in args.mark_sold.split(",") if c.strip()]
+        pmap = {}
+        if args.sold_price:
+            for kv in args.sold_price.split(","):
+                if "=" in kv:
+                    k, v = kv.split("=", 1)
+                    pmap[k.strip()] = v.strip()
+        print("手动卖出记账: %s" % codes)
+        n = mark_sold(codes, pmap)
+        print("完成 %d 笔; 剩余持仓: %s" % (
+            n, [p["code"] for p in load_positions()]))
+        return 0
     global SELL_THR
     if args.sell_thr:
         SELL_THR = args.sell_thr

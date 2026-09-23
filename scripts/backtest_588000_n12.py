@@ -104,24 +104,69 @@ def _market_of(code):
     return TDXParams.MARKET_SH if (c and c[0] in "569") else TDXParams.MARKET_SZ
 
 
+def _fetch_day_code_robust(code, start_date):
+    """写死 TDX 服务器失败时的降级链 (2026-09-22 修复):
+    pytdx 多服务器轮询 → akshare 前复权 (n12_cluster_now.fetch_daily_robust),
+    缺当日K时再用腾讯快照补一根 (还原 14:55 当日价口径, 用当日涨跌幅折算保持口径连续).
+    背景: 2026-09-10 起 pytdx 公共服务器集体失效, 单点 fetch 导致
+    科创50轮动 9/10~9/22 连续 9 个交易日不发换仓信号 (实盘卡在 512890).
+    """
+    try:
+        from n12_cluster_now import fetch_daily_robust
+        f, _mkt, _src = fetch_daily_robust(code)
+    except Exception:
+        return None
+    if f is None:
+        return None
+    f = f.copy()
+    f["date"] = pd.to_datetime(f["date"]).dt.normalize()
+    # 缺当日K (akshare 日线晚间才更新) 且今天是工作日 → 腾讯快照补当日收盘/最新价
+    try:
+        from datetime import datetime as _dt
+        from tx_quote import snapshot as tx_snapshot
+        today = pd.Timestamp(_dt.now().date())
+        last_date = pd.Timestamp(f["date"].values[-1])
+        if last_date < today and today.weekday() < 5 and (today - last_date).days <= 4:
+            snap = tx_snapshot([code]).get(code)
+            if snap and snap.get("pct") is not None:
+                adj = float(f["close"].values[-1]) * (1.0 + float(snap["pct"]))
+                f = pd.concat([f, pd.DataFrame({"date": [today], "close": [adj]})],
+                              ignore_index=True)
+    except Exception:
+        pass
+    f = f[f["date"] >= pd.Timestamp(start_date)]
+    f = f.sort_values("date").drop_duplicates("date").reset_index(drop=True)
+    if f.empty:
+        return None
+    return f.set_index("date")["close"].astype(float)
+
+
 def fetch_day_code(code, start_date="2020-11-16", pages=20):
     market = _market_of(code)
     api = TdxHq_API()
-    api.connect("180.153.18.170", 7709, time_out=5)
     frames = []
-    for pg in range(pages):
-        k = api.get_security_bars(TDXParams.KLINE_TYPE_DAILY, market, code.encode(), pg * 700, 700)
-        if k is None:
-            break
-        d = api.to_df(k)
-        if d is None or len(d) == 0:
-            break
-        frames.append(d)
-        if len(d) < 700:
-            break
-    api.disconnect()
+    try:
+        api.connect("180.153.18.170", 7709, time_out=5)
+        for pg in range(pages):
+            k = api.get_security_bars(TDXParams.KLINE_TYPE_DAILY, market, code.encode(), pg * 700, 700)
+            if k is None:
+                break
+            d = api.to_df(k)
+            if d is None or len(d) == 0:
+                break
+            frames.append(d)
+            if len(d) < 700:
+                break
+    except Exception:
+        frames = []
+    finally:
+        try:
+            api.disconnect()
+        except Exception:
+            pass
     if not frames:
-        return None
+        # 2026-09-22: 单点 TDX 故障 → 降级 robust 链, 不再直接返回 None
+        return _fetch_day_code_robust(code, start_date)
     f = pd.concat(frames, ignore_index=True)
     f["date"] = pd.to_datetime(f["datetime"]).dt.normalize()
     f = f[f["date"] >= pd.Timestamp(start_date)]

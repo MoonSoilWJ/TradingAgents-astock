@@ -57,6 +57,7 @@ SEAL_DECAY_WIN = 60         # 秒
 BREAK_PCT = 0.3             # 跌破涨停价 0.3% → 炸板
 FADE_PCT = 1.5              # 摸板后自日内高点回落超此百分比(未封死) → 摸板回落
 EVENT_COOLDOWN = 600        # 同票同事件冷却(秒)
+CAND_TTL = int(os.getenv("YOUZI_CAND_TTL") or "600")   # 候选监控有效期(秒)
 LOCK_PATH = "/tmp/youzi_fast_watch.lock"
 
 
@@ -118,12 +119,14 @@ def _trigger_ai(reason: str, now: datetime) -> bool:
     if time.time() - _AI_LAST_TS < 120:
         return False
     _AI_LAST_TS = time.time()
+    # YOUZI_SELL_EVENT_TRIGGER=1: 让卖侧绕过"已提醒降频", 事件驱动就是要求即时评估
+    _env = dict(os.environ, YOUZI_SELL_EVENT_TRIGGER="1")
     try:
         subprocess.Popen(
             ["/usr/local/bin/python3", str(_HERE / "youzi_sell_ai.py")],
             stdout=open("/tmp/youzi_sell_ai.log", "a"),
             stderr=subprocess.STDOUT,
-            cwd=str(_ROOT))
+            cwd=str(_ROOT), env=_env)
         print("  [事件→AI] %s 已触发卖出AI评估(事件: %s)" % (now.strftime("%H:%M:%S"), reason),
               flush=True)
         _log_event({"t": now.strftime("%F %T"), "event": "trigger_ai",
@@ -164,7 +167,10 @@ def watch_once(now: datetime) -> None:
     cand: list = []
     try:
         cj = json.loads(CAND_FILE.read_text(encoding="utf-8"))
-        if time.time() - float(cj.get("ts") or 0) < 120:
+        # 窗口 120s → 600s(2026-09-23): 候选在盘中常反复出现, 只监控最近 2 分钟的话,
+        # 票一进 fast_book 就被丢弃, 下次再出现时又要重新攒 12s 采样 → 命中率低。
+        # 放宽到 10 分钟: 反复出现的票始终有连续的秒级趋势(注入命中 4/11 → 接近全命中)。
+        if time.time() - float(cj.get("ts") or 0) < CAND_TTL:
             cand = [str(c) for c in (cj.get("codes") or [])]
     except Exception:
         pass
