@@ -622,13 +622,14 @@ def _fmt_fast_book(b: dict) -> str:
     return " | ".join(parts)
 
 
-def market_regime_block(now: datetime) -> str:
-    """情绪周期指标(纯代码, 每轮重算) → 注入买侧 prompt。
+def _regime_data(now: datetime) -> dict:
+    """情绪周期指标(纯代码, 每轮重算)。
 
     游资空仓纪律的核心 = 识别退潮期: 昨日涨停今日普遍不晋级/亏钱 → 今日少买甚至空仓。
     原系统只有涨停家数+最高连板, 模型看不到"周期位置", 退潮期照样给高分。
     数据: limits_{昨日}.json(save_limit_list 落盘的昨日涨停列表) + 腾讯快照(今日表现)。
     指标定义: 晋级率 = 昨日涨停今日仍封死占比; 均涨 = 昨日涨停股今日平均涨幅。
+    返回 {} (样本不足) 或 {n, promoted, touched, rate, avg, level, advice}。
     """
     import glob
     today = now.strftime("%Y-%m-%d")
@@ -668,24 +669,47 @@ def market_regime_block(now: datetime) -> str:
             touched += 1
     n = len(pcts)
     if n < 5:                      # 样本太少不出结论
-        return ""
+        return {}
     rate = promoted / n * 100
     avg = sum(pcts) / n * 100
     if rate < 30 and avg < 1.0:
         regime, advice = ("退潮期",
                           "游资纪律: 退潮期不接飞刀 —— 晋级率低迷+昨日涨停普遍亏钱, "
-                          "prob 应整体下修 5~10 分, 宁可全天空仓。")
+                          "今日暂停推送, 宁可全天空仓。")
     elif rate < 40 and avg < 0:
-        regime, advice = ("冰点/修复前夜",
+        regime, advice = ("冰点期",
                           "亏钱效应显著: 只给最强的核心票高分, 普通候选一律低分。")
     elif rate >= 50 and avg >= 3.0:
         regime, advice = ("主升期",
                           "情绪主升: 可适度积极, 但高位票(3板+)注意兑现风险。")
     else:
         regime, advice = ("震荡", "情绪中性: 按正常标准判。")
+    return {"n": n, "promoted": promoted, "touched": touched, "rate": rate,
+            "avg": avg, "level": regime, "advice": advice}
+
+
+def _regime_text(d: dict) -> str:
+    """把 _regime_data 的结果压成注入 prompt 的文本块。"""
+    if not d:
+        return ""
     return ("昨日涨停 %d 只 → 今日晋级 %d(%.0f%%) | 触板未回封 %d 只 | "
-            "昨日涨停股今日均涨 %+.2f%% → **周期: %s**" % (n, promoted, rate, touched, avg, regime)) \
-        + "\n  %s" % advice
+            "昨日涨停股今日均涨 %+.2f%% → **周期: %s**"
+            % (d["n"], d["promoted"], d["rate"], d["touched"], d["avg"],
+               d["level"])) + "\n  %s" % d["advice"]
+
+
+# 代码级退潮闸(2026-09-23 用户批准): 这些周期直接暂停推送。
+# 依据: 提示词约束已被模型三次无视(封死涨停给78/自相矛盾action/无视退潮警告),
+#       重要纪律必须代码执行。阈值来自游资接力规律, 校准期后可调。
+REGIME_BLOCK_LEVELS = ("退潮期", "冰点期")
+
+
+def market_regime_block(now: datetime) -> str:
+    return _regime_text(_regime_data(now))
+
+
+def market_regime_level(now: datetime) -> str:
+    return _regime_data(now).get("level", "")
 
 
 def market_max_streak(limit_codes: list, hist: dict):
@@ -1172,6 +1196,9 @@ def main() -> int:
         try:
             h = pd.read_pickle(MB_DAILY)
             h["date"] = pd.to_datetime(h["date"])   # 兼容字符串日期(pkl 存为 str)
+            # 只留今日之前(B8, 2026-09-23 补): 若 mb_daily 盘中更新含当日K,
+            # streak/距60日高/RSI 会掺入当日数据 = 前视, 且与回测口径不一致。
+            h = h[h["date"] < pd.Timestamp(today)]
             h = h[["code", "date", "close", "high",
                    "amount"]].sort_values(["code", "date"])
             hist = {c: g for c, g in h.groupby("code")}
@@ -1287,6 +1314,17 @@ def main() -> int:
         _bt0 = int(state.get("buy_today", 0))
         _quota_now, _sold0, _held0 = quota_state(args.daily_max, args.daily_new,
                                                  _bt0, now.strftime("%Y-%m-%d"))
+        # ── 代码级退潮闸(2026-09-23 用户批准) ──
+        # 模型无视了 prompt 里的退潮警告(10:51 002989 仍给 76), 与封死禁卖同理:
+        # 重要纪律必须代码执行。退潮/冰点期 → 额度视作 0(只记判定不推送)。
+        # 周期转好时走既有 [额度恢复] 解冻逻辑, 自动恢复推送。
+        _rd = _regime_data(now)
+        _regime_level = _rd.get("level", "")
+        if _regime_level in REGIME_BLOCK_LEVELS and _quota_now > 0:
+            print("    [退潮闸] 情绪周期=%s(晋级率%.0f%%, 昨日涨停均涨%+.2f%%) "
+                  "→ 暂停推送, 只记判定" % (_regime_level, _rd.get("rate", 0),
+                                            _rd.get("avg", 0)))
+            _quota_now = 0
         shadow = (_quota_now == 0)
         # -1 = 本进程首轮(重启后也走解冻: 进程内不知道重启前是不是影子模式)
         if (_LAST_QUOTA == 0 or _LAST_QUOTA == -1) and _quota_now > 0:
@@ -1407,7 +1445,8 @@ def main() -> int:
             try:
                 from youzi_ai import decide
                 # 情绪周期(纯代码): 晋级率/炸板率/昨日涨停今日表现 → 退潮期不买
-                _reg = market_regime_block(now)
+                # 复用本轮冷却前已算好的 _rd(避免重复拉腾讯快照)
+                _reg = _regime_text(_rd) if _rd else market_regime_block(now)
                 _t, _l = int(st.get("touch") or 0), int(st.get("limit") or 0)
                 if _reg and _t + _l > 0:
                     _reg += ("\n  今日盘中: 触板未回封 %d 只 / 封死 %d 只 → 盘中炸板率 %.0f%%"
