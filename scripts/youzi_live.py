@@ -687,6 +687,7 @@ def _regime_intraday(now: datetime, force: bool = False) -> dict:
         return {}
     rate = sealed / n * 100
     avg = sum(pcts) / n * 100
+    n_up = sum(1 for p in pcts if p > 0)   # 红盘数(emotion_block 复用, 免二次快照)
     if _REGIME_SERIES is None or _REGIME_SERIES.get("date") != today:
         try:
             old = json.loads(_REGIME_FILE.read_text(encoding="utf-8")) \
@@ -708,6 +709,7 @@ def _regime_intraday(now: datetime, force: bool = False) -> dict:
     ref = next(((r, a) for t, r, a in reversed(series) if ts - t >= 25 * 60),
                None) or (series[0][1], series[0][2])
     out = {"n": n, "sealed": sealed, "rate": rate, "avg": avg,
+           "prem_n": n, "prem_up": n_up,
            "rate_slope": rate - ref[0], "avg_slope": avg - ref[1]}
     _REGIME_CACHE["ts"] = now
     _REGIME_CACHE["data"] = out
@@ -965,34 +967,43 @@ def emotion_block(now: datetime) -> str:
     """打板接力赚钱效应 → 注入 AI prompt(证据维度, 非硬规则)。
 
     指标: 昨日涨停股今日平均溢价。冰点(<-2%)= 接力必亏, 修复(>2%)= 情绪回暖。
-    缓存 5 分钟(盘中每轮算会拖慢节奏); 无昨日数据返回空串。
+    2026-09-23: 复用 _regime_intraday 的快照缓存 —— 同一批昨日涨停股, 原实现
+    每次判定都再拉一遍快照(纯重复网络调用); 缓存缺失/过期才自拉。
     """
-    yd = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-    f = STATE_DIR / f"limits_{yd}.json"
-    if not f.exists():
-        return ""
-    try:
-        codes = json.loads(f.read_text(encoding="utf-8"))
-        if not codes:
+    prem = prem_n = prem_up = None
+    if _REGIME_CACHE["ts"] is not None and (
+            now - _REGIME_CACHE["ts"]).total_seconds() < 300 \
+            and "prem_n" in _REGIME_CACHE["data"]:
+        d = _REGIME_CACHE["data"]
+        prem, prem_n, prem_up = d["avg"], d["prem_n"], d["prem_up"]
+    if prem is None:
+        yd = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        f = STATE_DIR / f"limits_{yd}.json"
+        if not f.exists():
             return ""
-        from tx_quote import snapshot as tx_snap
-        q = tx_snap(codes)
-        prems = []
-        for c in codes:
-            v = q.get(c)
-            if not v or not v.get("price") or not v.get("prev_close"):
-                continue
-            prems.append(v["price"] / v["prev_close"] - 1)
-        if len(prems) < 10:                 # 样本太少不可信
+        try:
+            codes = json.loads(f.read_text(encoding="utf-8"))
+            if not codes:
+                return ""
+            from tx_quote import snapshot as tx_snap
+            q = tx_snap(codes)
+            prems = []
+            for c in codes:
+                v = q.get(c)
+                if not v or not v.get("price") or not v.get("prev_close"):
+                    continue
+                prems.append(v["price"] / v["prev_close"] - 1)
+            if len(prems) < 10:                 # 样本太少不可信
+                return ""
+            prem = sum(prems) / len(prems) * 100
+            prem_n = len(prems)
+            prem_up = sum(1 for x in prems if x > 0)
+        except Exception:
             return ""
-        prem = sum(prems) / len(prems) * 100
-        n_up = sum(1 for x in prems if x > 0)
-        mood = ("冰点, 接力普遍亏损" if prem < -2
-                else "回暖, 封板次日有溢价" if prem > 2 else "中性")
-        return (f"昨日涨停{len(codes)}只, 今日平均溢价 {prem:+.1f}% "
-                f"(红盘率 {n_up}/{len(prems)}) — 打板接力赚钱效应{mood}")
-    except Exception:
-        return ""
+    mood = ("冰点, 接力普遍亏损" if prem < -2
+            else "回暖, 封板次日有溢价" if prem > 2 else "中性")
+    return (f"昨日涨停{prem_n}只, 今日平均溢价 {prem:+.1f}% "
+            f"(红盘率 {prem_up}/{prem_n}) — 打板接力赚钱效应{mood}")
 
 
 class Tee:
@@ -1034,6 +1045,9 @@ def parse_hhmm(s: str) -> dtime | None:
 #    配置: 环境变量 YOUZI_PUSH_WINDOWS, 逗号分隔多段, 如 "09:40-11:00,13:00-14:30";
 #          设为 "all" = 恢复全天推送。
 PUSH_WINDOWS_RAW = _os.getenv("YOUZI_PUSH_WINDOWS") or "09:40-11:00"
+# 窗口外判定降频间隔(秒): 午后推送已不可能, 判定只为校准样本, 60s密度纯烧token
+POST_WINDOW_AI_INTERVAL = int(_os.getenv("YOUZI_POST_AI_INTERVAL") or "300")
+_LAST_POST_AI = None          # 上次窗口外判定时刻
 
 
 def push_windows() -> list:
@@ -1446,6 +1460,17 @@ def main() -> int:
                 print(f"    [秒级盘口] 快照龄{int(_fb_age)}s ≥ {FAST_BOOK_MAX_AGE}s, 本轮不注入(哨兵未跑?)")
             else:
                 print(f"    [秒级盘口] 快照龄{int(_fb_age)}s, 注入 {_fb_hits}/{len(fresh)} 只候选")
+
+        # ── 窗口外降频判定(2026-09-23): 窗口关闭后推送不可能发生, 判定只为
+        #    校准样本(10分钟格子分析每格≥1个样本即够), 60s密度纯烧token。
+        global _LAST_POST_AI
+        if not in_push_window(now):
+            if _LAST_POST_AI is not None and (
+                    now - _LAST_POST_AI).total_seconds() < POST_WINDOW_AI_INTERVAL:
+                print("    → 窗口外降频(每%d分钟判定一次), 本轮跳过 AI" % (
+                    POST_WINDOW_AI_INTERVAL // 60))
+                return
+            _LAST_POST_AI = now
 
         # ── AI 决策层: 规则负责召回, 模型负责判断"能不能封住板" ──
         if args.ai:

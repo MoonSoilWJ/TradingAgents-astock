@@ -135,8 +135,18 @@ def _client():
     return create_llm_client(provider=provider, model=model, temperature=0)
 
 
+_FIN_CACHE: dict = {}   # code → 财务文案
+
+
 def finance_block(code: str) -> str:
-    """akshare 财务摘要: 净利增速/毛利率/负债率(临时绕代理, 直连更快)。"""
+    """akshare 财务摘要: 净利增速/毛利率/负债率(临时绕代理, 直连更快)。
+
+    2026-09-23 加进程内缓存: 财务指标按季更新, 与盘中时点无关; 原实现逐候选
+    重复拉 akshare(单次 1~3s, 还要摘挂代理环境变量), 同票每 10 分钟冷却到期
+    又拉一遍 → 纯浪费。失败(空串)也缓存, 避免反复打挂掉的接口。
+    """
+    if code in _FIN_CACHE:
+        return _FIN_CACHE[code]
     saved = {k: os.environ.pop(k) for k in list(os.environ)
              if "proxy" in k.lower()}
     try:
@@ -144,21 +154,24 @@ def finance_block(code: str) -> str:
         df = ak.stock_financial_analysis_indicator(
             symbol=code, start_year=str(datetime.now().year - 1))
         if df is None or len(df) == 0:
-            return ""
-        row = df.iloc[-1]
-        parts = []
-        for col, key in (("净利润增长率(%)", "净利增"), ("销售毛利率(%)", "毛利率"),
-                         ("负债与所有者权益比率(%)", "负债/权益")):
-            v = row.get(col)
-            if v is None or (isinstance(v, float) and np.isnan(v)):
-                parts.append(f"{key} 无")
-            else:
-                parts.append(f"{key} {float(v):.1f}%")
-        return "，".join(parts)
+            res = ""
+        else:
+            row = df.iloc[-1]
+            parts = []
+            for col, key in (("净利润增长率(%)", "净利增"), ("销售毛利率(%)", "毛利率"),
+                             ("负债与所有者权益比率(%)", "负债/权益")):
+                v = row.get(col)
+                if v is None or (isinstance(v, float) and np.isnan(v)):
+                    parts.append(f"{key} 无")
+                else:
+                    parts.append(f"{key} {float(v):.1f}%")
+            res = "，".join(parts)
     except Exception:
-        return ""
+        res = ""
     finally:
         os.environ.update(saved)
+    _FIN_CACHE[code] = res
+    return res
 
 
 # ── 公告/龙虎榜风险证据(2026-09-15 超声电子教训: 公司两次澄清否认核心炒作
@@ -496,6 +509,7 @@ def orderbook_block(api, code: str, thr_pct: float) -> str:
         return ""
 
 
+_CONCEPT_CACHE: dict = {}   # (date, code) → 概念文案(板块归属盘中不变, 当日缓存)
 _MA_CACHE: dict = {}
 
 def ma_block(code: str) -> str:
@@ -608,12 +622,18 @@ def enrich(sig: dict, date: str, api=None, thr_pct: float = 10.0,
                 own.disconnect()
             except Exception:
                 pass
-    cb = _tool("get_concept_blocks")
-    if cb is not None:
-        try:
-            info["concepts"] = str(cb.invoke({"ticker": code}))[:250]
-        except Exception:
-            pass
+    # 概念归属盘中不变 → 按(日, code)缓存; 原实现每次判定都调一次 MCP(秒级耗时)
+    ck = (date, code)
+    if ck in _CONCEPT_CACHE:
+        info["concepts"] = _CONCEPT_CACHE[ck]
+    else:
+        cb = _tool("get_concept_blocks")
+        if cb is not None:
+            try:
+                info["concepts"] = str(cb.invoke({"ticker": code}))[:250]
+                _CONCEPT_CACHE[ck] = info["concepts"]
+            except Exception:
+                pass
     fund_ok = False
     ff = _tool("get_fund_flow")
     if ff is not None:
