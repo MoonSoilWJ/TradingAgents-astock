@@ -41,7 +41,9 @@ T0_CACHE_CRON="10 15"       # 15:10 小池子 1分K/5分K
 T0_CACHE_ALLMARKET_CRON="35 15"  # 15:35 全市场 ~1733 只
 T0_WATCH_CMD="cd ${PROJECT_DIR} && ${PYTHON3} scripts/t0_sell_watch.py"
 CACHE_CMD="cd ${PROJECT_DIR} && ${PYTHON3} scripts/cache_min_data.py >> ${HOME}/.tradingagents/rotation/min_cache.log 2>&1"
-CACHE_ALLMARKET_CMD="cd ${PROJECT_DIR} && ${PYTHON3} scripts/cache_min_data.py --all-market --workers 8 >> ${HOME}/.tradingagents/rotation/min_cache_allmarket.log 2>&1"
+# CACHE_ALLMARKET_CMD 已下线(2026-09-24): min_cache_allmarket 无任何读取方, 每天对新浪 1733 只 ETF 8 线程请求纯浪费(还有限频风险)。
+# 恢复方法: 取消下面一行的注释, 并恢复下方两处 echo 行。
+# CACHE_ALLMARKET_CMD="cd ${PROJECT_DIR} && ${PYTHON3} scripts/cache_min_data.py --all-market --workers 8 >> ${HOME}/.tradingagents/rotation/min_cache_allmarket.log 2>&1"
 WF_CMD="cd ${PROJECT_DIR} && ${PYTHON3} scripts/t0_walk_forward.py >> ${HOME}/.tradingagents/rotation/walk_forward.log 2>&1"
 WF_CRON="0 9 1-7 * 1"   # 每月 1~7 日中的周一 9:00（首个工作日近似）
 
@@ -114,7 +116,8 @@ case "${MODE}" in
             echo "${T0_SELL_WATCH} * * 1-5 ${T0_WATCH_CMD}"
             echo "${T0_SIGNAL_CRON} * * 1-5 ${T0_CMD} --signal"
             echo "${T0_CACHE_CRON} * * 1-5 ${CACHE_CMD}"
-            echo "${T0_CACHE_ALLMARKET_CRON} * * 1-5 ${CACHE_ALLMARKET_CMD}"
+            # 已下线(2026-09-24): min_cache_allmarket 无读取方。恢复需连同上方 CACHE_ALLMARKET_CMD 定义一起取消注释:
+            # echo "${T0_CACHE_ALLMARKET_CRON} * * 1-5 ${CACHE_ALLMARKET_CMD}"
         } | sed '/^$/d' | crontab -
         ;;
     all)
@@ -125,7 +128,8 @@ case "${MODE}" in
             echo "${T0_SELL_WATCH} * * 1-5 ${T0_WATCH_CMD}"
             echo "${T0_SIGNAL_CRON} * * 1-5 ${T0_CMD} --signal"
             echo "${T0_CACHE_CRON} * * 1-5 ${CACHE_CMD}"
-            echo "${T0_CACHE_ALLMARKET_CRON} * * 1-5 ${CACHE_ALLMARKET_CMD}"
+            # 已下线(2026-09-24): min_cache_allmarket 无读取方。恢复需连同上方 CACHE_ALLMARKET_CMD 定义一起取消注释:
+            # echo "${T0_CACHE_ALLMARKET_CRON} * * 1-5 ${CACHE_ALLMARKET_CMD}"
         } | sed '/^$/d' | crontab -
         ;;
     rotation-uninstall)
