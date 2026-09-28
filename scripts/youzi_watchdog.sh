@@ -24,6 +24,17 @@ PAT="youzi_live.py --ai"
 # 不传 --trigger-times: 其 argparse 默认就是 ""(全天), 传空串在 $CMD 展开时会被当字面量 ""
 CMD="$PYTHON scripts/youzi_live.py --ai --min-pct 6 --push-min-pct 6 --min-prob 75 --start-time 09:40"
 
+# ── 节假日 gate(2026-09-28): cron 的 1-5 不认识法定假日, 2026-09-25(中秋,周五)
+# 全天被空转拉起 4 次。非交易日(查本地交易日历缓存)直接退出, 不拉不杀。
+"$PYTHON" "$DIR/scripts/trading_day_gate.py" >/dev/null 2>&1 || exit 0
+
+# ── 午休跳过(2026-09-28): 11:30-13:00 youzi_live 本就不产日志, 1200s 静默判定
+# 会把健康的午休进程当"假活"误杀(9-24 的 11:50/12:15/12:40 三次误杀即此)。
+HM=$(date +%H%M)
+if [ "$HM" -ge 1130 ] && [ "$HM" -lt 1300 ]; then
+    exit 0
+fi
+
 NOW=$(date +%s)
 MT=$(stat -f %m "$LOG" 2>/dev/null || echo 0)
 AGE=$(( NOW - MT ))
