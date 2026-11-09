@@ -860,10 +860,19 @@ def build_r3_strategy() -> dict[str, Any]:
     # R3 无 idle 腿, 全部展示
     events = _read_jsonl(journal_path, skip_idle=False)
     closed = _merge_trades(events)
+    pos = _read_state_position(state_path)
+    # 防御: state 是持仓权威。state 无持仓时, journal 里 buyDate 早于今天的
+    # status=open 记录 = 漏写卖出的僵尸记录(如 2026-09-24 161129 原油LOF),
+    # 不可导出为"持仓中", 否则网页长期显示虚假持仓。
+    if pos is None:
+        _today = date.today().isoformat()
+        closed = [
+            t for t in closed
+            if t.get("status") != "open" or str(t.get("buyDate") or "") >= _today
+        ]
     rets = [float(c["returnPct"]) for c in closed if c.get("returnPct") is not None]
 
     # 检查 state 文件是否有持仓中的交易
-    pos = _read_state_position(state_path)
     open_trade = _build_open_trade_from_state(pos) if pos else None
     if open_trade:
         has_open = any(

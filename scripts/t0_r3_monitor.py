@@ -398,6 +398,14 @@ def run_signal(dry_run: bool = False) -> int:
         return 0
 
     state = load_state()
+    # 防御: 旧仓未平(卖出失败/漏卖)时禁止买入覆盖, 否则旧仓凭空消失、journal 缺卖出
+    # 记录 → 导出成僵尸 open(2026-09-24 161129 事故)。
+    old_pos = state.get("position")
+    if old_pos and not old_pos.get("sold"):
+        print(f"ERROR: 旧仓未平 {old_pos.get('name')}({old_pos.get('etf')}) "
+              f"买入日 {old_pos.get('buy_date')}, 禁止买入覆盖; 请先处理旧仓卖出")
+        return 1
+
     today = date.today().isoformat()
     if state.get("last_signal_date") == today:
         print("今日已记录信号，跳过")
@@ -537,55 +545,66 @@ def run_sell_check(dry_run: bool = False) -> int:
     if not by_day:
         print(f"ERROR: 无法获取 {SELL_BAR_LABEL}")
         return 1
-    bars_today = by_day.get(today, [])
-    if not bars_today:
-        if time_to_min(now_hm) < time_to_min(SELL_CUTOFF):
-            print(f"WARN: 当日 {SELL_BAR_LABEL} 尚未就绪, 下轮重试")
-            return 0
-        print(f"ERROR: 当日 {SELL_BAR_LABEL} 为空且已过卖出截止")
-        return 1
 
     q = fetch_tencent_quotes([etf]).get(etf, {})
     cur = q.get("price", 0)
     float_ret = (cur - buy_price) / buy_price * 100 if cur and buy_price else 0
 
-    # TRIX 卖点: TRIX(5,3)死叉; 09:40~11:05 内未触发则 11:05 收盘 fallback 平仓
-    # (对齐回测 simulate_exit("trix0940_cut"))
-    # 第2返回值 = 死叉当根5min收盘价 = 回测 simulate_trix_cross_after 成交口径(理论价)
-    hit_trix, theory_dc_price, trix_time_str, _ = trix_death_cross_hit(
-        buy_price, by_day.get(buy_date, []), bars_today, now_hm,
-    )
-    trix_hm = ""
-    if hit_trix:
-        trix_hm = trix_time_str.split(" ")[-1][:5] if " " in trix_time_str else trix_time_str[:5]
-
-    if hit_trix:
-        sell_hm = trix_hm
-        prices = resolve_exec_prices(sym, bars_today, sell_hm, cur)
-        sell_price = prices["primary"]
-        ret_num = (sell_price - buy_price) / buy_price * 100 - 0.02
-        reason = "trix_death_cross"
-        theory_price = theory_dc_price
-        theory_src = "trix_dc_5m_close"
-    elif now_hm >= SELL_CUTOFF:
-        # 11:05 收盘 fallback: 窗口内无死叉则收盘平
+    bars_today = by_day.get(today, [])
+    if not bars_today:
+        if time_to_min(now_hm) < time_to_min(SELL_CUTOFF):
+            print(f"WARN: 当日 {SELL_BAR_LABEL} 尚未就绪, 下轮重试")
+            return 0
+        # 已过截止仍无当日5分K → 实时价强制兜底平仓, 避免卖出失败后旧仓被次日买入覆盖
+        if not cur or cur <= 0:
+            print(f"ERROR: 当日 {SELL_BAR_LABEL} 为空且实时价不可用, 无法兜底")
+            return 1
+        print(f"WARN: 当日 {SELL_BAR_LABEL} 为空且已过卖出截止 → 实时价 {cur:.4f} 兜底平仓")
         sell_hm = SELL_CUTOFF
-        prices = resolve_exec_prices(sym, bars_today, sell_hm, cur)
-        sell_price = prices["primary"]
+        sell_price = float(cur)
         ret_num = (sell_price - buy_price) / buy_price * 100 - 0.02
-        reason = f"trix_time_sell_{SELL_CUTOFF.replace(':', '')}"
-        # 理论价 = 截止时刻最近已完成5minK收盘(回测 window[-1].close 的实时近似)
-        theory_price = prices.get("px_5m") or sell_price
-        theory_src = "time_sell_5m_close"
+        reason = "time_sell_live_fallback"
+        theory_price = sell_price
+        theory_src = "live_no_5m"
+        actual_src = "live"
     else:
-        print(f"TRIX 未触发, 浮盈 {float_ret:+.2f}% [SHADOW 继续持有]")
-        return 0
+        # TRIX 卖点: TRIX(5,3)死叉; 09:40~11:05 内未触发则 11:05 收盘 fallback 平仓
+        # (对齐回测 simulate_exit("trix0940_cut"))
+        # 第2返回值 = 死叉当根5min收盘价 = 回测 simulate_trix_cross_after 成交口径(理论价)
+        hit_trix, theory_dc_price, trix_time_str, _ = trix_death_cross_hit(
+            buy_price, by_day.get(buy_date, []), bars_today, now_hm,
+        )
+        trix_hm = ""
+        if hit_trix:
+            trix_hm = trix_time_str.split(" ")[-1][:5] if " " in trix_time_str else trix_time_str[:5]
+
+        if hit_trix:
+            sell_hm = trix_hm
+            prices = resolve_exec_prices(sym, bars_today, sell_hm, cur)
+            sell_price = prices["primary"]
+            ret_num = (sell_price - buy_price) / buy_price * 100 - 0.02
+            reason = "trix_death_cross"
+            theory_price = theory_dc_price
+            theory_src = "trix_dc_5m_close"
+        elif now_hm >= SELL_CUTOFF:
+            # 11:05 收盘 fallback: 窗口内无死叉则收盘平
+            sell_hm = SELL_CUTOFF
+            prices = resolve_exec_prices(sym, bars_today, sell_hm, cur)
+            sell_price = prices["primary"]
+            ret_num = (sell_price - buy_price) / buy_price * 100 - 0.02
+            reason = f"trix_time_sell_{SELL_CUTOFF.replace(':', '')}"
+            # 理论价 = 截止时刻最近已完成5minK收盘(回测 window[-1].close 的实时近似)
+            theory_price = prices.get("px_5m") or sell_price
+            theory_src = "time_sell_5m_close"
+        else:
+            print(f"TRIX 未触发, 浮盈 {float_ret:+.2f}% [SHADOW 继续持有]")
+            return 0
+        actual_src = prices.get("source", "")
 
     ret_num = round(ret_num, 4)
     # 理论价(回测口径) vs 实际价(1min/实时), 量化滑点
     theory_ret = round((theory_price - buy_price) / buy_price * 100 - 0.02, 4)
     slippage_pp = round(ret_num - theory_ret, 4)
-    actual_src = prices.get("source", "")
     print(f">>> 卖出触发 @{sell_hm} 实际价 {sell_price:.4f}({actual_src}) 收益 {ret_num:+.2f}% | "
           f"理论价 {theory_price:.4f}({theory_src}) 收益 {theory_ret:+.2f}% | 滑点 {slippage_pp:+.2f}pp [SHADOW]")
     pos["sold"] = True
