@@ -73,8 +73,10 @@ def main() -> int:
     ap.add_argument("--top", type=int, default=15)
     ap.add_argument("--min-vol", type=float, default=60.0, help="年化波动率下限(%%), 默认60")
     ap.add_argument("--min-ret", type=float, default=30.0, help="近1年涨幅下限(%%), 默认30")
-    ap.add_argument("--min-wave", type=int, default=0, help="当前持仓段波长下限(交易日), 趋势确认建议5")
-    ap.add_argument("--max-dd", type=float, default=-40.0, help="回撤下限(%%), 默认-40")
+    ap.add_argument("--min-wave", type=int, default=2,
+                    help="当前持仓段已持续天数下限(1=触发当天), 默认2=x>=2 (数据: x=1平均最高, x=2中位略好, 5+明显损失收益)")
+    ap.add_argument("--max-dd", type=float, default=-40.0,
+                    help="策略回撤下限(%%)默认-40 (策略净值回撤, 非股价回撤)")
     ap.add_argument("--no-live", action="store_true", help="不补今日盘中价")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = ap.parse_args()
@@ -114,10 +116,12 @@ def main() -> int:
             if pos[i] == 0:
                 entry = i + 1
                 break
+        # 波长=当前持仓段已持续天数(1-based, 触发当天=1, 与回测 x 对齐)
+        wave = len(pos) - entry if pos[-1] == 1 else 0
         rows.append((
             code, round((c1[-1] / c1[0] - 1) * 100, 1), round(total * 100, 1),
             round(mdd * 100, 1), round(float(np.std(r) * np.sqrt(252) * 100), 1),
-            round(float(frac[-1]), 2), len(pos) - 1 - entry,
+            round(float(frac[-1]), 2), wave,
         ))
 
     df = pd.DataFrame(rows, columns=["code", "ret1y", "strat", "mdd", "vol", "frac", "wave"])
